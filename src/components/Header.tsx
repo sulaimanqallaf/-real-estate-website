@@ -60,7 +60,7 @@ export function Header() {
             type="button"
             onClick={toggleLocale}
             className="rounded-full border border-copper/50 px-3.5 py-1.5 text-xs font-semibold text-cream transition-colors hover:bg-copper/10 sm:text-sm"
-            aria-label="Toggle language"
+            aria-label={t(nav.toggleLanguage, locale)}
           >
             {locale === "ar" ? "EN" : "عربي"}
           </button>
@@ -68,7 +68,7 @@ export function Header() {
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
             className="rounded-md p-1.5 text-cream md:hidden"
-            aria-label="Toggle menu"
+            aria-label={t(nav.toggleMenu, locale)}
             aria-expanded={menuOpen}
           >
             {menuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}

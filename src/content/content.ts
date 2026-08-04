@@ -28,6 +28,8 @@ export const nav = {
   about: { ar: "من نحن", en: "About Us" } satisfies Bilingual,
   projects: { ar: "المشاريع", en: "Projects" } satisfies Bilingual,
   contact: { ar: "تواصل معنا", en: "Contact" } satisfies Bilingual,
+  toggleLanguage: { ar: "تبديل اللغة", en: "Toggle language" } satisfies Bilingual,
+  toggleMenu: { ar: "تبديل القائمة", en: "Toggle menu" } satisfies Bilingual,
 };
 
 export const hero = {
@@ -342,6 +344,10 @@ export const footer = {
   contactHeading: { ar: "تواصل معنا", en: "Contact Us" } satisfies Bilingual,
   profileAr: { ar: "الملف التعريفي (عربي)", en: "Company Profile (Arabic)" } satisfies Bilingual,
   profileEn: { ar: "الملف التعريفي (إنجليزي)", en: "Company Profile (English)" } satisfies Bilingual,
+  profileNotReady: {
+    ar: "سيتم إضافته قريبًا",
+    en: "Coming soon",
+  } satisfies Bilingual,
   rights: {
     ar: "جميع الحقوق محفوظة",
     en: "All rights reserved",

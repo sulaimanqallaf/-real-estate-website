@@ -90,6 +90,13 @@ input[type="range"] {
   background: linear-gradient(90deg, #3d4a3a 0%, #c9a15a 100%);
   outline: none;
 }
+/* Native range inputs mirror min/max sides under dir="rtl" (the thumb's
+   minimum moves to the physical right), but a CSS gradient never mirrors
+   on its own — flip the stops so the track still reads low-to-high in the
+   same direction the thumb actually travels. */
+[dir="rtl"] input[type="range"] {
+  background: linear-gradient(90deg, #c9a15a 0%, #3d4a3a 100%);
+}
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;

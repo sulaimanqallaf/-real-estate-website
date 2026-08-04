@@ -95,20 +95,24 @@ export function Footer() {
           </ul>
 
           <div className="mt-7 flex flex-wrap gap-4">
-            <a
-              href="#"
-              className="flex items-center gap-2 text-sm text-cream/70 underline-offset-4 transition-colors hover:text-copper-end hover:underline"
+            {/* PDF profile links aren't live yet — rendered inert (not a
+                real "#" anchor) so they don't fake a click action. */}
+            <span
+              className="flex cursor-not-allowed items-center gap-2 text-sm text-cream/40"
+              title={t(footer.profileNotReady, locale)}
+              aria-disabled="true"
             >
               <FileText className="h-4 w-4" />
               {t(footer.profileAr, locale)}
-            </a>
-            <a
-              href="#"
-              className="flex items-center gap-2 text-sm text-cream/70 underline-offset-4 transition-colors hover:text-copper-end hover:underline"
+            </span>
+            <span
+              className="flex cursor-not-allowed items-center gap-2 text-sm text-cream/40"
+              title={t(footer.profileNotReady, locale)}
+              aria-disabled="true"
             >
               <FileText className="h-4 w-4" />
               {t(footer.profileEn, locale)}
-            </a>
+            </span>
           </div>
 
           <div className="mt-7 flex gap-3">

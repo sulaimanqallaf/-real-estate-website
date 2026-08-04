@@ -1,6 +1,8 @@
 # Altiva Real Estate — Marketing Website
 
-Bilingual (Arabic RTL / English LTR) marketing site for Altiva Real Estate, built with Next.js 14 (App Router), TypeScript, Tailwind CSS, and Framer Motion. Configured for static export (`output: "export"`) so it can be deployed on Vercel or any static host.
+Bilingual (Arabic RTL / English LTR) marketing site for Altiva Real Estate, built with Next.js 14 (App Router), TypeScript, Tailwind CSS, and Framer Motion. Configured for static export (`output: "export"`) so it can be deployed on Vercel, GitHub Pages, or any static host.
+
+**Live:** https://sulaimanqallaf.github.io/-real-estate-website/ (auto-deployed via `.github/workflows/deploy-pages.yml` on every push to `main`)
 
 ## Development
 
@@ -15,7 +17,17 @@ npm run dev
 npm run build
 ```
 
-Static files are emitted to `out/`.
+Static files are emitted to `out/`. Set `GITHUB_PAGES=true` to build with the `/-real-estate-website` base path the Pages deployment needs (see `next.config.mjs`); leave it unset for local preview or a Vercel/root-domain deploy.
+
+## Branded assets (favicon, apple touch icon, OG image)
+
+Pre-rendered PNGs in `public/` (`favicon.png`, `apple-icon.png`, `og-image.png`), generated from `scripts/gen-images.mjs` using `next/og`'s `ImageResponse`. Re-run it whenever the brand mark or OG copy changes:
+
+```bash
+node scripts/gen-images.mjs
+```
+
+Static files rather than Next's `icon.tsx`/`opengraph-image.tsx` route convention on purpose — those export without a file extension, which plain static hosts like GitHub Pages don't reliably serve with the right content-type.
 
 ## Content
 

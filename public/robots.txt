@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://sulaimanqallaf.github.io/-real-estate-website/sitemap.xml
