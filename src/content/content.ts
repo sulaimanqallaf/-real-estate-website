@@ -100,8 +100,8 @@ export const projects = {
     en: "Selected Investment Opportunities",
   } satisfies Bilingual,
   subheading: {
-    ar: "مشاريع مدروسة بعناية في أفضل مناطق دبي ورأس الخيمة",
-    en: "Carefully studied projects in Dubai and Ras Al Khaimah's finest areas",
+    ar: "مشاريع مدروسة بعناية في جميع مناطق الدولة وليدز",
+    en: "Carefully studied projects across the country and Leeds",
   } satisfies Bilingual,
   comingSoon: { ar: "قريبًا", en: "Coming Soon" } satisfies Bilingual,
   viewAll: { ar: "عرض جميع الفرص", en: "View All Opportunities" } satisfies Bilingual,
