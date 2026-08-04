@@ -15,7 +15,13 @@ const STEP = 5000;
 export function Calculator() {
   const { locale } = useLanguage();
   const [amount, setAmount] = useState(200000);
+  const [amountFocused, setAmountFocused] = useState(false);
   const [propertyId, setPropertyId] = useState(calculator.propertyTypes[0].id);
+
+  const handleAmountInput = (raw: string) => {
+    const digits = raw.replace(/\D/g, "").slice(0, 9);
+    setAmount(digits === "" ? 0 : Number(digits));
+  };
 
   const property =
     calculator.propertyTypes.find((p) => p.id === propertyId) ??
@@ -40,8 +46,27 @@ export function Calculator() {
               <div>
                 <label className="flex items-center justify-between text-sm font-semibold text-navy">
                   <span>{t(calculator.amountLabel, locale)}</span>
-                  <span className="font-display-heading text-lg text-copper-start">
-                    {amount.toLocaleString("en-US")}
+                  <span className="flex items-center gap-1 rounded-md border border-navy/15 bg-white px-2 py-1 transition-colors focus-within:border-copper">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      dir="ltr"
+                      value={
+                        amountFocused
+                          ? amount === 0
+                            ? ""
+                            : String(amount)
+                          : amount.toLocaleString("en-US")
+                      }
+                      onFocus={() => setAmountFocused(true)}
+                      onBlur={() => setAmountFocused(false)}
+                      onChange={(e) => handleAmountInput(e.target.value)}
+                      aria-label={t(calculator.amountLabel, locale)}
+                      className="w-24 bg-transparent text-end font-display-heading text-lg text-copper-start outline-none sm:w-28"
+                    />
+                    <span className="text-xs text-navy/40">
+                      {locale === "ar" ? "د.ك" : "KWD"}
+                    </span>
                   </span>
                 </label>
                 <input
