@@ -2,7 +2,7 @@
 
 Bilingual (Arabic RTL / English LTR) marketing site for Altiva Real Estate, built with Next.js 14 (App Router), TypeScript, Tailwind CSS, and Framer Motion. Configured for static export (`output: "export"`) so it can be deployed on Vercel, GitHub Pages, or any static host.
 
-**Live:** https://sulaimanqallaf.github.io/-real-estate-website/ (auto-deployed via `.github/workflows/deploy-pages.yml` on every push to `main`)
+**Live:** https://altivaproperties.com (custom domain via GitHub Pages — `public/CNAME` — auto-deployed via `.github/workflows/deploy-pages.yml` on every push to `main`)
 
 ## Development
 
@@ -17,7 +17,7 @@ npm run dev
 npm run build
 ```
 
-Static files are emitted to `out/`. Set `GITHUB_PAGES=true` to build with the `/-real-estate-website` base path the Pages deployment needs (see `next.config.mjs`); leave it unset for local preview or a Vercel/root-domain deploy.
+Static files are emitted to `out/`. No base path config needed — the site is served from the custom domain's root by every host (local preview, Vercel, and GitHub Pages via `public/CNAME`) alike.
 
 ## Branded assets (favicon, apple touch icon, OG image)
 

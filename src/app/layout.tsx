@@ -3,18 +3,13 @@ import { arabicBody, arabicDisplay, displaySerif, inter } from "@/lib/fonts";
 import { LanguageProvider } from "@/context/LanguageContext";
 import "./globals.css";
 
-// metadataBase is the bare origin — basePath is included explicitly in
-// every path below, since Next's metadata resolver doesn't apply
-// next.config's basePath to plain public/ asset references on its own.
-const origin = "https://sulaimanqallaf.github.io";
-const basePath = "/-real-estate-website";
-const siteUrl = `${origin}${basePath}`;
+const siteUrl = "https://altivaproperties.com";
 const title = "Altiva Real Estate | ألتيفا العقارية";
 const description =
   "Altiva Real Estate connects Kuwaiti investors with the finest real estate opportunities in Dubai. | ألتيفا العقارية تربط المستثمرين الكويتيين بأفضل الفرص العقارية في دبي.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL(origin),
+  metadataBase: new URL(siteUrl),
   title,
   description,
   keywords: [
@@ -25,8 +20,8 @@ export const metadata: Metadata = {
     "استثمار عقاري دبي",
   ],
   icons: {
-    icon: `${basePath}/favicon.png`,
-    apple: `${basePath}/apple-icon.png`,
+    icon: "/favicon.png",
+    apple: "/apple-icon.png",
   },
   openGraph: {
     title,
