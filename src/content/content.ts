@@ -12,7 +12,7 @@ export const siteInfo = {
     ar: "مجمع الصالحية – شارع محمد ثنيان الغانم، الكويت",
     en: "Salhia Complex – Mohammad Thunayyan Al Ghanem St, Kuwait",
   } satisfies Bilingual,
-  instagram: "https://instagram.com",
+  instagram: "https://www.instagram.com/altiva_properties?igsh=MWI1a2pyYXRscWh3Yg==",
   facebook: "https://facebook.com",
 };
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { Menu, X } from "lucide-react";
 import { useLanguage } from "@/context/LanguageContext";
 import { nav, siteInfo } from "@/content/content";
@@ -34,12 +35,22 @@ export function Header() {
       }`}
     >
       <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-        <a href="#home" className="flex items-baseline gap-2">
-          <span className="copper-text font-display-heading text-xl font-bold tracking-wide sm:text-2xl">
-            {siteInfo.logoText}
-          </span>
-          <span className="hidden text-xs font-medium text-cream/60 sm:inline">
-            {t(siteInfo.logoSubtext, locale)}
+        <a href="#home" className="flex items-center gap-2.5">
+          <Image
+            src="/brand/altiva-icon.png"
+            alt=""
+            width={31}
+            height={40}
+            className="h-8 w-auto"
+            priority
+          />
+          <span className="flex items-baseline gap-2">
+            <span className="copper-text font-display-heading text-xl font-bold tracking-wide sm:text-2xl">
+              {siteInfo.logoText}
+            </span>
+            <span className="hidden text-xs font-medium text-cream/60 sm:inline">
+              {t(siteInfo.logoSubtext, locale)}
+            </span>
           </span>
         </a>
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { FileText, Mail, MapPin, Phone } from "lucide-react";
+import Image from "next/image";
 import { useLanguage } from "@/context/LanguageContext";
 import { footer, siteInfo, whatsappLink } from "@/content/content";
 import { t } from "@/lib/i18n";
@@ -46,12 +47,21 @@ export function Footer() {
     <footer id="contact" className="border-t border-copper/10 bg-navy-deep text-cream">
       <div className="mx-auto grid max-w-6xl grid-cols-1 gap-12 px-5 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr]">
         <div>
-          <div className="flex items-baseline gap-2">
-            <span className="copper-text font-display-heading text-xl font-bold tracking-wide">
-              {siteInfo.logoText}
-            </span>
-            <span className="text-xs font-medium text-copper-end">
-              {t(siteInfo.logoSubtext, locale)}
+          <div className="flex items-center gap-2.5">
+            <Image
+              src="/brand/altiva-icon.png"
+              alt=""
+              width={31}
+              height={40}
+              className="h-8 w-auto"
+            />
+            <span className="flex items-baseline gap-2">
+              <span className="copper-text font-display-heading text-xl font-bold tracking-wide">
+                {siteInfo.logoText}
+              </span>
+              <span className="text-xs font-medium text-copper-end">
+                {t(siteInfo.logoSubtext, locale)}
+              </span>
             </span>
           </div>
           <h3 className="mt-6 font-display-heading text-lg font-semibold">
