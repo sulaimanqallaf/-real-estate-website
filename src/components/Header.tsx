@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import { Menu, X } from "lucide-react";
 import { useLanguage } from "@/context/LanguageContext";
 import { nav, siteInfo } from "@/content/content";
 import { t } from "@/lib/i18n";
+import { withBasePath } from "@/lib/basePath";
 
 const links = [
   { href: "#home", label: nav.home },
@@ -36,13 +36,15 @@ export function Header() {
     >
       <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
         <a href="#home" className="flex items-center gap-2.5">
-          <Image
-            src="/brand/altiva-icon.png"
+          {/* eslint-disable-next-line @next/next/no-img-element -- static
+              export + unoptimized:true means next/image buys nothing here,
+              and it was silently dropping the GitHub Pages base path */}
+          <img
+            src={withBasePath("/brand/altiva-icon.png")}
             alt=""
             width={31}
             height={40}
             className="h-8 w-auto"
-            priority
           />
           <span className="flex items-baseline gap-2">
             <span className="copper-text font-display-heading text-xl font-bold tracking-wide sm:text-2xl">

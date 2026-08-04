@@ -1,10 +1,10 @@
 "use client";
 
 import { FileText, Mail, MapPin, Phone } from "lucide-react";
-import Image from "next/image";
 import { useLanguage } from "@/context/LanguageContext";
 import { footer, siteInfo, whatsappLink } from "@/content/content";
 import { t } from "@/lib/i18n";
+import { withBasePath } from "@/lib/basePath";
 import { KuwaitTowersPlaceholder } from "./Placeholder";
 
 function WhatsappGlyph({ className }: { className?: string }) {
@@ -48,8 +48,12 @@ export function Footer() {
       <div className="mx-auto grid max-w-6xl grid-cols-1 gap-12 px-5 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr]">
         <div>
           <div className="flex items-center gap-2.5">
-            <Image
-              src="/brand/altiva-icon.png"
+            {/* eslint-disable-next-line @next/next/no-img-element -- static
+                export + unoptimized:true means next/image buys nothing
+                here, and it was silently dropping the GitHub Pages base
+                path */}
+            <img
+              src={withBasePath("/brand/altiva-icon.png")}
               alt=""
               width={31}
               height={40}

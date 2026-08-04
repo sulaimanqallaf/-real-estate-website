@@ -10,6 +10,15 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  // `env` values get statically inlined at build time into every bundle —
+  // server-rendered HTML and the client bundle read the same baked-in
+  // string, so there's no risk of a hydration mismatch the way a runtime
+  // process.env read in a "use client" component would have. next/image's
+  // own basePath handling doesn't reliably kick in with unoptimized:true,
+  // so components that reference public/ assets read this directly.
+  env: {
+    NEXT_PUBLIC_BASE_PATH: isGithubPages ? basePath : "",
+  },
   ...(isGithubPages && {
     basePath,
     assetPrefix: basePath,
