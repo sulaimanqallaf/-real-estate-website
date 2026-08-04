@@ -3,16 +3,25 @@
 import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { useLanguage } from "@/context/LanguageContext";
-import { nav, siteInfo } from "@/content/content";
+import { consultation, nav, siteInfo } from "@/content/content";
 import { t } from "@/lib/i18n";
 import { withBasePath } from "@/lib/basePath";
 
+// Home-page-relative so these still work when clicked from a different
+// route (e.g. /consultation) — a bare "#home" would just look for that id
+// on whatever page it's clicked from and silently do nothing.
+const home = withBasePath("/");
 const links = [
-  { href: "#home", label: nav.home },
-  { href: "#about", label: nav.about },
-  { href: "#projects", label: nav.projects },
-  { href: "#contact", label: nav.contact },
+  { href: `${home}#home`, label: nav.home },
+  { href: `${home}#about`, label: nav.about },
+  { href: `${home}#projects`, label: nav.projects },
+  { href: `${home}#contact`, label: nav.contact },
 ];
+// Next's static export writes this route to consultation.html (no
+// trailing-slash directory form), so link to it without one — GitHub
+// Pages does resolve extensionless "/consultation" to that file, but
+// matching the real filename exactly avoids relying on that.
+const consultationHref = withBasePath("/consultation");
 
 export function Header() {
   const { locale, toggleLocale } = useLanguage();
@@ -35,7 +44,7 @@ export function Header() {
       }`}
     >
       <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-        <a href="#home" className="flex items-center gap-2.5">
+        <a href={home + "#home"} className="flex items-center gap-2.5">
           {/* eslint-disable-next-line @next/next/no-img-element -- static
               export + unoptimized:true means next/image buys nothing here,
               and it was silently dropping the GitHub Pages base path */}
@@ -70,6 +79,12 @@ export function Header() {
         </nav>
 
         <div className="flex items-center gap-3">
+          <a
+            href={consultationHref}
+            className="btn-shine hidden rounded-full bg-copper-gradient bg-[length:200%_100%] px-4 py-1.5 text-xs font-semibold text-navy-deep shadow-gold transition-transform duration-200 hover:scale-[1.03] sm:inline-block sm:text-sm"
+          >
+            {t(consultation.navLabel, locale)}
+          </a>
           <button
             type="button"
             onClick={toggleLocale}
@@ -102,6 +117,13 @@ export function Header() {
               {t(link.label, locale)}
             </a>
           ))}
+          <a
+            href={consultationHref}
+            onClick={() => setMenuOpen(false)}
+            className="mt-1 rounded-md bg-copper-gradient px-2 py-2.5 text-center text-sm font-semibold text-navy-deep"
+          >
+            {t(consultation.navLabel, locale)}
+          </a>
         </nav>
       )}
     </header>

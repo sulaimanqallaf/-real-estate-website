@@ -353,3 +353,193 @@ export const footer = {
     en: "All rights reserved",
   } satisfies Bilingual,
 };
+
+export type FieldOption = { id: string; label: Bilingual };
+
+export const consultation = {
+  navLabel: { ar: "احجز استشارة", en: "Book a Consultation" } satisfies Bilingual,
+  pageTitle: {
+    ar: "طلب استشارة عقارية",
+    en: "Request a Real Estate Consultation",
+  } satisfies Bilingual,
+  pageIntro: {
+    ar: "عبّي البيانات وفريقنا بيتواصل معك بأقرب وقت لمناقشة التفاصيل.",
+    en: "Fill in your details and our team will reach out shortly to discuss the specifics.",
+  } satisfies Bilingual,
+  requiredTag: { ar: "إجباري", en: "Required" } satisfies Bilingual,
+  optionalTag: { ar: "اختياري", en: "Optional" } satisfies Bilingual,
+  requiredError: { ar: "هذا الحقل مطلوب", en: "This field is required" } satisfies Bilingual,
+  submit: { ar: "إرسال الطلب عبر واتساب", en: "Send Request via WhatsApp" } satisfies Bilingual,
+  submitNote: {
+    ar: "بالضغط على الزر بيفتح واتساب مع رسالة معبأة ببياناتك.",
+    en: "Tapping the button opens WhatsApp with your details pre-filled.",
+  } satisfies Bilingual,
+
+  fullName: {
+    label: { ar: "الاسم الكامل", en: "Full Name" } satisfies Bilingual,
+    placeholder: { ar: "اسمك الكامل", en: "Your full name" } satisfies Bilingual,
+  },
+  phone: {
+    label: {
+      ar: "رقم الهاتف مع مفتاح الدولة",
+      en: "Phone Number (with country code)",
+    } satisfies Bilingual,
+    placeholder: { ar: "+965 XXXXXXXX", en: "+965 XXXXXXXX" } satisfies Bilingual,
+  },
+  email: {
+    label: { ar: "البريد الإلكتروني", en: "Email" } satisfies Bilingual,
+    placeholder: { ar: "example@email.com", en: "example@email.com" } satisfies Bilingual,
+  },
+  serviceType: {
+    label: { ar: "نوع الخدمة المطلوبة", en: "Service Needed" } satisfies Bilingual,
+    options: [
+      { id: "buy-invest", label: { ar: "شراء للاستثمار", en: "Buy for Investment" } },
+      { id: "buy-live", label: { ar: "شراء للسكن", en: "Buy for Residence" } },
+      { id: "sell", label: { ar: "بيع عقار", en: "Sell a Property" } },
+      { id: "manage", label: { ar: "إدارة عقار", en: "Property Management" } },
+      {
+        id: "paperwork",
+        label: { ar: "تخليص إجراءات عقارية", en: "Complete Real Estate Procedures" },
+      },
+      { id: "consult", label: { ar: "استشارة عقارية", en: "Real Estate Consultation" } },
+    ] satisfies FieldOption[],
+  },
+  location: {
+    label: {
+      ar: "الإمارة المطلوبة أو موقع العقار",
+      en: "Desired Emirate / Property Location",
+    } satisfies Bilingual,
+    options: [
+      { id: "dubai", label: { ar: "دبي", en: "Dubai" } },
+      { id: "rak", label: { ar: "رأس الخيمة", en: "Ras Al Khaimah" } },
+      { id: "abu-dhabi", label: { ar: "أبوظبي", en: "Abu Dhabi" } },
+      { id: "sharjah", label: { ar: "الشارقة", en: "Sharjah" } },
+      { id: "ajman", label: { ar: "عجمان", en: "Ajman" } },
+      { id: "uaq", label: { ar: "أم القيوين", en: "Umm Al Quwain" } },
+      { id: "fujairah", label: { ar: "الفجيرة", en: "Fujairah" } },
+      { id: "kuwait", label: { ar: "الكويت", en: "Kuwait" } },
+      { id: "unspecified", label: { ar: "غير محدد", en: "Not Specified" } },
+    ] satisfies FieldOption[],
+  },
+  budget: {
+    label: { ar: "الميزانية التقريبية", en: "Approximate Budget" } satisfies Bilingual,
+    options: [
+      {
+        id: "under-1m",
+        label: { ar: "أقل من مليون درهم", en: "Less than AED 1 Million" },
+      },
+      {
+        id: "1m-2m",
+        label: { ar: "من مليون إلى مليوني درهم", en: "AED 1–2 Million" },
+      },
+      {
+        id: "2m-5m",
+        label: { ar: "من مليونين إلى 5 ملايين درهم", en: "AED 2–5 Million" },
+      },
+      {
+        id: "over-5m",
+        label: { ar: "أكثر من 5 ملايين درهم", en: "More than AED 5 Million" },
+      },
+      {
+        id: "undecided",
+        label: { ar: "لم أحدد الميزانية بعد", en: "Haven't Decided Yet" },
+      },
+    ] satisfies FieldOption[],
+  },
+  timeline: {
+    label: { ar: "موعد اتخاذ القرار", en: "Decision Timeline" } satisfies Bilingual,
+    options: [
+      { id: "now", label: { ar: "فورًا", en: "Immediately" } },
+      { id: "1-month", label: { ar: "خلال شهر", en: "Within a Month" } },
+      { id: "3-months", label: { ar: "خلال 3 أشهر", en: "Within 3 Months" } },
+      { id: "6-months", label: { ar: "خلال 6 أشهر", en: "Within 6 Months" } },
+      {
+        id: "exploring",
+        label: { ar: "أستكشف الخيارات حاليًا", en: "Currently Exploring Options" },
+      },
+    ] satisfies FieldOption[],
+  },
+  contactMethod: {
+    label: {
+      ar: "وسيلة التواصل المفضلة",
+      en: "Preferred Contact Method",
+    } satisfies Bilingual,
+    options: [
+      { id: "whatsapp", label: { ar: "واتساب", en: "WhatsApp" } },
+      { id: "call", label: { ar: "اتصال هاتفي", en: "Phone Call" } },
+      { id: "email", label: { ar: "بريد إلكتروني", en: "Email" } },
+    ] satisfies FieldOption[],
+  },
+  notes: {
+    label: { ar: "ملاحظات إضافية", en: "Additional Notes" } satisfies Bilingual,
+    placeholder: {
+      ar: "أي تفاصيل إضافية تحب تشاركها معنا...",
+      en: "Any additional details you'd like to share...",
+    } satisfies Bilingual,
+  },
+};
+
+export type ConsultationFormData = {
+  fullName: string;
+  phone: string;
+  email: string;
+  serviceType: string;
+  location: string;
+  budget: string;
+  timeline: string;
+  contactMethod: string;
+  notes: string;
+};
+
+function findLabel(options: FieldOption[], id: string, locale: "ar" | "en") {
+  return options.find((o) => o.id === id)?.label[locale] ?? "";
+}
+
+function buildMessage(data: ConsultationFormData, locale: "ar" | "en") {
+  const lines =
+    locale === "ar"
+      ? [
+          "مرحبًا، أرغب بطلب استشارة عقارية.",
+          `الاسم: ${data.fullName}`,
+          `الهاتف: ${data.phone}`,
+          data.email && `البريد الإلكتروني: ${data.email}`,
+          `نوع الخدمة: ${findLabel(consultation.serviceType.options, data.serviceType, locale)}`,
+          `الموقع المطلوب: ${findLabel(consultation.location.options, data.location, locale)}`,
+          data.budget &&
+            `الميزانية: ${findLabel(consultation.budget.options, data.budget, locale)}`,
+          data.timeline &&
+            `موعد اتخاذ القرار: ${findLabel(consultation.timeline.options, data.timeline, locale)}`,
+          `وسيلة التواصل المفضلة: ${findLabel(
+            consultation.contactMethod.options,
+            data.contactMethod,
+            locale
+          )}`,
+          data.notes && `ملاحظات: ${data.notes}`,
+        ]
+      : [
+          "Hello, I'd like to request a real estate consultation.",
+          `Name: ${data.fullName}`,
+          `Phone: ${data.phone}`,
+          data.email && `Email: ${data.email}`,
+          `Service needed: ${findLabel(consultation.serviceType.options, data.serviceType, locale)}`,
+          `Desired location: ${findLabel(consultation.location.options, data.location, locale)}`,
+          data.budget && `Budget: ${findLabel(consultation.budget.options, data.budget, locale)}`,
+          data.timeline &&
+            `Decision timeline: ${findLabel(consultation.timeline.options, data.timeline, locale)}`,
+          `Preferred contact method: ${findLabel(
+            consultation.contactMethod.options,
+            data.contactMethod,
+            locale
+          )}`,
+          data.notes && `Notes: ${data.notes}`,
+        ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
+export function consultationMessage(data: ConsultationFormData): Bilingual {
+  return {
+    ar: buildMessage(data, "ar"),
+    en: buildMessage(data, "en"),
+  };
+}
