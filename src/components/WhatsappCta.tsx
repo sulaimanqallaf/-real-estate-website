@@ -13,11 +13,11 @@ export function WhatsappCta({
   className?: string;
 }) {
   const base =
-    "inline-flex items-center gap-2.5 rounded-full px-6 py-3.5 text-sm font-semibold transition-transform duration-200 hover:scale-[1.02] focus-visible:scale-[1.02] sm:text-base";
+    "inline-flex items-center gap-2.5 rounded-full px-6 py-3.5 text-sm font-semibold transition-all duration-200 hover:scale-[1.02] hover:shadow-gold-lg focus-visible:scale-[1.02] sm:text-base";
   const styles =
     variant === "solid"
-      ? "bg-copper-gradient text-navy-deep shadow-lg shadow-copper/20"
-      : "border border-copper/60 text-cream hover:bg-copper/10";
+      ? "btn-shine bg-copper-gradient bg-[length:200%_100%] text-navy-deep shadow-gold"
+      : "border border-copper/60 text-cream hover:border-copper hover:bg-copper/10";
 
   return (
     <a

@@ -29,16 +29,16 @@ export function Header() {
     <header
       className={`fixed inset-x-0 top-0 z-50 transition-colors duration-300 ${
         scrolled
-          ? "bg-navy-deep/90 backdrop-blur-md shadow-md shadow-black/20"
-          : "bg-transparent"
+          ? "border-b border-copper/10 bg-navy-deep/90 shadow-md shadow-black/20 backdrop-blur-md"
+          : "border-b border-transparent bg-transparent"
       }`}
     >
       <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
         <a href="#home" className="flex items-baseline gap-2">
-          <span className="font-display-heading text-xl font-bold tracking-wide text-cream sm:text-2xl">
+          <span className="copper-text font-display-heading text-xl font-bold tracking-wide sm:text-2xl">
             {siteInfo.logoText}
           </span>
-          <span className="hidden text-xs font-medium text-copper-end sm:inline">
+          <span className="hidden text-xs font-medium text-cream/60 sm:inline">
             {t(siteInfo.logoSubtext, locale)}
           </span>
         </a>
@@ -48,9 +48,10 @@ export function Header() {
             <a
               key={link.href}
               href={link.href}
-              className="text-sm font-medium text-cream/85 transition-colors hover:text-copper-end"
+              className="group relative py-1 text-sm font-medium text-cream/85 transition-colors hover:text-copper-end"
             >
               {t(link.label, locale)}
+              <span className="absolute inset-x-0 -bottom-0.5 h-px origin-center scale-x-0 bg-copper-gradient transition-transform duration-300 group-hover:scale-x-100" />
             </a>
           ))}
         </nav>

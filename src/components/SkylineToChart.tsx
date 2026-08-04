@@ -43,9 +43,9 @@ export function SkylineToChart({ className = "" }: { className?: string }) {
       >
         <defs>
           <linearGradient id="skyline-chart-copper" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#C9A15A" stopOpacity="0.55" />
-            <stop offset="50%" stopColor="#E8C77E" stopOpacity="0.95" />
-            <stop offset="100%" stopColor="#C9A15A" stopOpacity="0.55" />
+            <stop offset="0%" stopColor="#7A5A22" stopOpacity="0.5" />
+            <stop offset="50%" stopColor="#F0D68C" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="#7A5A22" stopOpacity="0.5" />
           </linearGradient>
         </defs>
         <motion.path

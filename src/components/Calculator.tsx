@@ -5,6 +5,7 @@ import { useLanguage } from "@/context/LanguageContext";
 import { calculator, whatsappLink } from "@/content/content";
 import { t } from "@/lib/i18n";
 import { ScrollReveal } from "./ScrollReveal";
+import { SectionRule } from "./SectionRule";
 import { WhatsappCta } from "./WhatsappCta";
 
 const MIN = 50000;
@@ -23,17 +24,18 @@ export function Calculator() {
   const message = calculator.ctaMessage(amount, property.label, estimate);
 
   return (
-    <section id="calculator" className="bg-cream px-5 py-20 text-navy sm:px-8 sm:py-28">
+    <section id="calculator" className="bg-cream px-5 py-24 text-navy sm:px-8 sm:py-32">
       <div className="mx-auto max-w-4xl">
         <ScrollReveal className="mx-auto max-w-2xl text-center">
-          <h2 className="font-display-heading text-3xl font-bold sm:text-4xl">
+          <SectionRule className="mb-6" />
+          <h2 className="font-display-heading text-3xl font-bold sm:text-4xl md:text-5xl">
             {t(calculator.heading, locale)}
           </h2>
-          <p className="mt-3 text-navy/70">{t(calculator.subheading, locale)}</p>
+          <p className="mt-4 text-navy/70">{t(calculator.subheading, locale)}</p>
         </ScrollReveal>
 
         <ScrollReveal delay={0.1}>
-          <div className="mt-12 rounded-3xl border border-navy/10 bg-white/70 p-6 shadow-sm sm:p-10">
+          <div className="mt-14 rounded-3xl border border-navy/10 bg-white/70 p-6 shadow-gold-lg sm:p-10">
             <div className="grid gap-10 md:grid-cols-2 md:gap-14">
               <div>
                 <label className="flex items-center justify-between text-sm font-semibold text-navy">
@@ -79,12 +81,14 @@ export function Calculator() {
                 </div>
               </div>
 
-              <div className="flex flex-col justify-between rounded-2xl bg-navy p-7 text-cream">
-                <div>
+              <div className="relative flex flex-col justify-between overflow-hidden rounded-2xl bg-navy p-7 text-cream">
+                <div className="pointer-events-none absolute inset-0 bg-gold-radial" />
+                <div className="grain-overlay" />
+                <div className="relative">
                   <p className="text-sm text-cream/70">
                     {t(calculator.resultLabel, locale)}
                   </p>
-                  <p className="mt-2 font-display-heading text-4xl font-bold text-copper-end sm:text-5xl">
+                  <p className="copper-text mt-2 font-display-heading text-4xl font-bold sm:text-5xl">
                     {estimate.toLocaleString("en-US")}{" "}
                     <span className="text-xl font-normal text-cream/70">
                       {locale === "ar" ? "د.ك" : "KWD"}

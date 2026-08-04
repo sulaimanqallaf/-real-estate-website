@@ -43,11 +43,11 @@ export function Footer() {
   const { locale } = useLanguage();
 
   return (
-    <footer id="contact" className="bg-navy-deep text-cream">
+    <footer id="contact" className="border-t border-copper/10 bg-navy-deep text-cream">
       <div className="mx-auto grid max-w-6xl grid-cols-1 gap-12 px-5 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr]">
         <div>
           <div className="flex items-baseline gap-2">
-            <span className="font-display-heading text-xl font-bold tracking-wide">
+            <span className="copper-text font-display-heading text-xl font-bold tracking-wide">
               {siteInfo.logoText}
             </span>
             <span className="text-xs font-medium text-copper-end">
@@ -121,7 +121,7 @@ export function Footer() {
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Instagram"
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-colors hover:border-copper/60 hover:text-copper-end"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-all duration-300 hover:border-copper/60 hover:text-copper-end hover:shadow-gold"
             >
               <InstagramGlyph className="h-4 w-4" />
             </a>
@@ -130,7 +130,7 @@ export function Footer() {
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Facebook"
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-colors hover:border-copper/60 hover:text-copper-end"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-all duration-300 hover:border-copper/60 hover:text-copper-end hover:shadow-gold"
             >
               <FacebookGlyph className="h-4 w-4" />
             </a>

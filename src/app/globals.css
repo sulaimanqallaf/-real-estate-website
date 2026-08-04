@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  --background: #0b1220;
+  --background: #0a0f1e;
   --foreground: #f7f4ee;
 }
 
@@ -48,7 +48,7 @@ body {
 
 ::selection {
   background: #c9a15a;
-  color: #0b1220;
+  color: #0a0f1e;
 }
 
 :focus-visible {
@@ -62,11 +62,66 @@ body {
     text-wrap: balance;
   }
   .copper-text {
-    background: linear-gradient(135deg, #c9a15a 0%, #e8c77e 100%);
+    background: linear-gradient(135deg, #b8873a 0%, #f0d68c 45%, #b8873a 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
+
+  /* Fine-grained noise for tactile depth on large dark fields — the kind
+     of detail that separates "flat color" from "material". Kept faint
+     enough to read as texture, not pattern. */
+  .grain-overlay {
+    position: absolute;
+    inset: 0;
+    background-image: theme("backgroundImage.grain");
+    opacity: 0.5;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+  }
+
+  .glass-card {
+    background: linear-gradient(
+      165deg,
+      rgba(247, 244, 238, 0.06),
+      rgba(247, 244, 238, 0.015)
+    );
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(201, 161, 90, 0.16);
+  }
+
+  .eyebrow {
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+}
+
+/* Shine-sweep on the primary CTA: a bright diagonal band travels across
+   on hover, the classic "polished metal catching light" cue. One pass,
+   not looping — restraint reads more expensive than constant motion. */
+.btn-shine {
+  position: relative;
+  overflow: hidden;
+}
+.btn-shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(
+    115deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%
+  );
+  transform: translateX(-130%) skewX(-12deg);
+  pointer-events: none;
+}
+.btn-shine:hover::after,
+.btn-shine:focus-visible::after {
+  animation: shine 1.1s ease-in-out;
 }
 
 @keyframes marquee {
@@ -87,7 +142,7 @@ input[type="range"] {
   appearance: none;
   height: 6px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #3d4a3a 0%, #c9a15a 100%);
+  background: linear-gradient(90deg, #3d4a3a 0%, #b8873a 55%, #f0d68c 100%);
   outline: none;
 }
 /* Native range inputs mirror min/max sides under dir="rtl" (the thumb's
@@ -95,7 +150,7 @@ input[type="range"] {
    on its own — flip the stops so the track still reads low-to-high in the
    same direction the thumb actually travels. */
 [dir="rtl"] input[type="range"] {
-  background: linear-gradient(90deg, #c9a15a 0%, #3d4a3a 100%);
+  background: linear-gradient(90deg, #f0d68c 0%, #b8873a 55%, #3d4a3a 100%);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -106,7 +161,7 @@ input[type="range"]::-webkit-slider-thumb {
   background: #f7f4ee;
   border: 3px solid #c9a15a;
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 10px rgba(201, 161, 90, 0.55);
 }
 input[type="range"]::-moz-range-thumb {
   width: 20px;
@@ -115,5 +170,5 @@ input[type="range"]::-moz-range-thumb {
   background: #f7f4ee;
   border: 3px solid #c9a15a;
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 10px rgba(201, 161, 90, 0.55);
 }

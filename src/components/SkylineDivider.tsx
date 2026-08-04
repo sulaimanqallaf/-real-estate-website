@@ -27,6 +27,7 @@ export function SkylineDivider({ className = "" }: { className?: string }) {
           strokeWidth={1.5}
           strokeLinejoin="round"
           strokeLinecap="round"
+          style={{ filter: "url(#skyline-glow)" }}
           initial={shouldReduceMotion ? undefined : { pathLength: 0 }}
           whileInView={shouldReduceMotion ? undefined : { pathLength: 1 }}
           viewport={{ once: true, margin: "-40px" }}
@@ -34,10 +35,17 @@ export function SkylineDivider({ className = "" }: { className?: string }) {
         />
         <defs>
           <linearGradient id="skyline-copper" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#C9A15A" stopOpacity="0.55" />
-            <stop offset="50%" stopColor="#E8C77E" stopOpacity="0.9" />
-            <stop offset="100%" stopColor="#C9A15A" stopOpacity="0.55" />
+            <stop offset="0%" stopColor="#7A5A22" stopOpacity="0.5" />
+            <stop offset="50%" stopColor="#F0D68C" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="#7A5A22" stopOpacity="0.5" />
           </linearGradient>
+          <filter id="skyline-glow" x="-20%" y="-200%" width="140%" height="500%">
+            <feGaussianBlur stdDeviation="1.2" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
       </svg>
     </div>
