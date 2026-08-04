@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0b1220;
+  --foreground: #f7f4ee;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+[dir="rtl"] body {
+  font-family: var(--font-arabic-body), system-ui, sans-serif;
+}
+
+[dir="ltr"] body {
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+
+[dir="rtl"] .font-display-heading {
+  font-family: var(--font-arabic-display), serif;
+}
+
+[dir="ltr"] .font-display-heading {
+  font-family: var(--font-display), serif;
+}
+
+::selection {
+  background: #c9a15a;
+  color: #0b1220;
+}
+
+:focus-visible {
+  outline: 2px solid #c9a15a;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .copper-text {
+    background: linear-gradient(135deg, #c9a15a 0%, #e8c77e 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+.animate-marquee {
+  animation: marquee 28s linear infinite;
+}
+
+/* Slider (ROI calculator) */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #3d4a3a 0%, #c9a15a 100%);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #f7f4ee;
+  border: 3px solid #c9a15a;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #f7f4ee;
+  border: 3px solid #c9a15a;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}

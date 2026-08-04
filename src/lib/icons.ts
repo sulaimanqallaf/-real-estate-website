@@ -1,0 +1,32 @@
+import {
+  Building,
+  Building2,
+  Calendar,
+  CheckCircle,
+  Compass,
+  Handshake,
+  Home,
+  Layers,
+  Shield,
+  ShieldCheck,
+  Target,
+  TrendingUp,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
+
+export const iconMap: Record<string, LucideIcon> = {
+  "trending-up": TrendingUp,
+  users: Users,
+  "shield-check": ShieldCheck,
+  compass: Compass,
+  target: Target,
+  home: Home,
+  shield: Shield,
+  "check-circle": CheckCircle,
+  building: Building,
+  building2: Building2,
+  calendar: Calendar,
+  handshake: Handshake,
+  layers: Layers,
+};
