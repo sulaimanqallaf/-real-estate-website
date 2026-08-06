@@ -105,20 +105,8 @@ export const projects = {
   } satisfies Bilingual,
   comingSoon: { ar: "قريبًا", en: "Coming Soon" } satisfies Bilingual,
   viewAll: { ar: "عرض جميع الفرص", en: "View All Opportunities" } satisfies Bilingual,
-  items: [
-    {
-      title: { ar: "فلل فاخرة", en: "Luxury Villas" } satisfies Bilingual,
-      location: { ar: "دبي", en: "Dubai" } satisfies Bilingual,
-    },
-    {
-      title: { ar: "برج سكني فاخر", en: "Luxury Residential Tower" } satisfies Bilingual,
-      location: { ar: "دبي", en: "Dubai" } satisfies Bilingual,
-    },
-    {
-      title: { ar: "استراحات جبلية", en: "Jais Mountain Retreats" } satisfies Bilingual,
-      location: { ar: "رأس الخيمة", en: "Ras Al Khaimah" } satisfies Bilingual,
-    },
-  ],
+  viewDetails: { ar: "عرض التفاصيل", en: "View Details" } satisfies Bilingual,
+  startingFrom: { ar: "ابتداءً من", en: "Starting from" } satisfies Bilingual,
 };
 
 export const about = {
@@ -543,3 +531,37 @@ export function consultationMessage(data: ConsultationFormData): Bilingual {
     en: buildMessage(data, "en"),
   };
 }
+
+export const projectDetail = {
+  backToProjects: { ar: "العودة إلى المشاريع", en: "Back to Projects" } satisfies Bilingual,
+  photosComingSoon: {
+    ar: "الصور الحقيقية للمشروع قريبًا",
+    en: "Real project photos coming soon",
+  } satisfies Bilingual,
+  developer: { ar: "المطور", en: "Developer" } satisfies Bilingual,
+  location: { ar: "الموقع", en: "Location" } satisfies Bilingual,
+  priceFrom: { ar: "السعر ابتداءً من", en: "Price From" } satisfies Bilingual,
+  deliveryDate: { ar: "موعد التسليم", en: "Delivery Date" } satisfies Bilingual,
+  paymentPlan: { ar: "خطة الدفع", en: "Payment Plan" } satisfies Bilingual,
+  features: { ar: "المميزات", en: "Features" } satisfies Bilingual,
+  overview: { ar: "نظرة عامة", en: "Overview" } satisfies Bilingual,
+  brochure: { ar: "بروشور المشروع", en: "Project Brochure" } satisfies Bilingual,
+  brochureComingSoon: {
+    ar: "البروشور الرسمي قريبًا",
+    en: "Official brochure coming soon",
+  } satisfies Bilingual,
+  downloadBrochure: { ar: "تحميل البروشور", en: "Download Brochure" } satisfies Bilingual,
+  interestedHeading: {
+    ar: "مهتم بهذا المشروع؟",
+    en: "Interested in this project?",
+  } satisfies Bilingual,
+  interestedSubheading: {
+    ar: "عبّي بياناتك وفريقنا بيتواصل معك بأقرب وقت.",
+    en: "Share your details and our team will reach out shortly.",
+  } satisfies Bilingual,
+  notFoundTitle: { ar: "المشروع غير موجود", en: "Project Not Found" } satisfies Bilingual,
+  notFoundBody: {
+    ar: "المشروع اللي تبحث عنه غير متوفر حاليًا.",
+    en: "The project you're looking for isn't available.",
+  } satisfies Bilingual,
+};
