@@ -15,10 +15,13 @@ export function Partners() {
   return (
     <section className="overflow-hidden bg-navy px-5 py-16 sm:px-8 sm:py-20">
       <div className="mx-auto max-w-6xl">
-        <ScrollReveal className="text-center">
+        <ScrollReveal className="flex items-center justify-center gap-3 text-center">
           <h2 className="font-display-heading text-xl font-semibold text-cream sm:text-2xl">
             {t(partners.heading, locale)}
           </h2>
+          <span className="rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
+            {t(partners.pending, locale)}
+          </span>
         </ScrollReveal>
       </div>
 

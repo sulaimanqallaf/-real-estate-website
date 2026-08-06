@@ -22,6 +22,13 @@ export function whatsappLink(message?: Bilingual, locale: "ar" | "en" = "ar") {
   return `${base}?text=${text}`;
 }
 
+// Shared "not real yet" badge — used on every section that currently shows
+// placeholder content (team, testimonials, partner logos) so it reads as
+// an intentional, honest "pending" state to a visitor rather than as real
+// (or broken) data. Same visual treatment as the Projects section's
+// existing "Coming Soon" tag.
+export const pendingBadge: Bilingual = { ar: "قريبًا", en: "Coming Soon" };
+
 export const nav = {
   home: { ar: "الرئيسية", en: "Home" } satisfies Bilingual,
   about: { ar: "من نحن", en: "About Us" } satisfies Bilingual,
@@ -102,10 +109,11 @@ export const projects = {
     ar: "مشاريع مدروسة بعناية في جميع مناطق الدولة",
     en: "Carefully studied projects across the country",
   } satisfies Bilingual,
-  comingSoon: { ar: "قريبًا", en: "Coming Soon" } satisfies Bilingual,
+  comingSoon: pendingBadge,
   viewAll: { ar: "عرض جميع الفرص", en: "View All Opportunities" } satisfies Bilingual,
   viewDetails: { ar: "عرض التفاصيل", en: "View Details" } satisfies Bilingual,
   startingFrom: { ar: "ابتداءً من", en: "Starting from" } satisfies Bilingual,
+  priceEstimateTag: { ar: "تقديري", en: "Estimated" } satisfies Bilingual,
 };
 
 export const about = {
@@ -115,6 +123,7 @@ export const about = {
     en: "We are Altiva Real Estate, connecting Kuwaiti investors with the finest real estate opportunities in Dubai. Our team combines local expertise with deep knowledge of the Dubai property market, offering carefully studied opportunities and full support from the first consultation through to closing.",
   } satisfies Bilingual,
   teamHeading: { ar: "فريق العمل", en: "Our Team" } satisfies Bilingual,
+  teamPending: pendingBadge,
 };
 
 export const services = {
@@ -214,6 +223,7 @@ export const partners = {
     en: "Our Partners Among Dubai's Leading Developers",
   } satisfies Bilingual,
   placeholderLabel: { ar: "شعار المطور", en: "Logo Placeholder" } satisfies Bilingual,
+  pending: pendingBadge,
   count: 6,
 };
 
@@ -280,6 +290,7 @@ export const testimonials = {
     ar: "قصص نجاح من مستثمرين وثقوا بألتيفا",
     en: "Success stories from investors who trusted Altiva",
   } satisfies Bilingual,
+  pending: pendingBadge,
   items: [
     {
       name: { ar: "الاسم الكامل", en: "Full Name" } satisfies Bilingual,
@@ -540,6 +551,10 @@ export const projectDetail = {
   developer: { ar: "المطور", en: "Developer" } satisfies Bilingual,
   location: { ar: "الموقع", en: "Location" } satisfies Bilingual,
   priceFrom: { ar: "السعر ابتداءً من", en: "Price From" } satisfies Bilingual,
+  priceEstimateNote: {
+    ar: "سعر تقديري أولي، يُحدد نهائيًا لاحقًا",
+    en: "Preliminary estimate — final price to be confirmed",
+  } satisfies Bilingual,
   deliveryDate: { ar: "موعد التسليم", en: "Delivery Date" } satisfies Bilingual,
   paymentPlan: { ar: "خطة الدفع", en: "Payment Plan" } satisfies Bilingual,
   features: { ar: "المميزات", en: "Features" } satisfies Bilingual,

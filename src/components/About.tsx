@@ -25,9 +25,14 @@ export function About() {
         </ScrollReveal>
 
         <ScrollReveal delay={0.1}>
-          <h3 className="mt-20 text-center font-display-heading text-xl font-semibold text-navy/90">
-            {t(about.teamHeading, locale)}
-          </h3>
+          <div className="mt-20 flex items-center justify-center gap-3">
+            <h3 className="text-center font-display-heading text-xl font-semibold text-navy/90">
+              {t(about.teamHeading, locale)}
+            </h3>
+            <span className="rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
+              {t(about.teamPending, locale)}
+            </span>
+          </div>
         </ScrollReveal>
 
         <div className="mt-8 grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7">

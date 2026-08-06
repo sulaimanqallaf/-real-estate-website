@@ -52,9 +52,14 @@ export function Projects() {
                     {t(project.location, locale)}
                   </p>
                   {project.priceFrom && (
-                    <p className="mt-3 text-sm font-semibold text-copper-end">
-                      {t(projects.startingFrom, locale)}{" "}
-                      {formatPrice(project.priceFrom.amount, locale)}
+                    <p className="mt-3 flex flex-wrap items-center gap-x-2 text-sm font-semibold text-copper-end">
+                      <span>
+                        {t(projects.startingFrom, locale)}{" "}
+                        {formatPrice(project.priceFrom.amount, locale)}
+                      </span>
+                      <span className="rounded-full border border-copper/40 px-2 py-0.5 text-[10px] font-medium text-copper-end/80">
+                        {t(projects.priceEstimateTag, locale)}
+                      </span>
                     </p>
                   )}
                   <span className="mt-4 inline-flex items-center text-xs font-semibold text-cream/70 transition-colors group-hover:text-copper-end">

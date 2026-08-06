@@ -77,6 +77,11 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
                     ? formatPrice(project.priceFrom.amount, locale)
                     : t(projectDetail.brochureComingSoon, locale)}
                 </p>
+                {project.priceFrom && (
+                  <p className="mt-1 text-xs text-navy/45">
+                    {t(projectDetail.priceEstimateNote, locale)}
+                  </p>
+                )}
               </div>
               <div className="rounded-2xl border border-navy/10 bg-white/70 p-5 sm:col-span-2">
                 <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-navy/50">

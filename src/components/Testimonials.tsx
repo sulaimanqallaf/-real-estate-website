@@ -19,9 +19,14 @@ export function Testimonials() {
       <div className="mx-auto max-w-6xl">
         <ScrollReveal className="mx-auto max-w-2xl text-center">
           <SectionRule className="mb-6" />
-          <h2 className="font-display-heading text-3xl font-bold sm:text-4xl md:text-5xl">
-            {t(testimonials.heading, locale)}
-          </h2>
+          <div className="flex items-center justify-center gap-3">
+            <h2 className="font-display-heading text-3xl font-bold sm:text-4xl md:text-5xl">
+              {t(testimonials.heading, locale)}
+            </h2>
+            <span className="rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
+              {t(testimonials.pending, locale)}
+            </span>
+          </div>
           <p className="mt-4 text-cream/70">{t(testimonials.subheading, locale)}</p>
         </ScrollReveal>
 
