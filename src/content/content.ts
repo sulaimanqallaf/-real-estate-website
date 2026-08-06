@@ -13,7 +13,6 @@ export const siteInfo = {
     en: "Salhia Complex – Mohammad Thunayyan Al Ghanem St, Kuwait",
   } satisfies Bilingual,
   instagram: "https://www.instagram.com/altiva_properties?igsh=MWI1a2pyYXRscWh3Yg==",
-  facebook: "https://facebook.com",
 };
 
 export function whatsappLink(message?: Bilingual, locale: "ar" | "en" = "ar") {

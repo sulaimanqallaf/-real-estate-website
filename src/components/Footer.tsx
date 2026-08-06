@@ -32,14 +32,6 @@ function InstagramGlyph({ className }: { className?: string }) {
   );
 }
 
-function FacebookGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
-      <path d="M13.5 22v-8.5h2.85l.43-3.31H13.5V8.05c0-.96.27-1.61 1.64-1.61h1.75V3.48A23.6 23.6 0 0 0 14.4 3.3c-2.5 0-4.22 1.53-4.22 4.34v2.42H7.32v3.31h2.86V22h3.32Z" />
-    </svg>
-  );
-}
-
 export function Footer() {
   const { locale } = useLanguage();
 
@@ -138,15 +130,6 @@ export function Footer() {
               className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-all duration-300 hover:border-copper/60 hover:text-copper-end hover:shadow-gold"
             >
               <InstagramGlyph className="h-4 w-4" />
-            </a>
-            <a
-              href={siteInfo.facebook}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="Facebook"
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-cream/15 transition-all duration-300 hover:border-copper/60 hover:text-copper-end hover:shadow-gold"
-            >
-              <FacebookGlyph className="h-4 w-4" />
             </a>
           </div>
         </div>
