@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { arabicBody, arabicDisplay, displaySerif, inter } from "@/lib/fonts";
 import { LanguageProvider } from "@/context/LanguageContext";
+import { withBasePath } from "@/lib/basePath";
 import "./globals.css";
 
-const siteUrl = "https://altivaproperties.com";
+const siteUrl = "https://sulaimanqallaf.github.io/-real-estate-website";
 const title = "Altiva Real Estate | ألتيفا العقارية";
 const description =
   "Altiva Real Estate connects Kuwaiti investors with the finest real estate opportunities in Dubai. | ألتيفا العقارية تربط المستثمرين الكويتيين بأفضل الفرص العقارية في دبي.";
@@ -20,8 +21,8 @@ export const metadata: Metadata = {
     "استثمار عقاري دبي",
   ],
   icons: {
-    icon: "/favicon.png",
-    apple: "/apple-icon.png",
+    icon: withBasePath("/favicon.png"),
+    apple: withBasePath("/apple-icon.png"),
   },
   openGraph: {
     title,

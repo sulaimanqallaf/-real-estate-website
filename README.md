@@ -2,7 +2,9 @@
 
 Bilingual (Arabic RTL / English LTR) marketing site for Altiva Real Estate, built with Next.js 14 (App Router), TypeScript, Tailwind CSS, and Framer Motion. Configured for static export (`output: "export"`) so it can be deployed on Vercel, GitHub Pages, or any static host.
 
-**Live:** https://altivaproperties.com (custom domain via GitHub Pages — `public/CNAME` — auto-deployed via `.github/workflows/deploy-pages.yml` on every push to `main`)
+**Live:** https://sulaimanqallaf.github.io/-real-estate-website/ (GitHub's default project-page URL — auto-deployed via `.github/workflows/deploy-pages.yml` on every push to `main`)
+
+The site was briefly on the custom domain `altivaproperties.com`, but that domain's DNS was never pointed at GitHub Pages, and GitHub Pages redirects the default URL to a configured custom domain even when that domain doesn't resolve — which made the site unreachable everywhere. Reverted to the default URL so there's always a working link. To switch back to the custom domain once its DNS is configured (A records `185.199.108.153`, `.109.153`, `.110.153`, `.111.153`), see the comment at the top of `next.config.mjs`.
 
 ## Development
 
@@ -17,7 +19,7 @@ npm run dev
 npm run build
 ```
 
-Static files are emitted to `out/`. No base path config needed — the site is served from the custom domain's root by every host (local preview, Vercel, and GitHub Pages via `public/CNAME`) alike.
+Static files are emitted to `out/`, prefixed with the `/-real-estate-website` base path (`next.config.mjs`'s `NEXT_PUBLIC_BASE_PATH`) to match GitHub's default project-page URL structure. Every asset reference in the app routes through `withBasePath()` (`src/lib/basePath.ts`) rather than a literal `/` for this reason — a plain `next/image` or absolute `href` silently drops the prefix.
 
 ## Branded assets (favicon, apple touch icon, OG image)
 

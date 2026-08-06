@@ -6,7 +6,6 @@ import { useLanguage } from "@/context/LanguageContext";
 import { projects, whatsappLink } from "@/content/content";
 import { projectsData } from "@/content/projectsData";
 import { t } from "@/lib/i18n";
-import { withBasePath } from "@/lib/basePath";
 import { ProjectImagePlaceholder } from "./Placeholder";
 import { ScrollReveal } from "./ScrollReveal";
 import { SectionRule } from "./SectionRule";
@@ -34,7 +33,7 @@ export function Projects() {
           {projectsData.map((project, i) => (
             <ScrollReveal key={project.slug} delay={i * 0.1}>
               <Link
-                href={withBasePath(`/projects/${project.slug}`)}
+                href={`/projects/${project.slug}`}
                 className="group block overflow-hidden rounded-2xl border border-cream/10 bg-navy-light/40 transition-all duration-300 hover:-translate-y-1 hover:border-copper/40 hover:shadow-gold-lg"
               >
                 <div className="relative">

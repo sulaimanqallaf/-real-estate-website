@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { ArrowRight, ArrowLeft, Building2, Calendar, MapPin, Wallet } from "lucide-react";
 import { useLanguage } from "@/context/LanguageContext";
 import { projectDetail } from "@/content/content";
@@ -24,13 +23,13 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
   return (
     <section className="bg-cream px-5 pb-24 pt-36 text-navy sm:px-8 sm:pb-32 sm:pt-44">
       <div className="mx-auto max-w-5xl">
-        <Link
+        <a
           href={`${withBasePath("/")}#projects`}
           className="inline-flex items-center gap-2 text-sm font-semibold text-navy/60 transition-colors hover:text-copper-end"
         >
           <BackArrow className="h-4 w-4" />
           {t(projectDetail.backToProjects, locale)}
-        </Link>
+        </a>
 
         <ScrollReveal className="mt-6">
           <SectionRule className="mb-6" />
