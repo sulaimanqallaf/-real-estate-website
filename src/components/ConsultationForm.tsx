@@ -11,6 +11,7 @@ import {
   type FieldOption,
 } from "@/content/content";
 import { t, type Bilingual } from "@/lib/i18n";
+import { ZOHO_WEB_TO_LEAD } from "@/lib/zoho";
 import { ScrollReveal } from "./ScrollReveal";
 import { SectionRule } from "./SectionRule";
 
@@ -34,6 +35,8 @@ const EMPTY_DATA: ConsultationFormData = {
   notes: "",
 };
 
+const ZOHO_IFRAME_NAME = "zoho-consultation-target";
+
 function Tag({ required, locale }: { required: boolean; locale: "ar" | "en" }) {
   return (
     <span className={`text-xs font-normal ${required ? "text-copper-start" : "text-navy/40"}`}>
@@ -47,6 +50,7 @@ export function ConsultationForm() {
   const { locale } = useLanguage();
   const [data, setData] = useState<ConsultationFormData>(EMPTY_DATA);
   const [attempted, setAttempted] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
 
   const errors = REQUIRED_FIELDS.filter((field) => data[field].trim() === "");
 
@@ -55,16 +59,26 @@ export function ConsultationForm() {
   ) => setData((prev) => ({ ...prev, [field]: e.target.value }));
 
   const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
     setAttempted(true);
     if (errors.length > 0) {
+      e.preventDefault();
       document
         .querySelector(`[data-field="${errors[0]}"]`)
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-    const href = whatsappLink(consultationMessage(data), locale);
-    window.open(href, "_blank", "noopener,noreferrer");
+
+    if (!ZOHO_WEB_TO_LEAD.enabled) {
+      e.preventDefault();
+      const href = whatsappLink(consultationMessage(data), locale);
+      window.open(href, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    // Zoho enabled: let the native <form> POST proceed to
+    // ZOHO_WEB_TO_LEAD.postUrl (targeted at the hidden iframe below), then
+    // show the thank-you state.
+    setSubmitted(true);
   };
 
   const inputClass =
@@ -81,6 +95,7 @@ export function ConsultationForm() {
     placeholder,
     required,
     dir,
+    zohoName,
   }: {
     field: keyof ConsultationFormData;
     label: Bilingual;
@@ -88,6 +103,7 @@ export function ConsultationForm() {
     placeholder: Bilingual;
     required: boolean;
     dir?: "ltr";
+    zohoName?: string;
   }) {
     const invalid = fieldError(field);
     return (
@@ -98,6 +114,7 @@ export function ConsultationForm() {
         </label>
         <input
           type={type}
+          name={ZOHO_WEB_TO_LEAD.enabled ? zohoName : undefined}
           value={data[field]}
           onChange={update(field)}
           placeholder={t(placeholder, locale)}
@@ -165,12 +182,64 @@ export function ConsultationForm() {
           <p className="mt-4 text-navy/70">{t(consultation.pageIntro, locale)}</p>
         </ScrollReveal>
 
+        {submitted ? (
+          <ScrollReveal delay={0.1}>
+            <div className="mt-14 rounded-3xl border border-navy/10 bg-white/70 p-10 text-center shadow-gold-lg">
+              <p className="font-display-heading text-lg font-semibold text-navy">
+                {locale === "ar" ? "تم استلام طلبك، شكرًا لك!" : "Your request was received, thank you!"}
+              </p>
+              <p className="mt-2 text-sm text-navy/60">
+                {locale === "ar"
+                  ? "فريق المبيعات بيتواصل معك بأقرب وقت."
+                  : "Our sales team will reach out to you shortly."}
+              </p>
+            </div>
+          </ScrollReveal>
+        ) : (
         <ScrollReveal delay={0.1}>
           <form
+            action={ZOHO_WEB_TO_LEAD.enabled ? ZOHO_WEB_TO_LEAD.postUrl : undefined}
+            method={ZOHO_WEB_TO_LEAD.enabled ? "POST" : undefined}
+            target={ZOHO_WEB_TO_LEAD.enabled ? ZOHO_IFRAME_NAME : undefined}
             onSubmit={handleSubmit}
             noValidate
             className="mt-14 rounded-3xl border border-navy/10 bg-white/70 p-6 shadow-gold-lg sm:p-10"
           >
+            {ZOHO_WEB_TO_LEAD.enabled && (
+              <>
+                <input type="hidden" name="xnQsjsdp" value={ZOHO_WEB_TO_LEAD.hiddenFields.xnQsjsdp} />
+                <input type="hidden" name="xmIwtLD" value={ZOHO_WEB_TO_LEAD.hiddenFields.xmIwtLD} />
+                <input
+                  type="hidden"
+                  name="actionType"
+                  value={ZOHO_WEB_TO_LEAD.hiddenFields.actionType}
+                />
+                {ZOHO_WEB_TO_LEAD.returnUrl && (
+                  <input type="hidden" name="returnUrl" value={ZOHO_WEB_TO_LEAD.returnUrl} />
+                )}
+                <input
+                  type="hidden"
+                  name={ZOHO_WEB_TO_LEAD.fieldNames.leadSource}
+                  value={ZOHO_WEB_TO_LEAD.leadSource}
+                />
+                <input
+                  type="hidden"
+                  name={ZOHO_WEB_TO_LEAD.fieldNames.company}
+                  value="Individual — Website Lead"
+                />
+                <input
+                  type="hidden"
+                  name={ZOHO_WEB_TO_LEAD.fieldNames.lastName}
+                  value={data.fullName}
+                />
+                <input
+                  type="hidden"
+                  name={ZOHO_WEB_TO_LEAD.fieldNames.description}
+                  value={consultationMessage(data).en}
+                />
+              </>
+            )}
+
             <div className="grid gap-6 sm:grid-cols-2">
               <TextField
                 field="fullName"
@@ -184,12 +253,14 @@ export function ConsultationForm() {
                 placeholder={consultation.phone.placeholder}
                 type="tel"
                 dir="ltr"
+                zohoName={ZOHO_WEB_TO_LEAD.fieldNames.mobile}
                 required
               />
               <TextField
                 field="email"
                 label={consultation.email.label}
                 placeholder={consultation.email.placeholder}
+                zohoName={ZOHO_WEB_TO_LEAD.fieldNames.email}
                 type="email"
                 dir="ltr"
                 required={false}
@@ -254,6 +325,10 @@ export function ConsultationForm() {
             </div>
           </form>
         </ScrollReveal>
+        )}
+        {ZOHO_WEB_TO_LEAD.enabled && (
+          <iframe name={ZOHO_IFRAME_NAME} title="Zoho consultation submission" className="hidden" />
+        )}
       </div>
     </section>
   );
