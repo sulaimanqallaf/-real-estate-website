@@ -4,11 +4,11 @@ import { Building2, ImageIcon, User } from "lucide-react";
 // will supply. Kept intentional-looking (not "broken image") on purpose.
 
 // Two recognizable landmark silhouettes anchor the skyline: Kuwait Towers
-// (the client's home market) on the right, Burj Khalifa (the investment
-// destination) on the left — visually the same "from Kuwait, in Dubai"
-// story as the hero copy. Both are simplified geometric silhouettes, not
-// photographic renderings — deliberate, matching every other graphic on
-// the site (see the file-level comment above).
+// (the client's home market) and Burj Khalifa (the investment destination)
+// — visually the same "from Kuwait, in Dubai" story as the hero copy.
+// Both are simplified geometric silhouettes matched to the landmarks'
+// real proportions, not photographic renderings — deliberate, matching
+// every other graphic on the site (see the file-level comment above).
 function LandmarkSkylineShapes() {
   return (
     <>
@@ -23,44 +23,50 @@ function LandmarkSkylineShapes() {
         strokeOpacity="0.4"
       />
 
-      {/* Kuwait Towers — main tower (two spheres), companion tower (one
-          sphere), and the slender third tower with its aviation light.
-          Sized up and bolder than the filler skyline for legibility, and
-          the spheres get the real towers' signature turquoise mosaic
-          (a copper-only outline read as generic balls, not the landmark). */}
+      {/* Kuwait Towers — matched to the real structure: the main tower
+          carries a single large sphere (with its observation-deck ring)
+          roughly two-thirds up, then a bare spire continuing well above
+          it; the second tower is shorter with one smaller sphere; the
+          third is a tall bare needle with no sphere at all. */}
       <g strokeLinejoin="round" style={{ filter: "url(#hero-skyline-glow)" }}>
+        {/* third tower — tall, bare, thin */}
         <line
-          x1="204" y1="300" x2="204" y2="92"
-          stroke="url(#hero-skyline-copper)" strokeWidth="4"
+          x1="182" y1="300" x2="182" y2="60"
+          stroke="#E0B568" strokeWidth="2.25" strokeLinecap="round"
+        />
+        <circle cx="182" cy="57" r="2" fill="#F0D68C" />
+
+        {/* second tower — shorter, one sphere */}
+        <line
+          x1="232" y1="300" x2="232" y2="216"
+          stroke="#E0B568" strokeWidth="3.5"
         />
         <circle
-          cx="204" cy="146" r="30"
-          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
-          stroke="url(#hero-skyline-teal)" strokeWidth="2.5"
+          cx="232" cy="196" r="20"
+          fill="url(#hero-skyline-teal)" fillOpacity="0.55"
+          stroke="url(#hero-skyline-teal)" strokeWidth="2.25"
         />
-        <path d="M175,140 A30,30 0 0 0 233,140" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1" strokeOpacity="0.8" />
-        <path d="M177,158 A30,30 0 0 0 231,158" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1" strokeOpacity="0.8" />
-        <circle
-          cx="204" cy="82" r="17"
-          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
-          stroke="url(#hero-skyline-teal)" strokeWidth="2.5"
+        <ellipse cx="232" cy="214" rx="25" ry="3.5" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1" strokeOpacity="0.75" />
+        <line
+          x1="232" y1="176" x2="232" y2="128"
+          stroke="#E0B568" strokeWidth="1.75" strokeLinecap="round"
         />
 
+        {/* main tower — tallest, one large sphere, long spire above it */}
         <line
-          x1="264" y1="300" x2="264" y2="158"
-          stroke="url(#hero-skyline-copper)" strokeWidth="3"
+          x1="292" y1="300" x2="292" y2="176"
+          stroke="#E0B568" strokeWidth="5"
         />
         <circle
-          cx="264" cy="140" r="20"
-          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
-          stroke="url(#hero-skyline-teal)" strokeWidth="2"
+          cx="292" cy="144" r="32"
+          fill="url(#hero-skyline-teal)" fillOpacity="0.55"
+          stroke="url(#hero-skyline-teal)" strokeWidth="2.75"
         />
-
+        <ellipse cx="292" cy="172" rx="40" ry="5" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1.25" strokeOpacity="0.75" />
         <line
-          x1="308" y1="300" x2="308" y2="186"
-          stroke="url(#hero-skyline-copper)" strokeWidth="2"
+          x1="292" y1="112" x2="292" y2="26"
+          stroke="#E0B568" strokeWidth="2.5" strokeLinecap="round"
         />
-        <circle cx="308" cy="183" r="3.5" fill="#F0D68C" />
       </g>
 
       {/* Burj Khalifa — stepped, tapering tiers narrowing to a needle
@@ -94,7 +100,18 @@ export function SkylineBackdrop({ className = "" }: { className?: string }) {
         preserveAspectRatio="xMidYMax meet"
       >
         <defs>
-          <linearGradient id="hero-skyline-copper" x1="0" y1="0" x2="1" y2="0">
+          {/* userSpaceOnUse, not the default objectBoundingBox: several
+              shapes below (thin lines especially) share this gradient,
+              and objectBoundingBox recomputes 0%-100% against each
+              shape's OWN bounding box — on a 2px-wide line that collapses
+              the gradient to almost nothing, rendering it nearly invisible.
+              Absolute viewBox coordinates make every shape read the same
+              consistent sweep instead. */}
+          <linearGradient
+            id="hero-skyline-copper"
+            gradientUnits="userSpaceOnUse"
+            x1="0" y1="0" x2="1200" y2="0"
+          >
             <stop offset="0%" stopColor="#7A5A22" stopOpacity="0.7" />
             <stop offset="50%" stopColor="#F0D68C" stopOpacity="1" />
             <stop offset="100%" stopColor="#7A5A22" stopOpacity="0.7" />
