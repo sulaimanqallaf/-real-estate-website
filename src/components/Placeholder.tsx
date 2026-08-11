@@ -24,21 +24,43 @@ function LandmarkSkylineShapes() {
       />
 
       {/* Kuwait Towers — main tower (two spheres), companion tower (one
-          sphere), and the slender third tower with its aviation light. */}
-      <g
-        fill="none"
-        stroke="url(#hero-skyline-copper)"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-        style={{ filter: "url(#hero-skyline-glow)" }}
-      >
-        <line x1="201.5" y1="300" x2="201.5" y2="112" />
-        <circle cx="201.5" cy="148" r="21" />
-        <circle cx="201.5" cy="96" r="12.5" />
-        <line x1="250" y1="300" x2="250" y2="168" />
-        <circle cx="250" cy="152" r="15" />
-        <line x1="282" y1="300" x2="282" y2="196" />
-        <circle cx="282" cy="193" r="2.5" fill="#F0D68C" stroke="none" />
+          sphere), and the slender third tower with its aviation light.
+          Sized up and bolder than the filler skyline for legibility, and
+          the spheres get the real towers' signature turquoise mosaic
+          (a copper-only outline read as generic balls, not the landmark). */}
+      <g strokeLinejoin="round" style={{ filter: "url(#hero-skyline-glow)" }}>
+        <line
+          x1="204" y1="300" x2="204" y2="92"
+          stroke="url(#hero-skyline-copper)" strokeWidth="4"
+        />
+        <circle
+          cx="204" cy="146" r="30"
+          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
+          stroke="url(#hero-skyline-teal)" strokeWidth="2.5"
+        />
+        <path d="M175,140 A30,30 0 0 0 233,140" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1" strokeOpacity="0.8" />
+        <path d="M177,158 A30,30 0 0 0 231,158" fill="none" stroke="url(#hero-skyline-teal)" strokeWidth="1" strokeOpacity="0.8" />
+        <circle
+          cx="204" cy="82" r="17"
+          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
+          stroke="url(#hero-skyline-teal)" strokeWidth="2.5"
+        />
+
+        <line
+          x1="264" y1="300" x2="264" y2="158"
+          stroke="url(#hero-skyline-copper)" strokeWidth="3"
+        />
+        <circle
+          cx="264" cy="140" r="20"
+          fill="url(#hero-skyline-teal)" fillOpacity="0.5"
+          stroke="url(#hero-skyline-teal)" strokeWidth="2"
+        />
+
+        <line
+          x1="308" y1="300" x2="308" y2="186"
+          stroke="url(#hero-skyline-copper)" strokeWidth="2"
+        />
+        <circle cx="308" cy="183" r="3.5" fill="#F0D68C" />
       </g>
 
       {/* Burj Khalifa — stepped, tapering tiers narrowing to a needle
@@ -76,6 +98,14 @@ export function SkylineBackdrop({ className = "" }: { className?: string }) {
             <stop offset="0%" stopColor="#7A5A22" stopOpacity="0.7" />
             <stop offset="50%" stopColor="#F0D68C" stopOpacity="1" />
             <stop offset="100%" stopColor="#7A5A22" stopOpacity="0.7" />
+          </linearGradient>
+          {/* Kuwait Towers' real domes are turquoise mosaic tile — this
+              gradient is the one deliberate color break from the site's
+              copper accent, used only there, so the landmark reads by its
+              actual color memory instead of blending into generic gold. */}
+          <linearGradient id="hero-skyline-teal" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#7DEDDD" />
+            <stop offset="100%" stopColor="#0F7A6E" />
           </linearGradient>
           <filter id="hero-skyline-glow" x="-30%" y="-30%" width="160%" height="160%">
             <feGaussianBlur stdDeviation="1.4" result="blur" />
