@@ -264,8 +264,8 @@ export const calculator = {
     en: "This figure is an estimate, not a guarantee, and does not constitute binding financial advice.",
   } satisfies Bilingual,
   ctaLabel: {
-    ar: "ناقش هذا الرقم مع مستشارنا عبر واتساب",
-    en: "Discuss This Number With Our Advisor on WhatsApp",
+    ar: "التحدث عبر واتساب",
+    en: "Talk via WhatsApp",
   } satisfies Bilingual,
   ctaMessage: (amount: number, propertyLabel: Bilingual, estimate: number) => ({
     ar: `مرحبًا، أرغب بمناقشة عائد استثماري تقديري. مبلغ الاستثمار: ${amount.toLocaleString(
