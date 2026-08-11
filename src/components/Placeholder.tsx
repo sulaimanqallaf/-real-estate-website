@@ -3,6 +3,58 @@ import { Building2, ImageIcon, User } from "lucide-react";
 // Visual placeholders standing in for real photography/logos the client
 // will supply. Kept intentional-looking (not "broken image") on purpose.
 
+// Two recognizable landmark silhouettes anchor the skyline: Kuwait Towers
+// (the client's home market) on the right, Burj Khalifa (the investment
+// destination) on the left — visually the same "from Kuwait, in Dubai"
+// story as the hero copy. Both are simplified geometric silhouettes, not
+// photographic renderings — deliberate, matching every other graphic on
+// the site (see the file-level comment above).
+function LandmarkSkylineShapes() {
+  return (
+    <>
+      {/* Low filler skyline, full width, sits behind both landmarks — a
+          faint copper outline, same family as the two focal landmarks but
+          quieter so it doesn't compete with them. */}
+      <path
+        d="M0,320 L0,270 L36,270 L36,240 L80,240 L80,290 L124,290 L124,210 L160,210 L160,255 L200,255 L200,300 L940,300 L940,260 L980,260 L980,215 L1020,215 L1020,280 L1060,280 L1060,235 L1104,235 L1104,300 L1200,300 L1200,320 Z"
+        fill="none"
+        stroke="url(#hero-skyline-copper)"
+        strokeWidth="1.25"
+        strokeOpacity="0.4"
+      />
+
+      {/* Kuwait Towers — main tower (two spheres), companion tower (one
+          sphere), and the slender third tower with its aviation light. */}
+      <g
+        fill="none"
+        stroke="url(#hero-skyline-copper)"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+        style={{ filter: "url(#hero-skyline-glow)" }}
+      >
+        <line x1="201.5" y1="300" x2="201.5" y2="112" />
+        <circle cx="201.5" cy="148" r="21" />
+        <circle cx="201.5" cy="96" r="12.5" />
+        <line x1="250" y1="300" x2="250" y2="168" />
+        <circle cx="250" cy="152" r="15" />
+        <line x1="282" y1="300" x2="282" y2="196" />
+        <circle cx="282" cy="193" r="2.5" fill="#F0D68C" stroke="none" />
+      </g>
+
+      {/* Burj Khalifa — stepped, tapering tiers narrowing to a needle
+          spire, the silhouette's tallest point. */}
+      <path
+        d="M816,300 L816,260 L823,260 L823,170 L830,170 L830,90 L838,90 L838,40 L847,40 L850,4 L853,40 L862,40 L862,90 L870,90 L870,170 L877,170 L877,260 L884,260 L884,300"
+        fill="none"
+        stroke="url(#hero-skyline-copper)"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+        style={{ filter: "url(#hero-skyline-glow)" }}
+      />
+    </>
+  );
+}
+
 export function SkylineBackdrop({ className = "" }: { className?: string }) {
   return (
     <div
@@ -10,18 +62,34 @@ export function SkylineBackdrop({ className = "" }: { className?: string }) {
       aria-hidden="true"
     >
       <div className="absolute inset-0 bg-gold-radial" />
+      {/* Fixed height bands (not a fraction of the section, which is
+          min-h-screen and can run much taller than the skyline itself) so
+          the silhouettes stay a legible, consistent size instead of being
+          stretched or cropped to fill an oversized area. */}
       <svg
-        className="absolute bottom-0 left-0 h-1/2 w-full opacity-40"
-        viewBox="0 0 1200 200"
-        preserveAspectRatio="none"
+        className="absolute inset-x-0 bottom-0 h-52 w-full sm:h-72 md:h-80"
+        viewBox="0 0 1200 320"
+        preserveAspectRatio="xMidYMax meet"
       >
-        <path
-          d="M0,200 L0,150 L40,150 L40,110 L90,110 L90,170 L140,170 L140,60 L160,60 L160,20 L180,20 L180,60 L200,60 L200,170 L260,170 L260,130 L320,130 L320,190 L380,190 L380,80 L420,80 L420,150 L470,150 L470,40 L490,40 L490,10 L510,10 L510,40 L530,40 L530,150 L590,150 L590,100 L650,100 L650,170 L710,170 L710,60 L750,60 L750,130 L810,130 L810,180 L870,180 L870,90 L920,90 L920,160 L980,160 L980,120 L1040,120 L1040,190 L1200,190 L1200,200 Z"
-          fill="#05070D"
-          fillOpacity="0.6"
-        />
+        <defs>
+          <linearGradient id="hero-skyline-copper" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="#7A5A22" stopOpacity="0.7" />
+            <stop offset="50%" stopColor="#F0D68C" stopOpacity="1" />
+            <stop offset="100%" stopColor="#7A5A22" stopOpacity="0.7" />
+          </linearGradient>
+          <filter id="hero-skyline-glow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="1.4" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        <LandmarkSkylineShapes />
       </svg>
-      <div className="absolute inset-0 bg-gradient-to-t from-navy-deep via-transparent to-transparent" />
+      {/* Fade only the lowest sliver into the section below — a full-height
+          fade would wash the skyline back out. */}
+      <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-navy-deep to-transparent" />
       <div className="grain-overlay" />
     </div>
   );
