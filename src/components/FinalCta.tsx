@@ -1,12 +1,17 @@
 "use client";
 
 import { useLanguage } from "@/context/LanguageContext";
-import { finalCta, whatsappLink } from "@/content/content";
+import { finalCta } from "@/content/content";
 import { t } from "@/lib/i18n";
+import { withBasePath } from "@/lib/basePath";
 import { SkylineBackdrop } from "./Placeholder";
 import { ScrollReveal } from "./ScrollReveal";
 import { SectionRule } from "./SectionRule";
-import { WhatsappCta } from "./WhatsappCta";
+
+// Not withBasePath()'d through next/link (only Projects.tsx/ProjectDetail.tsx
+// use that) — a plain <a>, so it needs the manual prefix like Header.tsx's
+// equivalent consultation link.
+const consultationHref = withBasePath("/consultation");
 
 export function FinalCta() {
   const { locale } = useLanguage();
@@ -26,9 +31,12 @@ export function FinalCta() {
             {t(finalCta.subheading, locale)}
           </p>
           <div className="mt-9 flex justify-center">
-            <WhatsappCta href={whatsappLink(finalCta.ctaMessage, locale)}>
+            <a
+              href={consultationHref}
+              className="btn-shine inline-flex items-center gap-2.5 rounded-full bg-copper-gradient bg-[length:200%_100%] px-6 py-3.5 text-sm font-semibold text-navy-deep shadow-gold transition-all duration-200 hover:scale-[1.02] hover:shadow-gold-lg focus-visible:scale-[1.02] sm:text-base"
+            >
               {t(finalCta.cta, locale)}
-            </WhatsappCta>
+            </a>
           </div>
         </ScrollReveal>
       </div>
