@@ -110,7 +110,7 @@ export const projectsData: ProjectDetail[] = [
     title: { ar: "فنتانا ريزيدنس", en: "Ventana Residences" },
     location: { ar: "وارسان 4، دبي", en: "Warsan 4, Dubai" },
     developer: { ar: "زيدور للتطوير العقاري", en: "Zedor Developments" },
-    priceFrom: { amount: 525000, currency: "AED" },
+    priceFrom: { amount: 550000, currency: "AED" },
     priceIsEstimate: false,
     deliveryDate: { ar: "يُحدد لاحقًا", en: "To be confirmed" },
     paymentPlan: [
@@ -135,8 +135,8 @@ export const projectsData: ProjectDetail[] = [
     ],
     brochureUrl: "/brochures/ventana-residences-brochure.pdf",
     description: {
-      ar: "فنتانا ريزيدنس مشروع سكني من زيدور للتطوير العقاري في وارسان 4، دبي، يقدّم استوديوهات وشقق غرفة وغرفتين بمرافق مشتركة متكاملة، بأسعار تبدأ من 525,000 درهم.",
-      en: "Ventana Residences is a residential development by Zedor Developments in Warsan 4, Dubai, offering studio, 1BR, and 2BR apartments with a full suite of shared amenities, starting from AED 525,000.",
+      ar: "فنتانا ريزيدنس مشروع سكني من زيدور للتطوير العقاري في وارسان 4، دبي، يقدّم استوديوهات وشقق غرفة وغرفتين بمرافق مشتركة متكاملة، بأسعار تبدأ من 550,000 درهم.",
+      en: "Ventana Residences is a residential development by Zedor Developments in Warsan 4, Dubai, offering studio, 1BR, and 2BR apartments with a full suite of shared amenities, starting from AED 550,000.",
     },
   },
 ];
