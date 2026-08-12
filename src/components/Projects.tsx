@@ -37,13 +37,13 @@ export function Projects() {
                 href={`/projects/${project.slug}`}
                 className="group block overflow-hidden rounded-2xl border border-cream/10 bg-navy-light/40 transition-all duration-300 hover:-translate-y-1 hover:border-copper/40 hover:shadow-gold-lg"
               >
-                <div className="relative">
+                <div className="relative overflow-hidden">
                   {project.images && project.images.length > 0 ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={withBasePath(project.images[0])}
                       alt={t(project.title, locale)}
-                      className="aspect-[4/3] w-full object-cover"
+                      className="aspect-[4/3] w-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
                     />
                   ) : (
                     <>

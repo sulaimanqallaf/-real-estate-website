@@ -4,6 +4,7 @@ import { useLanguage } from "@/context/LanguageContext";
 import { about } from "@/content/content";
 import { team } from "@/content/team";
 import { t } from "@/lib/i18n";
+import { withBasePath } from "@/lib/basePath";
 import { AvatarPlaceholder } from "./Placeholder";
 import { ScrollReveal } from "./ScrollReveal";
 import { SectionRule } from "./SectionRule";
@@ -29,9 +30,6 @@ export function About() {
             <h3 className="text-center font-display-heading text-xl font-semibold text-navy/90">
               {t(about.teamHeading, locale)}
             </h3>
-            <span className="rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
-              {t(about.teamPending, locale)}
-            </span>
           </div>
         </ScrollReveal>
 
@@ -39,7 +37,16 @@ export function About() {
           {team.map((member, i) => (
             <ScrollReveal key={member.id} delay={Math.min(i * 0.05, 0.4)}>
               <div className="flex flex-col items-center text-center">
-                <AvatarPlaceholder className="h-20 w-20 sm:h-24 sm:w-24" />
+                {member.avatar ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={withBasePath(member.avatar)}
+                    alt={t(member.name, locale)}
+                    className="h-20 w-20 rounded-full object-cover ring-1 ring-copper/30 transition-shadow duration-300 hover:shadow-gold hover:ring-copper/60 sm:h-24 sm:w-24"
+                  />
+                ) : (
+                  <AvatarPlaceholder className="h-20 w-20 sm:h-24 sm:w-24" />
+                )}
                 <p className="mt-3 text-sm font-semibold text-navy">
                   {t(member.name, locale)}
                 </p>

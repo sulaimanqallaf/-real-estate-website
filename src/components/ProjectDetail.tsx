@@ -47,13 +47,14 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
           {project.images && project.images.length > 0 ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               {project.images.map((src, i) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={src}
-                  src={withBasePath(src)}
-                  alt={`${t(project.title, locale)} ${i + 1}`}
-                  className="aspect-[4/3] w-full rounded-2xl object-cover"
-                />
+                <div key={src} className="overflow-hidden rounded-2xl">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={withBasePath(src)}
+                    alt={`${t(project.title, locale)} ${i + 1}`}
+                    className="aspect-[4/3] w-full object-cover transition-transform duration-500 ease-out hover:scale-105"
+                  />
+                </div>
               ))}
             </div>
           ) : (

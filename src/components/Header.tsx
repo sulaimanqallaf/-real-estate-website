@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { Menu, X } from "lucide-react";
 import { useLanguage } from "@/context/LanguageContext";
 import { consultation, nav, siteInfo } from "@/content/content";
@@ -105,27 +106,37 @@ export function Header() {
         </div>
       </div>
 
-      {menuOpen && (
-        <nav className="flex flex-col gap-1 border-t border-cream/10 bg-navy-deep/95 px-5 py-4 md:hidden">
-          {links.map((link) => (
-            <a
-              key={link.href}
-              href={link.href}
-              onClick={() => setMenuOpen(false)}
-              className="rounded-md px-2 py-2.5 text-sm font-medium text-cream/90 hover:bg-cream/5"
-            >
-              {t(link.label, locale)}
-            </a>
-          ))}
-          <a
-            href={consultationHref}
-            onClick={() => setMenuOpen(false)}
-            className="mt-1 rounded-md bg-copper-gradient px-2 py-2.5 text-center text-sm font-semibold text-navy-deep"
+      <AnimatePresence>
+        {menuOpen && (
+          <motion.nav
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.25, ease: "easeInOut" }}
+            className="flex flex-col gap-1 overflow-hidden border-t border-cream/10 bg-navy-deep/95 px-5 md:hidden"
           >
-            {t(consultation.navLabel, locale)}
-          </a>
-        </nav>
-      )}
+            <div className="flex flex-col gap-1 py-4">
+              {links.map((link) => (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  onClick={() => setMenuOpen(false)}
+                  className="rounded-md px-2 py-2.5 text-sm font-medium text-cream/90 hover:bg-cream/5"
+                >
+                  {t(link.label, locale)}
+                </a>
+              ))}
+              <a
+                href={consultationHref}
+                onClick={() => setMenuOpen(false)}
+                className="mt-1 rounded-md bg-copper-gradient px-2 py-2.5 text-center text-sm font-semibold text-navy-deep"
+              >
+                {t(consultation.navLabel, locale)}
+              </a>
+            </div>
+          </motion.nav>
+        )}
+      </AnimatePresence>
     </header>
   );
 }

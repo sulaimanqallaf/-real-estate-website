@@ -1,7 +1,8 @@
 import type { Bilingual } from "@/lib/i18n";
 
-// PLACEHOLDER DATA — replace name/title/avatar fields with real team
-// member information and photos before this site goes live.
+// Real team members as supplied by the client. More will be appended here
+// as additional photos/titles are provided — avatar is null until a real
+// photo exists for that member.
 export type TeamMember = {
   id: string;
   name: Bilingual;
@@ -11,45 +12,27 @@ export type TeamMember = {
 
 export const team: TeamMember[] = [
   {
-    id: "member-1",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
+    id: "abdallah-abulibdeh",
+    name: { ar: "عبدالله أبو لبدة", en: "Abdallah Abulibdeh" },
+    title: { ar: "مدير الفرع", en: "Branch Manager" },
+    avatar: "/team/abdallah-abulibdeh.jpg",
   },
   {
-    id: "member-2",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
+    id: "yasmin-shahabi",
+    name: { ar: "ياسمين شهابي", en: "Yasmin Shahabi" },
+    title: { ar: "مديرة مكتب الرئيس التنفيذي", en: "CEO Office Manager" },
+    avatar: "/team/yasmin-shahabi.jpg",
   },
   {
-    id: "member-3",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
+    id: "sarah-alotaibi",
+    name: { ar: "سارة العتيبي", en: "Sarah Alotaibi" },
+    title: { ar: "استشارية مبيعات", en: "Sales Consultant" },
+    avatar: "/team/sarah-alotaibi.jpg",
   },
   {
-    id: "member-4",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
-  },
-  {
-    id: "member-5",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
-  },
-  {
-    id: "member-6",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
-  },
-  {
-    id: "member-7",
-    name: { ar: "الاسم الكامل", en: "Full Name" },
-    title: { ar: "المسمى الوظيفي", en: "Job Title" },
-    avatar: null,
+    id: "fatma-hasan",
+    name: { ar: "فاطمة حسن", en: "Fatma Hasan" },
+    title: { ar: "استشارية مبيعات", en: "Sales Consultant" },
+    avatar: "/team/fatma-hasan.jpg",
   },
 ];
