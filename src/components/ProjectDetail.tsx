@@ -44,14 +44,30 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
         </ScrollReveal>
 
         <ScrollReveal delay={0.1} className="mt-10">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {Array.from({ length: project.gallerySlots }).map((_, i) => (
-              <ProjectImagePlaceholder key={i} className="aspect-[4/3] rounded-2xl" />
-            ))}
-          </div>
-          <p className="mt-3 text-center text-xs text-navy/45">
-            {t(projectDetail.photosComingSoon, locale)}
-          </p>
+          {project.images && project.images.length > 0 ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {project.images.map((src, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={src}
+                  src={withBasePath(src)}
+                  alt={`${t(project.title, locale)} ${i + 1}`}
+                  className="aspect-[4/3] w-full rounded-2xl object-cover"
+                />
+              ))}
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {Array.from({ length: project.gallerySlots }).map((_, i) => (
+                  <ProjectImagePlaceholder key={i} className="aspect-[4/3] rounded-2xl" />
+                ))}
+              </div>
+              <p className="mt-3 text-center text-xs text-navy/45">
+                {t(projectDetail.photosComingSoon, locale)}
+              </p>
+            </>
+          )}
         </ScrollReveal>
 
         <div className="mt-12 grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
@@ -76,7 +92,7 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
                     ? formatPrice(project.priceFrom.amount, locale)
                     : t(projectDetail.brochureComingSoon, locale)}
                 </p>
-                {project.priceFrom && (
+                {project.priceFrom && project.priceIsEstimate && (
                   <p className="mt-1 text-xs text-navy/45">
                     {t(projectDetail.priceEstimateNote, locale)}
                   </p>
@@ -134,7 +150,7 @@ export function ProjectDetail({ project }: { project: ProjectDetailType }) {
               </h2>
               {project.brochureUrl ? (
                 <a
-                  href={project.brochureUrl}
+                  href={withBasePath(project.brochureUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-2 inline-block text-sm font-semibold text-copper-end hover:underline"

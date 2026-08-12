@@ -6,6 +6,7 @@ import { useLanguage } from "@/context/LanguageContext";
 import { projects, whatsappLink } from "@/content/content";
 import { projectsData } from "@/content/projectsData";
 import { t } from "@/lib/i18n";
+import { withBasePath } from "@/lib/basePath";
 import { ProjectImagePlaceholder } from "./Placeholder";
 import { ScrollReveal } from "./ScrollReveal";
 import { SectionRule } from "./SectionRule";
@@ -37,10 +38,21 @@ export function Projects() {
                 className="group block overflow-hidden rounded-2xl border border-cream/10 bg-navy-light/40 transition-all duration-300 hover:-translate-y-1 hover:border-copper/40 hover:shadow-gold-lg"
               >
                 <div className="relative">
-                  <ProjectImagePlaceholder className="aspect-[4/3] w-full" />
-                  <span className="absolute end-4 top-4 rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
-                    {t(projects.comingSoon, locale)}
-                  </span>
+                  {project.images && project.images.length > 0 ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={withBasePath(project.images[0])}
+                      alt={t(project.title, locale)}
+                      className="aspect-[4/3] w-full object-cover"
+                    />
+                  ) : (
+                    <>
+                      <ProjectImagePlaceholder className="aspect-[4/3] w-full" />
+                      <span className="absolute end-4 top-4 rounded-full bg-copper-gradient px-3 py-1 text-xs font-semibold text-navy-deep shadow-gold">
+                        {t(projects.comingSoon, locale)}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div className="p-6">
                   <h3 className="font-display-heading text-lg font-semibold">
@@ -56,9 +68,11 @@ export function Projects() {
                         {t(projects.startingFrom, locale)}{" "}
                         {formatPrice(project.priceFrom.amount, locale)}
                       </span>
-                      <span className="rounded-full border border-copper/40 px-2 py-0.5 text-[10px] font-medium text-copper-end/80">
-                        {t(projects.priceEstimateTag, locale)}
-                      </span>
+                      {project.priceIsEstimate && (
+                        <span className="rounded-full border border-copper/40 px-2 py-0.5 text-[10px] font-medium text-copper-end/80">
+                          {t(projects.priceEstimateTag, locale)}
+                        </span>
+                      )}
                     </p>
                   )}
                   <span className="mt-4 inline-flex items-center text-xs font-semibold text-cream/70 transition-colors group-hover:text-copper-end">

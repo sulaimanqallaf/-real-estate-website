@@ -1,20 +1,27 @@
 import type { Bilingual } from "@/lib/i18n";
 
-// PLACEHOLDER DATA — every field below (developer, price, payment plan,
-// delivery date, features, brochure) is illustrative only. Replace with
-// real, verified figures from the client before this goes live — same
-// rule as team.ts and Testimonials.tsx: no invented developer names,
-// prices, or delivery commitments on an investment site.
+// luxury-villas/luxury-tower/jais-retreats below are still PLACEHOLDER DATA
+// (developer, price, payment plan, delivery date, features, brochure are
+// illustrative) pending real figures from the client. Projects with a real
+// `images` array (e.g. ventana-residences) are real, client-supplied data —
+// no invented developer names, prices, or delivery commitments either way.
 export type ProjectDetail = {
   slug: string;
   title: Bilingual;
   location: Bilingual;
   developer: Bilingual;
   priceFrom: { amount: number; currency: "AED" } | null;
+  // Placeholder projects' priceFrom is an illustrative figure (shows an
+  // "Estimated" tag); real projects set this false once the client has
+  // confirmed a starting price.
+  priceIsEstimate: boolean;
   deliveryDate: Bilingual;
   paymentPlan: Bilingual[];
   features: Bilingual[];
   gallerySlots: number;
+  // Real gallery photos, basePath-relative (e.g. "/projects/ventana/x.jpg").
+  // When present, these replace the gallerySlots placeholder grid.
+  images?: string[];
   brochureUrl: string | null;
   description: Bilingual;
 };
@@ -26,6 +33,7 @@ export const projectsData: ProjectDetail[] = [
     location: { ar: "دبي", en: "Dubai" },
     developer: { ar: "المطور — يُحدد لاحقًا", en: "Developer — to be confirmed" },
     priceFrom: { amount: 3500000, currency: "AED" },
+    priceIsEstimate: true,
     deliveryDate: { ar: "يُحدد لاحقًا", en: "To be confirmed" },
     paymentPlan: [
       { ar: "10% عند الحجز", en: "10% on booking" },
@@ -51,6 +59,7 @@ export const projectsData: ProjectDetail[] = [
     location: { ar: "دبي", en: "Dubai" },
     developer: { ar: "المطور — يُحدد لاحقًا", en: "Developer — to be confirmed" },
     priceFrom: { amount: 950000, currency: "AED" },
+    priceIsEstimate: true,
     deliveryDate: { ar: "يُحدد لاحقًا", en: "To be confirmed" },
     paymentPlan: [
       { ar: "20% عند الحجز", en: "20% on booking" },
@@ -76,6 +85,7 @@ export const projectsData: ProjectDetail[] = [
     location: { ar: "رأس الخيمة", en: "Ras Al Khaimah" },
     developer: { ar: "المطور — يُحدد لاحقًا", en: "Developer — to be confirmed" },
     priceFrom: { amount: 1200000, currency: "AED" },
+    priceIsEstimate: true,
     deliveryDate: { ar: "يُحدد لاحقًا", en: "To be confirmed" },
     paymentPlan: [
       { ar: "15% عند الحجز", en: "15% on booking" },
@@ -93,6 +103,40 @@ export const projectsData: ProjectDetail[] = [
     description: {
       ar: "استراحات جبلية بإطلالات مميزة على جبل جيس، فرصة استثمارية مختلفة تجمع بين الهدوء والقرب من أبرز وجهات المغامرة بالإمارات.",
       en: "Mountain retreats with striking Jebel Jais views — a distinctive investment opportunity combining tranquility with proximity to one of the UAE's top adventure destinations.",
+    },
+  },
+  {
+    slug: "ventana-residences",
+    title: { ar: "فنتانا ريزيدنس", en: "Ventana Residences" },
+    location: { ar: "وارسان 4، دبي", en: "Warsan 4, Dubai" },
+    developer: { ar: "زيدور للتطوير العقاري", en: "Zedor Developments" },
+    priceFrom: { amount: 525000, currency: "AED" },
+    priceIsEstimate: false,
+    deliveryDate: { ar: "يُحدد لاحقًا", en: "To be confirmed" },
+    paymentPlan: [
+      { ar: "20% عند الحجز", en: "20% on booking" },
+      { ar: "30% أثناء الإنشاء", en: "30% during construction" },
+      { ar: "50% عند التسليم", en: "50% on handover" },
+    ],
+    features: [
+      { ar: "استوديوهات وشقق غرفة وغرفتين", en: "Studio, 1BR, and 2BR apartments" },
+      { ar: "مسبح وتراس على السطح", en: "Rooftop pool and terrace" },
+      { ar: "صالة رياضية مجهزة بالكامل", en: "Fully equipped gym" },
+      { ar: "لوبي استقبال فاخر", en: "Luxury reception lobby" },
+      { ar: "قرب من المرافق الأساسية في وارسان", en: "Close to key amenities in Warsan" },
+    ],
+    gallerySlots: 5,
+    images: [
+      "/projects/ventana/exterior-night.jpg",
+      "/projects/ventana/aerial.jpg",
+      "/projects/ventana/lobby.jpg",
+      "/projects/ventana/studio-interior.jpg",
+      "/projects/ventana/pool-terrace.jpg",
+    ],
+    brochureUrl: "/brochures/ventana-residences-brochure.pdf",
+    description: {
+      ar: "فنتانا ريزيدنس مشروع سكني من زيدور للتطوير العقاري في وارسان 4، دبي، يقدّم استوديوهات وشقق غرفة وغرفتين بمرافق مشتركة متكاملة، بأسعار تبدأ من 525,000 درهم.",
+      en: "Ventana Residences is a residential development by Zedor Developments in Warsan 4, Dubai, offering studio, 1BR, and 2BR apartments with a full suite of shared amenities, starting from AED 525,000.",
     },
   },
 ];
