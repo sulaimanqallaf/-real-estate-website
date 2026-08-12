@@ -171,6 +171,43 @@ export const projectsData: ProjectDetail[] = [
       en: "Empire Down Town Jebel Ali is a residential and retail development by Empire Developments in Jebel Ali, Dubai, a 1-minute walk from the metro station. The building offers 116 units (studio, 1BR, and 2BR) across G+4 podium+9 floors, starting from AED 799,777, with handover expected Q3 2029.",
     },
   },
+  {
+    slug: "ayami-residence",
+    title: { ar: "أيامي ريزيدنس", en: "Ayami Residence" },
+    location: { ar: "ورسان الأولى، دبي", en: "Warsan First, Dubai" },
+    developer: { ar: "آيات للتطوير العقاري", en: "AYAT Development" },
+    priceFrom: { amount: 864000, currency: "AED" },
+    priceIsEstimate: false,
+    deliveryDate: { ar: "الربع الرابع 2028", en: "Q4 2028" },
+    paymentPlan: [
+      { ar: "5% مقدم عند الحجز", en: "5% down payment on booking" },
+      { ar: "15% بعد شهر واحد", en: "15% after one month" },
+      { ar: "5% في 2027", en: "5% in 2027" },
+      { ar: "5% في 2028", en: "5% in 2028" },
+      { ar: "50% عند التسليم", en: "50% on handover" },
+      { ar: "20% بعد الاستلام لمدة سنة", en: "20% post-handover over one year" },
+    ],
+    features: [
+      { ar: "قرب محطة مترو الخط الأزرق", en: "Near the Metro Blue Line station" },
+      { ar: "مسبحان وحمام سباحة على السطح للكبار", en: "Two swimming pools and a rooftop adult pool" },
+      { ar: "صالتان رياضيتان تخدمان المبنى بالكامل", en: "Two gyms serving the full building" },
+      { ar: "ملعب بادل وسينما مفتوحة وستوديو بودكاست", en: "Paddle court, open cinema, and podcast studio" },
+      { ar: "قرب من كريك هاربور ومطار دبي ووسط المدينة", en: "Close to Dubai Creek Harbour, DXB Airport, and Downtown Dubai" },
+    ],
+    gallerySlots: 5,
+    images: [
+      "/projects/ayami-residence/exterior-dusk.jpg",
+      "/projects/ayami-residence/balcony-view.jpg",
+      "/projects/ayami-residence/lobby.jpg",
+      "/projects/ayami-residence/rooftop-pool.jpg",
+      "/projects/ayami-residence/living-room.jpg",
+    ],
+    brochureUrl: "/brochures/ayami-residence-brochure.pdf",
+    description: {
+      ar: "أيامي ريزيدنس مشروع سكني من آيات للتطوير العقاري في ورسان الأولى، دبي، عند تقاطع شارع الشيخ محمد بن زايد مع شارع رأس الخور والعوير، يقدّم استوديوهات وشقق غرفة وغرفتين بمرافق حياة متكاملة، بأسعار تبدأ من 864,000 درهم للغرفة وصالة (1.1 مليون درهم لغرفتين وصالة)، وتسليم متوقع في الربع الرابع 2028.",
+      en: "Ayami Residence is a residential development by AYAT Development in Warsan First, Dubai, at the intersection of Sheikh Mohammed Bin Zayed Road with Ras Al Khor Road and Al Awir Road. It offers studio, 1BR, and 2BR apartments with a full lifestyle amenity offering, starting from AED 864,000 for a 1BR (AED 1.1M for a 2BR), with handover expected Q4 2028.",
+    },
+  },
 ];
 
 export function getProjectBySlug(slug: string) {
