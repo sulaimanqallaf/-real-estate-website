@@ -139,6 +139,38 @@ export const projectsData: ProjectDetail[] = [
       en: "Ventana Residences is a residential development by Zedor Developments in Warsan 4, Dubai, offering studio, 1BR, and 2BR apartments with a full suite of shared amenities, starting from AED 550,000.",
     },
   },
+  {
+    slug: "empire-jebel-ali",
+    title: { ar: "امباير داون تاون جبل علي", en: "Empire Down Town Jebel Ali" },
+    location: { ar: "جبل علي، دبي", en: "Jebel Ali, Dubai" },
+    developer: { ar: "امباير للتطوير العقاري", en: "Empire Developments" },
+    priceFrom: { amount: 799777, currency: "AED" },
+    priceIsEstimate: false,
+    deliveryDate: { ar: "الربع الثالث 2029", en: "Q3 2029" },
+    paymentPlan: [
+      { ar: "20% عند الحجز", en: "20% on booking" },
+      { ar: "1% شهريًا لمدة 80 شهرًا", en: "1% monthly for 80 months" },
+      { ar: "44% عند التسليم", en: "44% on handover" },
+    ],
+    features: [
+      { ar: "دقيقة واحدة مشيًا إلى محطة المترو", en: "1-minute walk to the metro station" },
+      { ar: "نظام المنزل الذكي", en: "Smart home system" },
+      { ar: "مطبخ مجهز بالكامل", en: "Fully equipped kitchen" },
+      { ar: "مسابح وصالات رياضية وسبا وساونا", en: "Swimming pools, gyms, spa and sauna" },
+      { ar: "محلات ومعارض تجارية في الطابق الأرضي", en: "Ground-floor retail and showroom spaces" },
+    ],
+    gallerySlots: 3,
+    images: [
+      "/projects/empire-jebel-ali/exterior-day.jpg",
+      "/projects/empire-jebel-ali/exterior-street.jpg",
+      "/projects/empire-jebel-ali/exterior-aerial.jpg",
+    ],
+    brochureUrl: "/brochures/empire-jebel-ali-floor-plans.pdf",
+    description: {
+      ar: "امباير داون تاون جبل علي مشروع سكني وتجاري من امباير للتطوير العقاري في جبل علي، دبي، على بعد دقيقة مشيًا من محطة المترو، ويضم 116 وحدة سكنية (استوديو، غرفة، وغرفتين) ضمن مبنى من أرضي + 4 طوابق مواقف + 9 طوابق، بأسعار تبدأ من 799,777 درهم وتسليم متوقع في الربع الثالث 2029.",
+      en: "Empire Down Town Jebel Ali is a residential and retail development by Empire Developments in Jebel Ali, Dubai, a 1-minute walk from the metro station. The building offers 116 units (studio, 1BR, and 2BR) across G+4 podium+9 floors, starting from AED 799,777, with handover expected Q3 2029.",
+    },
+  },
 ];
 
 export function getProjectBySlug(slug: string) {
