@@ -4,7 +4,7 @@ export const siteInfo = {
   name: { ar: "ألتيفا العقارية", en: "Altiva Real Estate" } satisfies Bilingual,
   logoText: "ALTIVA",
   logoSubtext: { ar: "العقارية", en: "Real Estate" } satisfies Bilingual,
-  whatsappNumber: "96541114212",
+  whatsappNumber: "96557775289",
   phoneNumber: "+965-22200355",
   phoneNumberHref: "+96522200355",
   email: "sales@altivaproperties.com",

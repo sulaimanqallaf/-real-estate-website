@@ -77,7 +77,9 @@ export function Footer() {
                 className="flex items-center gap-3 transition-colors hover:text-copper-end"
               >
                 <WhatsappGlyph className="h-4 w-4 shrink-0 text-copper-end" />
-                <span dir="ltr">+965-41114212</span>
+                <span dir="ltr">
+                  +{siteInfo.whatsappNumber.slice(0, 3)}-{siteInfo.whatsappNumber.slice(3)}
+                </span>
               </a>
             </li>
             <li>
