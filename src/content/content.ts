@@ -124,6 +124,30 @@ export const about = {
   } satisfies Bilingual,
   teamHeading: { ar: "فريق العمل", en: "Our Team" } satisfies Bilingual,
   teamPending: pendingBadge,
+  founderHeading: { ar: "كلمة المؤسس", en: "A Message from Our Founder" } satisfies Bilingual,
+  founderName: { ar: "حسن راشد السويدي", en: "Hassan Rashed Al Suwaidi" } satisfies Bilingual,
+  founderTitle: {
+    ar: "المؤسس والمدير العام",
+    en: "Founder & General Manager",
+  } satisfies Bilingual,
+  founderBio: [
+    {
+      ar: "حسن راشد السويدي هو المؤسس والمدير العام لشركة ألتيفا العقارية، ويقود رؤيتها الهادفة إلى بناء جسر استثماري موثوق يربط المستثمرين في دول الخليج بالسوق العقاري في دولة الإمارات، مع تركيز خاص على خدمة المستثمرين في دولة الكويت.",
+      en: "Hassan Rashed Al Suwaidi is the Founder and General Manager of Altiva Real Estate, leading its vision to build a trusted investment bridge connecting investors across the Gulf with the UAE real estate market, with particular focus on serving investors from Kuwait.",
+    },
+    {
+      ar: "تستند رؤيته إلى قناعة راسخة بأن الاستثمار العقاري الناجح لا يبدأ بعرض العقارات، بل بفهم أهداف المستثمر، ودراسة احتياجاته، وتحليل السوق بعناية، ثم اختيار الفرص القادرة على تحقيق قيمة حقيقية ومستدامة على المدى البعيد.",
+      en: "His vision rests on a firm conviction that successful real estate investment does not begin with presenting properties, but with understanding the investor's goals, carefully studying their needs, thoroughly analyzing the market, and then selecting opportunities capable of delivering real, sustainable long-term value.",
+    },
+    {
+      ar: "ويمتلك خبرة واسعة في إدارة عدد من الشركات الكويتية العاملة في دولة الإمارات، أسهم خلالها في تحقيق نجاحات ملموسة وبناء علاقات مهنية وثيقة مع نخبة من رجال الأعمال الكويتيين، تمتد لما يقارب 24 عاماً.",
+      en: "He brings extensive experience managing a number of Kuwaiti companies operating in the UAE, achieving tangible successes and building close professional relationships with leading Kuwaiti businessmen over nearly 24 years.",
+    },
+    {
+      ar: "ومن خلال ألتيفا العقارية، يقود توسّع الشركة بين دبي والكويت، واضعاً الثقة، والمهنية، وشفافية التعامل، وجودة الاستشارة في صميم أعمالها، بهدف بناء علاقات طويلة الأمد مع العملاء والشركاء وتقديم تجربة استثمارية ترتقي إلى تطلعاتهم.",
+      en: "Through Altiva Real Estate, he leads the company's expansion between Dubai and Kuwait, placing trust, professionalism, transparent dealing, and quality advisory at the heart of its work — building long-term relationships with clients and partners and delivering an investment experience that lives up to their expectations.",
+    },
+  ] satisfies Bilingual[],
 };
 
 export const services = {

@@ -25,7 +25,32 @@ export function About() {
           </p>
         </ScrollReveal>
 
-        <ScrollReveal delay={0.1}>
+        <ScrollReveal delay={0.1} className="mt-16">
+          <div className="overflow-hidden rounded-3xl border border-navy/10 bg-white/70 shadow-sm sm:grid sm:grid-cols-[0.85fr_1.15fr]">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={withBasePath("/team/hassan-alsuwaidi.jpg")}
+              alt={t(about.founderName, locale)}
+              className="aspect-[4/5] w-full object-cover sm:aspect-auto sm:h-full"
+            />
+            <div className="p-6 sm:p-9">
+              <p className="eyebrow text-copper-end">{t(about.founderHeading, locale)}</p>
+              <h3 className="mt-3 font-display-heading text-2xl font-bold text-navy">
+                {t(about.founderName, locale)}
+              </h3>
+              <p className="mt-1 text-sm font-semibold text-copper-end">
+                {t(about.founderTitle, locale)}
+              </p>
+              <div className="mt-5 space-y-4 text-sm leading-relaxed text-navy/70">
+                {about.founderBio.map((paragraph, i) => (
+                  <p key={i}>{t(paragraph, locale)}</p>
+                ))}
+              </div>
+            </div>
+          </div>
+        </ScrollReveal>
+
+        <ScrollReveal delay={0.15}>
           <div className="mt-20 flex items-center justify-center gap-3">
             <h3 className="text-center font-display-heading text-xl font-semibold text-navy/90">
               {t(about.teamHeading, locale)}
