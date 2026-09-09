@@ -83,8 +83,21 @@ def build_approval_keyboard(symbol: str, report_date: str) -> dict[str, Any]:
     }
 
 
+def _final_position(entry: dict[str, Any]) -> dict[str, Any]:
+    """The portfolio-/regime-adjusted position when that pipeline has run
+    (entry["portfolio_evaluation"]["position"]), falling back to the raw
+    individual-risk result otherwise. Duplicated as a small inline expression
+    rather than imported from report_writer.py, which itself imports
+    performance_tracker -> paper_trades - importing report_writer here would
+    close that into a cycle."""
+    portfolio_eval = entry.get("portfolio_evaluation")
+    if portfolio_eval is not None and portfolio_eval.get("position") is not None:
+        return portfolio_eval["position"]
+    return entry["best_risk_result"]
+
+
 def format_approval_message(entry: dict[str, Any]) -> str:
-    risk = entry["best_risk_result"]
+    risk = _final_position(entry)
     is_aggressive = risk["strategy"] == STRATEGY_NAME_AGGRESSIVE
     tag = " [AGGRESSIVE]" if is_aggressive else ""
     return (
@@ -141,7 +154,7 @@ def _save_all(records: dict[str, Any], config: dict[str, Any]) -> None:
 def pending_record_from_entry(
     entry: dict[str, Any], report_date: str, message_id: int, chat_id: str
 ) -> dict[str, Any]:
-    risk = entry["best_risk_result"]
+    risk = _final_position(entry)
     return {
         "report_date": report_date,
         "symbol": entry["symbol"],

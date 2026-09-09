@@ -125,6 +125,25 @@ def _size_position(entry: float, stop: float, config: dict[str, Any]) -> dict[st
     return {"shares": shares, "dollar_risk": dollar_risk, "position_value": position_value}
 
 
+def passes_universal_gates(entry: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Whether a ticker's best_risk_result already clears every gate that comes
+    BEFORE market regime / portfolio risk even run: individual risk-manager
+    approval, a non-Avoid label, and (for Aggressive Mean Reversion specifically)
+    aggressive_mode.enabled. This is the shared "pre-portfolio candidate pool"
+    definition used by both report_writer.select_top_candidates (the final gate)
+    and portfolio_risk.run_regime_and_portfolio_pipeline (which only evaluates
+    entries already in this pool, in score order) - kept here rather than in
+    either of those modules so neither has to import the other.
+    """
+    risk = entry.get("best_risk_result")
+    if not risk or not risk["tradeable"] or entry["label"] == "Avoid":
+        return False
+    if risk["strategy"] == STRATEGY_NAME_AGGRESSIVE:
+        if not config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]:
+            return False
+    return True
+
+
 def evaluate_best_candidate(
     raw_candidates: list[dict[str, Any]], snapshot: dict[str, float], config: dict[str, Any]
 ) -> dict[str, Any] | None:

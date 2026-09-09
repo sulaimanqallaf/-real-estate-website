@@ -8,11 +8,23 @@ A Mac-friendly Python research tool that:
 3. Scores every ticker 0-100, ranks it, and labels it Strong candidate / Watchlist /
    Weak watchlist / Avoid.
 4. Estimates entry/target/stop/risk-reward/position size for whatever setups clear
-   every risk rule.
+   every risk rule, then runs that size through a **Market Regime Filter** and a
+   **Portfolio Risk Manager** (see "Market Regime Engine" and "Portfolio Risk
+   Engine" below) - both of which can only shrink a position or reject it
+   outright, never enlarge one.
 5. Sends a daily Telegram report and saves CSV/JSON reports plus a trade journal.
 6. Sends one Approve Paper Trade / Reject / Watch Only button set per Top
    Candidate; approvals are recorded in `data/journal/paper_trades.csv`.
 7. Includes a standalone backtester (1+ year, per strategy, vs. buy-and-hold).
+
+**Full pipeline:**
+
+```
+Market Data -> Indicators -> Strategy Signals -> Signal Score -> Individual Risk
+Manager -> Market Regime Filter -> Portfolio Risk Manager -> Top Candidates ->
+Telegram Approval -> Simulated Paper Trade -> Lifecycle Tracking -> Performance
+Analytics
+```
 
 **This version does not place trades, connect to a broker, use margin, trade
 options, or short anything.** It only collects data, analyzes it, scores it, sends
@@ -118,6 +130,17 @@ A few things worth knowing up front, not buried in the code:
   updates a CSV row - there is no broker connection anywhere in this codebase, no
   IBKR, no `ib_insync`, no order of any kind. See "Paper Trade Lifecycle" below
   for the full mechanism and the roadmap note on what (eventually) comes after it.
+- **A candidate's final position size is the product of three independent, only-
+  ever-shrinking stages: Individual Risk Manager -> Market Regime Filter ->
+  Portfolio Risk Manager.** Each stage sees the size the previous one already
+  approved and can only keep it the same, cut it further, or reject the trade
+  outright - none of the three can ever increase what came before it. See
+  "Market Regime Engine" and "Portfolio Risk Engine" below for exactly what each
+  stage checks and why. A rejection from either stage means the same thing to
+  every downstream consumer: no Top Candidate entry, no journal row, no Approve
+  button - `entry["portfolio_evaluation"]["decision"] == "REJECT"` is checked at
+  the same choke point (`report_writer.select_top_candidates()`) as every other
+  gate.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
@@ -344,17 +367,29 @@ Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.dai
 
 ### Telegram / `report_<date>.json` / `.csv`
 
-- **Market regime / SPY trend / QQQ trend**: derived from EMA50-vs-EMA200 and
-  price-vs-SMA200, independent of which tickers Trend Following actually trades.
+- **Market Regime section**: the rule-based primary regime (`BULL_TREND`,
+  `BULL_VOLATILE`, `SIDEWAYS`, `BEAR_TREND`, `HIGH_VOLATILITY`, or `RISK_OFF`),
+  risk-on/risk-off state, volatility (elevated/normal), SPY trend, QQQ trend, and
+  a plain-language explanation. See "Market Regime Engine" above. Falls back to
+  the older, simpler Bullish/Defensive/Neutral line only if `market_regime` is
+  unavailable for some reason.
 - **Best sector/ETF**: the highest-scoring ticker among `config.etf_tickers`.
 - **Top Candidates**: tickers with a strategy-generated, risk-manager-approved trade
-  plan AND a non-Avoid label (see the caveat above), ranked by score, capped at
+  plan, that the Market Regime Filter and Portfolio Risk Manager did not reject,
+  AND a non-Avoid label (see the caveat above), ranked by score, capped at
   `telegram.top_candidates_limit`. Only Safe strategies count here by default (Trend
   Following, Momentum Breakout, Safe Mean Reversion); Aggressive Mean Reversion
-  joins the pool only if you've set `aggressive_mode.enabled: true`. Each one is
-  also sent as its own follow-up message with Approve Paper Trade / Reject / Watch
-  Only buttons (see section 5 above for the listener that processes them) - set
-  `paper_trading.enabled: false` to turn that off and keep only the plain report.
+  joins the pool only if you've set `aggressive_mode.enabled: true`. Each block
+  shows the sizing chain (individual -> regime-adjusted -> final portfolio-adjusted
+  size), sector, and portfolio risk after the trade whenever that pipeline ran. Each
+  one is also sent as its own follow-up message with Approve Paper Trade / Reject /
+  Watch Only buttons (see section 5 above for the listener that processes them) -
+  set `paper_trading.enabled: false` to turn that off and keep only the plain
+  report.
+- **Portfolio Risk Summary**: open positions vs. the cap, open risk-to-stop % vs.
+  the limit, gross exposure %, largest sector and its exposure %, and remaining
+  available risk budget %. Prints one clean line instead of fake zero-value stats
+  when there are no open paper positions. See "Portfolio Risk Engine" above.
 - **High Risk Dip Watchlist**: every ticker where Aggressive Mean Reversion
   triggered today, shown with a would-be entry/stop/target/R:R and whether it would
   have cleared the risk rules - informational only. The section header states
@@ -415,7 +450,9 @@ files list every simulated trade if you want to inspect individual entries/exits
 **Roadmap context, so this phase's scope is never mistaken for more than it is:**
 
 ```
-Current:  Research -> Scoring -> Risk -> Telegram Approval -> Simulated Paper Trade Tracking
+Current:  Research -> Scoring -> Individual Risk -> Market Regime Filter ->
+          Portfolio Risk -> Telegram Approval -> Simulated Paper Trade Tracking
+          -> Performance Analytics
 Future:   IBKR Paper Execution, only after this simulated system proves stable.
 ```
 
@@ -550,6 +587,205 @@ position(s) being tracked.") instead of a block of misleading 0% figures.
 
 ---
 
+## Market Regime Engine
+
+`src/market_regime.py` classifies the overall market once per run, purely from
+SPY and QQQ's already-computed indicators plus a trailing drawdown calculated
+directly from the same daily bars `main.py` already fetched. **No machine
+learning, no new data source, no fetched-elsewhere sentiment score** - every
+rule is a plain, inspectable comparison you can read in the source in under a
+minute.
+
+**The six regimes:**
+
+| Regime | Meaning |
+|---|---|
+| `BULL_TREND` | SPY and QQQ both in an uptrend (EMA50 > EMA200 and price > SMA200), volatility normal. |
+| `BULL_VOLATILE` | Same bullish trend structure, but daily volatility is elevated. |
+| `SIDEWAYS` | Neither a clean uptrend nor downtrend on both benchmarks, volatility normal. |
+| `BEAR_TREND` | SPY and QQQ both in a downtrend, but without a deep trailing drawdown or elevated volatility. |
+| `HIGH_VOLATILITY` | Volatility elevated on a tape that isn't clearly bullish - trend is secondary to the volatility spike here. |
+| `RISK_OFF` | Either a deep trailing drawdown (>= `risk_off_drawdown_pct_threshold`, default 10%) or a bearish tape with elevated volatility - the most defensive classification. |
+
+Alongside the single `primary` regime, `MarketRegime` carries `trend`
+(bullish/bearish/mixed), `volatility` (elevated/normal), `risk_state`
+(risk_on/risk_off), a human-readable `explanation`, and a `confidence` score.
+**`confidence` is a plain 0.0-1.0 count of how many simple rule inputs agree
+with the chosen trend label - never a fabricated machine-learning-style
+probability.** If SPY/QQQ data or any required indicator is missing/NaN, the
+regime safely defaults to `SIDEWAYS` with `confidence: 0.0` rather than
+crashing the run or guessing.
+
+**Regime -> strategy compatibility** (`config.market_regime.strategy_preferences`):
+each of the four strategies (Trend Following, Momentum Breakout, Safe Mean
+Reversion, Aggressive Mean Reversion) has a `preferred` / `allowed` / `reduced`
+/ `restricted` / `blocked` status per regime. `blocked` is a hard reject - the
+candidate never becomes a Top Candidate no matter how good its individual
+score - `restricted` cuts size (`status_size_multipliers`, e.g. 0.5x) on top of
+whatever the regime's own position multiplier already does. Example: Aggressive
+Mean Reversion is `blocked` in every regime except `BEAR_TREND`, where it's
+only downgraded to `restricted` if you've explicitly set `aggressive_mode.
+enabled: true` - and it stays hard-`blocked` in `HIGH_VOLATILITY`/`RISK_OFF`
+regardless of that flag, since the spec scopes that one exception to
+`BEAR_TREND` specifically. **Regime logic can only make admission stricter,
+never looser than the existing individual-risk and label gates** - it never
+promotes an Avoid-labeled or individually-unapproved candidate into
+eligibility.
+
+**Regime position multipliers** (`config.market_regime.position_multipliers`,
+all <= 1.0, multiplied on top of - not instead of - the individual risk
+manager's own share count):
+
+| Regime | Multiplier |
+|---|---|
+| `BULL_TREND` | 1.00 (no cut) |
+| `BULL_VOLATILE` | 0.75 |
+| `SIDEWAYS` | 0.75 |
+| `BEAR_TREND` | 0.50 |
+| `HIGH_VOLATILITY` | 0.50 |
+| `RISK_OFF` | 0.25 |
+
+Some regimes also carry a stricter minimum score
+(`config.market_regime.score_thresholds`, e.g. 80 in `BEAR_TREND`/`RISK_OFF`) -
+a candidate that would otherwise be individually tradeable but scores below
+that bar is rejected with an explicit "blocked by market regime: score below
+threshold" reason, distinct from an outright strategy block.
+
+**Everything here remains long-only.** The regime engine never creates a short
+position, never suggests shorting into `BEAR_TREND`/`RISK_OFF` - it only ever
+decides whether/how much of an already-long candidate to allow.
+
+## Portfolio Risk Engine
+
+`src/portfolio_risk.py` runs immediately after the Market Regime Filter and
+immediately before a candidate can become a Top Candidate. Where the
+individual risk manager and the regime filter both only ever look at *one*
+candidate in isolation, this stage is the only place that looks at the
+**portfolio as a whole** - every other OPEN paper position - before deciding
+whether one more trade is prudent to add.
+
+**Portfolio state is derived exclusively from rows with `status == "OPEN"` in
+`data/journal/paper_trades.csv`.** A closed trade (`TARGET_HIT`/`STOPPED`/
+`TIME_EXIT`/`CANCELLED`) never counts toward exposure, concentration, or
+correlation, by construction - `compute_portfolio_state()` filters to `OPEN`
+rows before computing anything.
+
+**Risk-to-stop vs. gross exposure - two different numbers, both tracked:**
+- **Risk-to-stop** (`total_open_risk_fraction`): `(entry_price - stop_loss) *
+  position_size`, summed across every OPEN position, as a fraction of
+  `account_equity`. This is *the* number the 3%-style total-risk budget
+  (`max_total_open_risk_pct`) is checked against - it's what you'd actually
+  lose if every open stop got hit simultaneously, not what's merely deployed.
+- **Gross exposure** (`gross_exposure_fraction`): `entry_price * position_size`
+  summed across OPEN positions, as a fraction of equity - how much capital is
+  tied up, regardless of how tight each stop is. Two portfolios with identical
+  gross exposure can have very different risk-to-stop if their stops sit at
+  different distances - conflating the two would either be needlessly
+  conservative or dangerously permissive, so the engine keeps them as separate
+  fields throughout (`compute_portfolio_state`, `evaluate_portfolio_candidate`,
+  the Telegram Portfolio Risk Summary) and never adds them together.
+
+**What `evaluate_portfolio_candidate()` checks, per candidate, in order** (each
+check can only keep, shrink, or reject what the previous one already decided -
+never increase it):
+
+1. **Max open positions** (`max_open_positions`) - a hard reject if already at
+   the cap; there is no partial version of "one more position."
+2. **Total open risk budget** (`max_total_open_risk_pct`) - if adding the
+   candidate's own risk-to-stop would exceed the cap, its size is first
+   resized down to whatever fits the remaining budget; only rejected outright
+   if even one viable share (`min_viable_shares`) doesn't fit.
+3. **Single-position notional cap** (`max_single_position_pct`) - resize (then
+   reject if unviable) so no one position's own deployed capital dominates the
+   book.
+4. **Sector concentration** (`max_sector_exposure_pct`, via `sector_map` in
+   config) - resize (then reject if unviable) so one sector's *combined*
+   deployed capital across every open position, plus this candidate, doesn't
+   exceed the cap. A ticker missing from `sector_map` is treated as its own
+   single-ticker sector, so it can never be "concentrated" with anything else
+   by sector - it just can't crash on an unmapped symbol.
+5. **Overlap groups** (`config.portfolio_risk.overlap_groups`) - `SPY`/`VOO`
+   (`broad_market_etfs`), `QQQ`/`VGT` (`growth_tech_etfs`), and `SMH`/`NVDA`/
+   `AMD` (`semiconductor_cluster`) are flagged as an overlap warning against
+   any already-open member of the same group, **regardless of whether a
+   correlation number could be computed** - two tickers that are obviously the
+   same trade wearing different symbols don't need a price history to prove it.
+6. **Historical correlation** (`compute_daily_return_correlation`, 60-day
+   trailing daily-return Pearson correlation by default) - any open ticker with
+   `abs(correlation) >= high_correlation_threshold` (default 0.80) counts
+   toward `max_correlated_positions`; hitting that count halves the candidate's
+   size, then rejects if the halved size isn't viable. **When correlation can't
+   be computed** (missing price history, or fewer than `correlation_min_periods`
+   overlapping days) **the engine reports "Data Unavailable" and does
+   nothing - it never fabricates a correlation number, and never silently
+   assumes 0.0 (uncorrelated)** the way an unmapped default easily could.
+   Overlap-group membership is still counted as "highly correlated" in this
+   step even when the correlation number itself is unavailable (see #5).
+
+**Position resizing never increases a size.** `_resize()` only ever rebuilds a
+proposal at the *same or fewer* shares; every code path above computes a new,
+smaller share count via `_floor_shares()` (a floor with a tiny epsilon guard
+against IEEE-754 rounding down a value that should floor to the share count
+above it, e.g. `0.03 - 0.025` != exactly `0.005` in floating point). Every
+result records **both** `original_position` (untouched) and `position` (final,
+possibly resized) so nothing is lost - a Telegram message or journal row can
+always show "was `N` shares, reduced to `M`" rather than silently only showing
+the smaller number.
+
+**Same-day batch candidates share one risk budget, sequentially.** When
+several tickers qualify as candidates on the same run, they're evaluated
+score-descending against a *running* portfolio state that folds in every
+ACCEPT/ACCEPT_WITH_REDUCED_SIZE decision made earlier in that same batch
+(`apply_acceptance_to_state()`, which returns a new state rather than mutating
+the one passed in). This is a documented **V1 simplification** - stronger
+candidates get first claim on the shared budget, which is a reasonable,
+explainable answer to "could today's candidates collectively overshoot a
+limit," not a claim of joint optimality across the whole batch.
+
+### Why these controls exist
+
+A single-trade risk manager has no way to know that five "different" trades
+approved on five different days are all secretly the same semiconductor bet,
+or that today's new position would push total risk-to-stop past what the
+account can actually absorb if several stops triggered at once. The Portfolio
+Risk Engine exists specifically to catch what looking at one candidate at a
+time cannot: concentrated sector exposure, correlated/overlapping positions
+dressed up as diversification, and a total risk budget that individual sizing
+alone doesn't enforce across positions. Combined with the Market Regime
+Filter's role - tightening admission and size when the *overall* market looks
+risky, rather than reacting only to one ticker's own indicators - the two
+engines are complementary, not redundant: one asks "is this too much market
+risk right now," the other asks "is this too much *portfolio* risk right now,"
+and a candidate has to clear both, on top of everything the individual risk
+manager already required.
+
+**None of this executes anything.** Both engines only ever adjust a number
+(shares) or a decision (accept/reduce/reject) attached to an in-memory
+candidate before it's shown to you in Telegram - there is still no broker
+connection, no margin, no options trading, no shorting, and no live order of
+any kind anywhere in this codebase. See "Paper Trade Lifecycle" above.
+
+### Telegram / report changes in this phase
+
+- **Market Regime section**: primary regime, risk-on/risk-off state,
+  volatility (elevated/normal), SPY trend, QQQ trend, and a plain-language
+  explanation - shown near the top of the daily report.
+- **Top Candidate sizing context**: each Top Candidate block now shows its
+  individual suggested size, its regime-adjusted size (only when the regime
+  cut it), its final portfolio-adjusted size, its sector, the portfolio's open
+  risk-to-stop after adding this trade, and any concentration/correlation
+  warning - so "why is this smaller than the individual risk manager
+  suggested" is always visible, never silent.
+- **Portfolio Risk Summary section**: open positions vs. the cap, open
+  risk-to-stop % vs. the limit, gross exposure %, the largest sector and its
+  exposure %, and the remaining available risk budget %. **With zero open
+  paper positions it prints one clean "full risk budget available" line
+  instead of a wall of meaningless 0% figures** - the same "don't fabricate
+  data that doesn't exist yet" principle used everywhere else in this project
+  (skew, performance analytics, correlation).
+
+---
+
 ## Project structure
 
 ```
@@ -574,7 +810,12 @@ ai-quant-research-bot/
       momentum_breakout.py       Strategy 2
       trend_following.py          Strategy 3
       skew_map.py                  Contrarian Bid / Chase / Hedged Rally / Fear classifier
-    risk_manager.py            universal trade rules + position sizing
+    risk_manager.py            universal trade rules + position sizing +
+                                  passes_universal_gates() (shared gate logic)
+    market_regime.py             SPY/QQQ rule-based regime classification +
+                                   regime/strategy admission + position multipliers
+    portfolio_risk.py             portfolio-wide exposure, sector concentration,
+                                    correlation/overlap checks, position resizing
     signal_scorer.py             0-100 scoring + labels
     telegram_bot.py                generic Telegram Bot API client (incl. inline keyboards)
     paper_trades.py                 approval-flow domain logic (callback_data, pending
@@ -600,6 +841,9 @@ ai-quant-research-bot/
     test_approval_listener.py
     test_paper_trade_tracker.py
     test_performance_tracker.py
+    test_market_regime.py
+    test_portfolio_risk.py
+    test_regime_portfolio_integration.py
 ```
 
 ## Scoring (0-100)
@@ -621,6 +865,8 @@ ai-quant-research-bot/
 
 ## Risk rules (applied to every proposed trade)
 
+### Individual (per-trade) rules - `risk_manager.py`
+
 - No trade if price is below SMA 200 - **except Mean Reversion candidates**, which
   are exempt from this specific rule (see the wrinkle noted above).
 - No trade if RSI(14) is 75 or above (RSI must be strictly below 75 to pass).
@@ -630,14 +876,34 @@ ai-quant-research-bot/
   risk (entry minus stop) - both configurable in `config/settings.yaml`.
 - No margin, no options trading, no shorting - hard constraints in Version 1.
 
-A candidate becomes a **Top Candidate** only when it clears every rule above AND the
-risk manager approved it AND its overall label isn't Avoid. This is the exact same
-gate that decides which candidates get an Approve Paper Trade button at all -
+### Market regime rules - `market_regime.py` (see "Market Regime Engine" above)
+
+- A strategy `blocked` in the current regime is rejected outright, regardless of
+  score.
+- A `restricted`/`reduced` strategy has its size cut further (on top of the
+  regime's own position multiplier).
+- Some regimes (`BEAR_TREND`, `HIGH_VOLATILITY`, `RISK_OFF` by default) require a
+  stricter minimum score than the base Avoid/non-Avoid label gate.
+
+### Portfolio-wide rules - `portfolio_risk.py` (see "Portfolio Risk Engine" above)
+
+- Reject if already at `max_open_positions`.
+- Resize (then reject if unviable) to stay within `max_total_open_risk_pct` total
+  risk-to-stop, `max_single_position_pct` single-position notional, and
+  `max_sector_exposure_pct` sector concentration.
+- Resize (then reject if unviable) when highly correlated/overlapping with
+  `max_correlated_positions` or more already-open positions.
+
+A candidate becomes a **Top Candidate** only when it clears every individual rule
+above AND is not blocked/rejected by the market regime filter AND is not rejected
+by the portfolio risk manager AND its overall label isn't Avoid. This is the exact
+same gate that decides which candidates get an Approve Paper Trade button at all -
 tapping Approve can never make a candidate "more eligible" than it already was;
-it can only turn an already-eligible candidate into a row in `paper_trades.csv`.
-The one thing checked again, live, at the moment you tap Approve rather than just
-once at send time is `aggressive_mode.enabled` for Aggressive candidates (see
-"Read this before you trust the output" above).
+it can only turn an already-eligible candidate (at its final, portfolio-adjusted
+size) into a row in `paper_trades.csv`. The one thing checked again, live, at the
+moment you tap Approve rather than just once at send time is `aggressive_mode.
+enabled` for Aggressive candidates (see "Read this before you trust the output"
+above).
 
 ## Disclaimer
 

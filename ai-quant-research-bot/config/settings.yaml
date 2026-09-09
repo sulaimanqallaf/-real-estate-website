@@ -25,6 +25,27 @@ secondary_benchmark: QQQ        # only used for backtest comparison
 etf_tickers: [SPY, QQQ, VOO, VGT, SMH, GLD, USO]
 equity_tickers: [AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN]
 
+# Sector/group mapping used by the Portfolio Risk Engine for concentration checks.
+# A ticker missing from this map is treated as its own single-ticker "sector" (its
+# symbol), so concentration math never crashes on an unmapped ticker - it just
+# can't be concentrated with anything else by sector.
+sector_map:
+  SPY: broad_market
+  VOO: broad_market
+  QQQ: growth_index
+  VGT: technology
+  SMH: semiconductors
+  AAPL: technology
+  MSFT: technology
+  NVDA: semiconductors
+  AMD: semiconductors
+  META: communication_services
+  GOOGL: communication_services
+  AMZN: consumer_discretionary
+  TSLA: consumer_discretionary
+  GLD: gold
+  USO: energy
+
 # Which strategies apply to which tickers. Every ticker in `tickers:` above is
 # assigned to at least one strategy, so every ticker can generate a trade candidate:
 #   SPY, QQQ                                        -> mean reversion + trend following
@@ -160,6 +181,109 @@ paper_trading:
   poll_interval_seconds: 3                                # approval_listener's idle sleep between polls
   poll_timeout_seconds: 30                                 # Telegram long-poll timeout per getUpdates call
   max_holding_days: 20                                      # OPEN paper trade force-exits at close after this many days
+
+# Portfolio Risk Engine - sits AFTER individual risk approval and market-regime
+# admission, BEFORE a candidate becomes a Top Candidate. Derives portfolio state
+# purely from OPEN rows in paper_trades.csv (closed trades never count toward
+# exposure). Can only keep an individually-approved position size the same,
+# reduce it, or reject it outright - it can never increase what risk_manager.py
+# already sized. See src/portfolio_risk.py and README "Portfolio Risk Engine".
+portfolio_risk:
+  enabled: true
+  max_open_positions: 6
+  max_total_open_risk_pct: 0.03      # sum of (entry-stop)*shares across OPEN trades, as a fraction of account_equity - risk-to-stop, NOT notional exposure
+  max_single_position_pct: 0.20       # one position's notional value (entry*shares), as a fraction of account_equity
+  max_sector_exposure_pct: 0.35        # one sector_map group's total notional value, as a fraction of account_equity
+  max_correlated_positions: 2           # existing OPEN positions highly correlated with a candidate before it's reduced/rejected
+  correlation_lookback_days: 60
+  correlation_min_periods: 30             # minimum overlapping daily-return observations required to trust a correlation figure at all
+  high_correlation_threshold: 0.80
+  # Explicit, correlation-independent overlap groups - flagged even when historical
+  # correlation can't be computed (e.g. a recent IPO). Keep this simple/hand-maintained.
+  overlap_groups:
+    broad_market_etfs: [SPY, VOO]
+    growth_tech_etfs: [QQQ, VGT]
+    semiconductor_cluster: [SMH, NVDA, AMD]
+  # Applied, in order, whenever a resize step (risk budget / single-position cap /
+  # sector cap / correlation cap) still leaves a position technically nonzero but
+  # too small to be worth taking.
+  min_viable_shares: 1
+
+# Market Regime Engine - simple, explainable SPY/QQQ-based rules, no ML. Runs
+# BEFORE the Portfolio Risk Engine: it can shrink a candidate's size and/or block
+# a strategy outright for the current regime; portfolio risk then works from
+# whatever size survives that. See src/market_regime.py and README "Market Regime
+# Engine". Every multiplier here can only reduce a position, never increase it.
+market_regime:
+  enabled: true
+  high_volatility_pct_threshold: 2.5    # daily_volatility_pct (rolling 20D std of daily returns, already computed) above this on SPY or QQQ = "elevated"
+  drawdown_lookback_days: 60
+  risk_off_drawdown_pct_threshold: 10.0   # SPY trailing drawdown over drawdown_lookback_days beyond this contributes to RISK_OFF
+
+  # Regime-wide position-size multiplier, applied to every candidate regardless
+  # of strategy. Composes with each strategy's own status multiplier below
+  # (regime-wide first, then status-specific) - see README for the full order.
+  position_multipliers:
+    BULL_TREND: 1.00
+    BULL_VOLATILE: 0.75
+    SIDEWAYS: 0.75
+    BEAR_TREND: 0.50
+    HIGH_VOLATILITY: 0.50
+    RISK_OFF: 0.25
+
+  # Per-regime, per-strategy admission status: preferred | allowed | reduced |
+  # restricted | blocked. "preferred"/"allowed" behave identically today (both
+  # admit at the regime-wide multiplier with no extra cut) - "preferred" exists
+  # purely as a documentation/labeling distinction on top of "allowed", per the
+  # spec's own wording, not a behavioral one.
+  strategy_preferences:
+    BULL_TREND:
+      trend_following: preferred
+      momentum_breakout: preferred
+      mean_reversion_safe: allowed
+      mean_reversion_aggressive: reduced
+    BULL_VOLATILE:
+      trend_following: allowed
+      momentum_breakout: reduced
+      mean_reversion_safe: allowed
+      mean_reversion_aggressive: reduced
+    SIDEWAYS:
+      trend_following: reduced
+      momentum_breakout: reduced
+      mean_reversion_safe: preferred
+      mean_reversion_aggressive: reduced
+    BEAR_TREND:
+      trend_following: restricted        # spec's "heavily restricted" - simplified to the same "restricted" status as the others below, per the spec's own "simplify overlapping classifications" allowance
+      momentum_breakout: restricted
+      mean_reversion_safe: restricted
+      mean_reversion_aggressive: blocked    # exception: becomes "restricted" instead of a hard block if aggressive_mode.enabled is true - see market_regime.evaluate_regime_admission
+    HIGH_VOLATILITY:
+      trend_following: restricted
+      momentum_breakout: restricted
+      mean_reversion_safe: restricted
+      mean_reversion_aggressive: blocked
+    RISK_OFF:
+      trend_following: restricted
+      momentum_breakout: restricted
+      mean_reversion_safe: restricted
+      mean_reversion_aggressive: blocked
+
+  # Extra size cut applied on top of the regime-wide multiplier above, by status.
+  # "blocked" is a hard reject, never a multiplier - it has no entry here.
+  status_size_multipliers:
+    preferred: 1.00
+    allowed: 1.00
+    reduced: 0.75
+    restricted: 0.50
+
+  # Optional stricter score bar layered ON TOP of the existing Avoid-label gate -
+  # never looser, never a replacement for it. A regime with no entry here uses
+  # only the existing label gate. Also doubles as the "exceptional conditions"
+  # bar for the BEAR_TREND Aggressive Mean Reversion exception above.
+  score_thresholds:
+    BEAR_TREND: 85
+    HIGH_VOLATILITY: 75
+    RISK_OFF: 80
 
 logging:
   level: "INFO"

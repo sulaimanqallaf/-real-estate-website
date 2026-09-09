@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from . import performance_tracker
+from . import performance_tracker, risk_manager
 from .strategies import trend_following
-from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE
 from .utils import resolve_path
+
+
+def final_position(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The position to actually show/act on for a Top Candidate: the portfolio-
+    (and regime-) adjusted sizing when that pipeline has run, falling back to
+    the raw individual-risk result when it hasn't (e.g. an older/synthetic entry
+    with no portfolio_evaluation attached at all) - kept backward compatible
+    rather than requiring every caller to have run the full pipeline."""
+    portfolio_eval = entry.get("portfolio_evaluation")
+    if portfolio_eval is not None and portfolio_eval.get("position") is not None:
+        return portfolio_eval["position"]
+    return entry.get("best_risk_result")
 
 
 def _fmt(value: Any, suffix: str = "", digits: int = 2) -> str:
@@ -45,19 +57,22 @@ def best_sector_etf(ticker_results: list[dict[str, Any]], config: dict[str, Any]
 
 
 def format_candidate_block(entry: dict[str, Any]) -> str:
-    risk = entry["best_risk_result"]
+    individual = entry["best_risk_result"]
+    final = final_position(entry)
     plan_str = ""
-    if risk and risk["tradeable"]:
+    if final and final["tradeable"]:
         plan_str = (
-            f"Entry zone: {risk['entry']}\n"
-            f"Target: {risk['target']}\n"
-            f"Stop loss: {risk['stop_loss']}\n"
-            f"Expected upside: {_fmt(risk['expected_upside_pct'], '%')}\n"
-            f"Expected downside: {_fmt(risk['expected_downside_pct'], '%')}\n"
-            f"Risk/reward: {_fmt(risk['risk_reward'])}\n"
-            f"Suggested size: {risk['shares']} shares (~${risk['dollar_risk']:.0f} at risk)\n"
-            f"Strategy: {risk['strategy']}\n"
+            f"Entry zone: {final['entry']}\n"
+            f"Target: {final['target']}\n"
+            f"Stop loss: {final['stop_loss']}\n"
+            f"Expected upside: {_fmt(final['expected_upside_pct'], '%')}\n"
+            f"Expected downside: {_fmt(final['expected_downside_pct'], '%')}\n"
+            f"Risk/reward: {_fmt(final['risk_reward'])}\n"
+            f"Suggested size: {final['shares']} shares (~${final['dollar_risk']:.0f} at risk)\n"
+            f"Strategy: {final['strategy']}\n"
         )
+        plan_str += format_sizing_context(entry, individual, final)
+
     return (
         f"{entry['symbol']}\n"
         f"Signal: {entry['label']}\n"
@@ -67,6 +82,38 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
         f"Options skew: {entry['skew_classification']}\n"
         f"Reason: {entry['explanation']}"
     )
+
+
+def format_sizing_context(entry: dict[str, Any], individual: dict[str, Any], final: dict[str, Any]) -> str:
+    """Item 19: show the sizing chain (individual -> regime -> portfolio) plus
+    sector and portfolio-risk-after-trade context, whenever that pipeline
+    actually ran. Silent (empty string) for an entry with no regime/portfolio
+    evaluation attached at all, rather than printing misleading placeholder text."""
+    regime_eval = entry.get("regime_evaluation")
+    portfolio_eval = entry.get("portfolio_evaluation")
+    if regime_eval is None or portfolio_eval is None:
+        return ""
+
+    lines = [f"Individual suggested size: {individual['shares']} shares"]
+
+    regime_shares = math.floor(individual["shares"] * regime_eval["combined_multiplier"])
+    if regime_eval["combined_multiplier"] < 1.0:
+        lines.append(f"Regime-adjusted size: {regime_shares} shares ({regime_eval['regime']}, {regime_eval['status']})")
+
+    if final["shares"] != regime_shares:
+        lines.append(f"Final portfolio-adjusted size: {final['shares']} shares")
+    elif regime_eval["combined_multiplier"] < 1.0:
+        lines.append(f"Final size: {final['shares']} shares (unchanged by portfolio risk)")
+
+    lines.append(f"Sector: {portfolio_eval['sector']}")
+
+    if portfolio_eval.get("total_open_risk_after") is not None:
+        lines.append(f"Portfolio open risk after this trade: {portfolio_eval['total_open_risk_after'] * 100:.2f}%")
+
+    if portfolio_eval["warnings"]:
+        lines.append("Portfolio note: " + " ".join(portfolio_eval["warnings"]))
+
+    return "\n".join(lines) + "\n"
 
 
 def format_high_risk_dip_block(entry: dict[str, Any]) -> str:
@@ -109,6 +156,49 @@ def format_high_risk_dip_watchlist(ticker_results: list[dict[str, Any]], config:
         body = "No aggressive dip setups today."
 
     return f"High Risk Dip Watchlist (Aggressive Mode: {mode_label}):\n\n{body}"
+
+
+def format_market_regime_section(regime: Any, spy_trend: str, qqq_trend: str) -> str:
+    """Item 18. `regime` is a market_regime.MarketRegime."""
+    risk_state_label = "Risk-On" if regime.risk_state == "risk_on" else "Risk-Off"
+    volatility_label = "Elevated" if regime.volatility == "elevated" else "Normal"
+    return (
+        f"Market Regime: {regime.primary}\n"
+        f"Risk State: {risk_state_label}\n"
+        f"Volatility: {volatility_label}\n"
+        f"SPY trend: {spy_trend}\n"
+        f"QQQ trend: {qqq_trend}\n"
+        f"{regime.explanation}"
+    )
+
+
+def format_portfolio_risk_summary(config: dict[str, Any]) -> str:
+    """Item 20. Self-contained (loads paper_trades.csv itself, same pattern as
+    format_paper_trading_summary) so main.py doesn't have to thread portfolio
+    state through separately. Prints one clean line instead of misleading
+    zero-value stats when there are no open positions."""
+    from . import paper_trades
+    from . import portfolio_risk as portfolio_risk_module
+
+    header = "Portfolio Risk:"
+    state = portfolio_risk_module.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
+
+    if state["num_open_positions"] == 0:
+        return f"{header}\n\nNo open paper positions - full risk budget available."
+
+    cfg = config["portfolio_risk"]
+    available_budget_fraction = max(0.0, cfg["max_total_open_risk_pct"] - state["total_open_risk_fraction"])
+
+    lines = [
+        f"Open positions: {state['num_open_positions']}/{cfg['max_open_positions']}",
+        f"Open risk: {state['total_open_risk_fraction'] * 100:.2f}% (limit {cfg['max_total_open_risk_pct'] * 100:.1f}%)",
+        f"Gross exposure: {state['gross_exposure_fraction'] * 100:.2f}%",
+    ]
+    if state["largest_sector"]:
+        lines.append(f"Largest sector: {state['largest_sector']} ({state['largest_sector_fraction'] * 100:.2f}%)")
+    lines.append(f"Available risk budget: {available_budget_fraction * 100:.2f}%")
+
+    return f"{header}\n\n" + "\n".join(lines)
 
 
 def format_paper_trading_summary(config: dict[str, Any]) -> str:
@@ -181,24 +271,32 @@ def build_explanation(entry: dict[str, Any]) -> str:
 
 
 def select_top_candidates(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Candidates actually worth surfacing. All four of these are required:
+    """Candidates actually worth surfacing. All of these are required:
 
     1. The risk manager approved the trade (`best_risk_result["tradeable"]`).
     2. If the candidate is Aggressive mean reversion, aggressive_mode.enabled must
-       be true - see the strategy-name check below.
+       be true.
     3. The ticker's overall signal label is not Avoid.
     4. Risk/reward clears `risk.min_risk_reward_ratio` - folded into (1), since
        evaluate_candidate() already rejects anything below that threshold.
 
+    1-4 are risk_manager.passes_universal_gates() - see that function; it's
+    shared with portfolio_risk.run_regime_and_portfolio_pipeline() so both this
+    function and that pipeline agree on exactly what "already qualifies" means.
+
+    5. The Market Regime Filter and Portfolio Risk Manager (run earlier in
+       main.py via portfolio_risk.run_regime_and_portfolio_pipeline, which
+       attaches entry["portfolio_evaluation"]) did not REJECT it. An entry with
+       no portfolio_evaluation attached at all (never run through that pipeline)
+       is treated as passing this condition - backward compatible with anything
+       that only ever ran the pre-Phase-4 pipeline, rather than silently
+       requiring every caller to adopt the new one.
+
     Enabling aggressive_mode only satisfies (2) - it makes an Aggressive candidate
-    ELIGIBLE to be considered here, it does not exempt it from (3) or (4). A ticker
-    crashing hard enough to trigger Aggressive mean reversion very often lands on
-    an Avoid label on the universal 0-100 checklist regardless of how the dip-buy
-    trade itself scores - enabling the flag does not change that. A strategy can
-    compute a valid, tradeable entry/stop/target on a ticker whose overall score is
-    still weak - that's real and informative, but presenting it as a top pick right
-    under "Signal: Avoid" would be self-contradictory, so (1) and (3) are both
-    required together regardless of which strategy produced the candidate.
+    ELIGIBLE to be considered here, it does not exempt it from (3), (4), or (5). A
+    ticker crashing hard enough to trigger Aggressive mean reversion very often
+    lands on an Avoid label on the universal 0-100 checklist regardless of how the
+    dip-buy trade itself scores - enabling the flag does not change that.
 
     This is also the single choke point for both the Telegram Top Candidates
     section AND the trade journal (append_to_journal calls this too), so (2) is
@@ -206,14 +304,13 @@ def select_top_candidates(ticker_results: list[dict[str, Any]], config: dict[str
     Aggressive candidates out of best_risk_result while disabled) - a deliberate
     second, defense-in-depth check on a rule specified as a hard "must never".
     """
-    aggressive_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
     top_n = config["telegram"]["top_candidates_limit"]
 
     def is_eligible(entry: dict[str, Any]) -> bool:
-        risk = entry["best_risk_result"]
-        if not risk or not risk["tradeable"] or entry["label"] == "Avoid":
+        if not risk_manager.passes_universal_gates(entry, config):
             return False
-        if risk["strategy"] == STRATEGY_NAME_AGGRESSIVE and not aggressive_enabled:
+        portfolio_eval = entry.get("portfolio_evaluation")
+        if portfolio_eval is not None and portfolio_eval["decision"] == "REJECT":
             return False
         return True
 
@@ -227,7 +324,12 @@ def format_report_text(
     report_date: str,
     failed_symbols: list[str],
     config: dict[str, Any],
+    regime: Any = None,
 ) -> str:
+    """`regime` is the market_regime.MarketRegime computed once in main.py from
+    SPY/QQQ (see market_regime.classify_regime); pass None to fall back to the
+    older, simpler Bullish/Defensive/Neutral line (e.g. if market_regime.enabled
+    is false, or for a caller that hasn't adopted the Phase 4 pipeline)."""
     top_candidates = select_top_candidates(ticker_results, config)
 
     avoid_symbols = [r["symbol"] for r in ticker_results if r["label"] == "Avoid"]
@@ -236,7 +338,6 @@ def format_report_text(
     qqq_result = next((r for r in ticker_results if r["symbol"] == "QQQ"), None)
     spy_trend = trend_following.describe_trend(spy_result["snapshot"]) if spy_result else "N/A"
     qqq_trend = trend_following.describe_trend(qqq_result["snapshot"]) if qqq_result else "N/A"
-    market_regime = determine_market_regime(spy_trend, qqq_trend) if spy_result and qqq_result else "N/A"
 
     header = f"Daily AI Quant Report\n{report_date}\n(Data collection & analysis only — no trades executed)"
 
@@ -263,6 +364,21 @@ def format_report_text(
         f"- {r['symbol']}: {'; '.join(r['best_risk_result']['blocked_reasons'])}" for r in near_misses
     ]
 
+    # Item 17: candidates that passed individual risk but were rejected by
+    # market regime or portfolio risk still get an explicit, human-readable
+    # reason here, distinct from an individual-risk near-miss above.
+    regime_or_portfolio_rejections = [
+        r
+        for r in ticker_results
+        if r.get("portfolio_evaluation") is not None
+        and r["portfolio_evaluation"]["decision"] == "REJECT"
+        and r["symbol"] not in top_candidate_symbols
+    ]
+    rejection_lines = [
+        f"- {r['symbol']}: {'; '.join(r['portfolio_evaluation']['rejection_reasons'])}"
+        for r in regime_or_portfolio_rejections
+    ]
+
     risk_warnings = [
         "This report is research/education only. No trades were placed. No margin, options, or short positions "
         "are used in Version 1.",
@@ -270,11 +386,17 @@ def format_report_text(
     if near_miss_lines:
         risk_warnings.append("Setups that triggered but were blocked by risk rules:")
         risk_warnings.extend(near_miss_lines)
+    if rejection_lines:
+        risk_warnings.append("Setups blocked by market regime or portfolio risk:")
+        risk_warnings.extend(rejection_lines)
+
+    if regime is not None:
+        regime_section = format_market_regime_section(regime, spy_trend, qqq_trend)
+    else:
+        regime_section = f"Market regime: {determine_market_regime(spy_trend, qqq_trend)}\nSPY trend: {spy_trend}\nQQQ trend: {qqq_trend}"
 
     summary = (
-        f"Market regime: {market_regime}\n"
-        f"SPY trend: {spy_trend}\n"
-        f"QQQ trend: {qqq_trend}\n"
+        f"{regime_section}\n\n"
         f"Best sector/ETF: {best_sector_etf(ticker_results, config)}\n"
         f"Avoid list: {', '.join(avoid_symbols) if avoid_symbols else 'None'}"
     )
@@ -287,6 +409,8 @@ def format_report_text(
     high_risk_section = format_high_risk_dip_watchlist(ticker_results, config)
 
     sections = [header, summary, f"Top Candidates:\n\n{candidates_text}", high_risk_section]
+    if config.get("portfolio_risk", {}).get("enabled", True):
+        sections.append(format_portfolio_risk_summary(config))
     if config.get("paper_trading", {}).get("enabled", True):
         sections.append(format_paper_trading_summary(config))
     sections.append(footer)
@@ -374,7 +498,7 @@ def append_to_journal(ticker_results: list[dict[str, Any]], config: dict[str, An
 
     rows = []
     for entry in select_top_candidates(ticker_results, config):
-        risk = entry["best_risk_result"]
+        risk = final_position(entry)
         rows.append(
             {
                 "alert_date": report_date,

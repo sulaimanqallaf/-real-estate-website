@@ -14,9 +14,11 @@ from typing import Any
 from . import (
     data_collector,
     indicators,
+    market_regime,
     options_skew,
     paper_trade_tracker,
     paper_trades,
+    portfolio_risk,
     report_writer,
     risk_manager,
     signal_scorer,
@@ -133,6 +135,31 @@ def _send_paper_trade_approvals(
         safe_run(logger, f"{entry['symbol']} paper-trade approval message", _send)
 
 
+def _classify_regime_safely(
+    price_data: dict[str, Any],
+    snapshots: dict[str, dict[str, float]],
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> market_regime.MarketRegime:
+    """Never let a regime-classification failure (missing SPY/QQQ data, e.g.)
+    abort the run - fall back to the same safe SIDEWAYS/low-confidence default
+    classify_regime() itself uses for missing indicator data."""
+    fallback = market_regime.MarketRegime(
+        primary=market_regime.SIDEWAYS, trend="mixed", volatility="normal", risk_state="risk_on",
+        confidence=0.0, explanation="SPY/QQQ data unavailable - defaulting to SIDEWAYS.",
+    )
+    if "SPY" not in price_data or "QQQ" not in price_data or "SPY" not in snapshots or "QQQ" not in snapshots:
+        logger.warning("SPY/QQQ data unavailable for regime classification - defaulting to SIDEWAYS.")
+        return fallback
+
+    result = safe_run(
+        logger,
+        "market regime classification",
+        lambda: market_regime.classify_regime(price_data["SPY"], price_data["QQQ"], snapshots["SPY"], snapshots["QQQ"], config),
+    )
+    return result if result is not None else fallback
+
+
 def _send_paper_trade_exit_notifications(
     closed_trades: list[dict[str, Any]],
     token: str,
@@ -209,6 +236,23 @@ def run(config_path: str | None = None) -> int:
         logger.error("No symbols could be analyzed. Aborting run.")
         return 1
 
+    # Market Regime Filter, then Portfolio Risk Manager - both run on the full
+    # ticker_results batch (score-descending, see portfolio_risk.py's module
+    # docstring) BEFORE anything is saved/reported, so every downstream
+    # consumer (reports, journal, Telegram approvals) already sees the final,
+    # regime-and-portfolio-adjusted sizing via report_writer.select_top_candidates.
+    regime = _classify_regime_safely(price_data, snapshots, config, logger)
+    logger.info("Market regime: %s (risk_state=%s, confidence=%.2f)", regime.primary, regime.risk_state, regime.confidence)
+
+    open_trades_df = paper_trades.load_paper_trades_df(config)
+    safe_run(
+        logger,
+        "market regime + portfolio risk pipeline",
+        lambda: portfolio_risk.run_regime_and_portfolio_pipeline(
+            ticker_results, regime, open_trades_df, price_data, config, logger
+        ),
+    )
+
     report_date = report_writer.today_str()
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)
     logger.info("Saved report: %s | %s", csv_path, json_path)
@@ -216,7 +260,7 @@ def run(config_path: str | None = None) -> int:
     journal_path = report_writer.append_to_journal(ticker_results, config, report_date)
     logger.info("Journal updated: %s", journal_path)
 
-    report_text = report_writer.format_report_text(ticker_results, report_date, failed_symbols, config)
+    report_text = report_writer.format_report_text(ticker_results, report_date, failed_symbols, config, regime)
 
     if config.get("telegram", {}).get("enabled", True):
         from . import telegram_bot
