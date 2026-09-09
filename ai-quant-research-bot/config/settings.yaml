@@ -1,0 +1,131 @@
+# AI Quant Research Bot configuration.
+# Non-secret settings only. Telegram token/chat id live in .env (see .env.example).
+
+tickers:
+  - SPY
+  - QQQ
+  - VOO
+  - VGT
+  - SMH
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMD
+  - META
+  - TSLA
+  - GOOGL
+  - AMZN
+  - GLD
+  - USO
+
+benchmark_ticker: SPY          # used for "return vs SPY" relative strength
+secondary_benchmark: QQQ        # only used for backtest comparison
+
+# Used only to pick a "Best sector/ETF" line for the report - not a strategy input.
+etf_tickers: [SPY, QQQ, VOO, VGT, SMH, GLD, USO]
+equity_tickers: [AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN]
+
+# Which strategies apply to which tickers, per the spec. A ticker not listed under a
+# strategy simply never triggers that strategy's candidate - it still gets scored on
+# the universal indicator criteria and still gets an options-skew classification.
+strategy_universe:
+  mean_reversion: [SPY, QQQ]
+  momentum_breakout: [QQQ, VGT, SMH, NVDA, AMD]
+  trend_following: [VOO, VGT, SMH, GLD]
+
+data:
+  history_period: "2y"      # yfinance period for daily download (need 200D MA + 1y backtest)
+  interval: "1d"             # Version 1 daily bars for indicators/strategies/backtest.
+  # yfinance intraday (15m) history is capped at ~60 days by Yahoo itself, which is too
+  # short for a 200D-MA-gated strategy or a 1-year backtest. Version 1 therefore runs
+  # mean reversion on daily bars; set to "15m" only if you accept that limitation and
+  # wire a shorter lookback for that one strategy yourself.
+  mean_reversion_interval: "1d"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  reports_dir: "data/reports"
+  journal_dir: "data/journal"
+
+indicators:
+  sma_windows: [20, 50, 200]
+  ema_windows: [50, 200]
+  rsi_period: 14
+  atr_period: 14
+  bollinger_window: 20
+  bollinger_std_multiplier: 2.0
+  momentum_days: [20, 60]
+  one_month_trading_days: 21
+  relative_volume_window: 20
+  volatility_window: 20
+
+strategies:
+  mean_reversion:
+    ma_window: 20
+    std_dev_threshold: 1.5      # price must be below MA by > 1.5 std devs
+    require_trend_intact: true   # "trend not broken" == price still above SMA200
+    atr_stop_multiplier: 1.0      # tighter stop for a reversion trade
+
+  momentum_breakout:
+    breakout_window: 20            # 20-day high breakout
+    volume_multiplier: 1.5          # volume must exceed 1.5x its 20D average
+    atr_stop_multiplier: 2.0
+    reward_risk_multiple: 2.0        # target = entry + reward_risk_multiple * risk
+
+  trend_following:
+    atr_stop_multiplier: 2.5
+    reward_risk_multiple: 2.0
+
+  skew:
+    otm_pct: 0.10                 # how far out-of-the-money to sample calls/puts (10%)
+    target_expiration_min_days: 20
+    target_expiration_max_days: 45
+    one_month_return_days: 21      # matches indicators.one_month_trading_days
+    skew_threshold: 0.02            # |skew| must exceed this to call it "bid", else Neutral
+    favorable_skew_labels: ["Contrarian Bid", "Chase"]  # "calls bid" scenarios -> scoring bonus
+
+scoring:
+  points:
+    above_sma_200: 15
+    above_sma_50: 10
+    momentum_20d_positive: 10
+    momentum_60d_positive: 10
+    rsi_in_healthy_range: 10
+    volume_above_avg: 10
+    trend_following_positive: 10
+    momentum_breakout_active: 10
+    favorable_options_skew: 10
+    risk_reward_above_threshold: 5
+  rsi_healthy_min: 45
+  rsi_healthy_max: 68
+  labels:
+    strong_candidate_min: 80
+    watchlist_min: 65
+    weak_watchlist_min: 50
+    # below weak_watchlist_min => Avoid
+
+risk:
+  account_equity: 10000            # edit to your real account size; not a secret, just a default
+  risk_pct_per_trade: 0.75          # spend between 0.5 and 1.0 (%) of equity risk per trade
+  min_risk_reward_ratio: 1.5
+  max_rsi_for_trade: 75
+  require_above_sma_200: true
+  reject_if_downside_exceeds_upside: true
+  allow_margin: false               # Version 1 hard constraint, not user-editable in practice
+  allow_options_trading: false        # Version 1 hard constraint
+  allow_shorting: false                # Version 1 hard constraint
+
+backtest:
+  lookback_period: "1y"
+  initial_capital: 10000
+  max_holding_days: 30
+  risk_pct_per_trade: 0.75
+  benchmarks: [SPY, QQQ]
+
+telegram:
+  enabled: true
+  max_message_chars: 3500
+  top_candidates_limit: 8
+
+logging:
+  level: "INFO"
+  log_dir: "data/reports"
