@@ -10,11 +10,14 @@ A Mac-friendly Python research tool that:
 4. Estimates entry/target/stop/risk-reward/position size for whatever setups clear
    every risk rule.
 5. Sends a daily Telegram report and saves CSV/JSON reports plus a trade journal.
-6. Includes a standalone backtester (1+ year, per strategy, vs. buy-and-hold).
+6. Sends one Approve Paper Trade / Reject / Watch Only button set per Top
+   Candidate; approvals are recorded in `data/journal/paper_trades.csv`.
+7. Includes a standalone backtester (1+ year, per strategy, vs. buy-and-hold).
 
 **This version does not place trades, connect to a broker, use margin, trade
-options, or short anything.** It only collects data, analyzes it, scores it, and
-sends an alert. Nothing here executes an order.
+options, or short anything.** It only collects data, analyzes it, scores it, sends
+an alert, and - if you tap Approve - records a PAPER trade in a CSV. Nothing here
+executes a real order, on paper trades or anything else.
 
 ---
 
@@ -85,6 +88,25 @@ A few things worth knowing up front, not buried in the code:
   the universal 0-100 checklist (see the decoupled-but-gated-together bullet above)
   - enabling the flag does not change that; it can still be right there in the High
   Risk Dip Watchlist and nowhere near Top Candidates.
+- **The paper-trade approval flow is two separate processes, not one.**
+  `python -m src.main` is a once-a-day batch job: it sends the report AND one
+  Approve/Reject/Watch Only message per Top Candidate, then exits. Nobody is
+  listening for the button press yet at that point - a *separate*, continuously-
+  running process, `python -m src.approval_listener`, has to be running (in its
+  own terminal, or as a background launchd agent - see below) for a tap on any
+  button to actually do anything. If that listener isn't running, the buttons
+  just sit there inert. High Risk Dip Watchlist entries never get buttons at all,
+  under any config - they're informational only, always, with no exceptions.
+  Approving only ever means: append one row to `data/journal/paper_trades.csv`.
+  It never places, modifies, or connects to anything resembling a real order, and
+  only the chat matching your configured `TELEGRAM_CHAT_ID` is allowed to approve
+  anything - a callback from any other chat is logged and ignored.
+- **An Aggressive candidate's eligibility is re-checked at the moment you tap
+  Approve, not just when the message was sent.** If you flip
+  `aggressive_mode.enabled` back to `false` between the daily send and whenever
+  you get around to checking your phone, tapping Approve on an Aggressive
+  candidate will be refused right then - it does not fall back to whatever the
+  flag was when the message went out.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
@@ -156,6 +178,11 @@ Each run:
 - Sends the Telegram report (splitting into multiple messages if long). Set
   `telegram.enabled: false` in the config to skip sending while still generating
   reports.
+- Sends one additional Approve Paper Trade / Reject / Watch Only message per Top
+  Candidate and saves a pending-approval record for each in
+  `data/journal/pending_approvals.json`. Set `paper_trading.enabled: false` to
+  skip this and only send the plain report. Nothing happens with a button press
+  until `python -m src.approval_listener` (next section) is actually running.
 
 Run the test suite any time with:
 
@@ -179,7 +206,68 @@ a blended "Combined" block, and SPY/QQQ buy-and-hold comparisons. Output goes to
 
 ---
 
-## 5. Schedule it daily on Mac
+## 5. Run the paper-trade approval listener
+
+This is a **separate, continuously-running process** from `python -m src.main` -
+it's what actually processes the Approve/Reject/Watch Only button presses on
+whatever device you're reading Telegram on. Run it in its own terminal tab (or
+tmux/screen session, or as a launchd agent - see below):
+
+```bash
+source .venv/bin/activate   # if not already active
+python -m src.approval_listener
+```
+
+It long-polls Telegram for button presses, resolves each one against
+`data/journal/pending_approvals.json`, and on Approve appends a row to
+`data/journal/paper_trades.csv`. It logs to `data/reports/approval_listener.log`
+and persists its Telegram update offset to
+`data/journal/telegram_update_offset.txt` so restarting it never reprocesses (and
+double-records) old button presses. Stop it with Ctrl+C; there is nothing to
+clean up.
+
+To keep it running in the background via launchd instead of a terminal tab,
+create `~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiquantresearchbot.approvals</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/full/path/to/ai-quant-research-bot/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.approval_listener</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/full/path/to/ai-quant-research-bot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/approval_listener.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/approval_listener.err.log</string>
+</dict>
+</plist>
+```
+
+Note `KeepAlive`/`RunAtLoad` instead of `StartCalendarInterval` - this agent is
+meant to run continuously, not on a schedule, unlike the daily report job below.
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist
+```
+
+Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist`.
+
+---
+
+## 6. Schedule the daily report on Mac
 
 ### cron
 
@@ -233,7 +321,7 @@ Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.dai
 
 ---
 
-## 6. How to read the reports
+## 7. How to read the reports
 
 ### Telegram / `report_<date>.json` / `.csv`
 
@@ -244,7 +332,10 @@ Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.dai
   plan AND a non-Avoid label (see the caveat above), ranked by score, capped at
   `telegram.top_candidates_limit`. Only Safe strategies count here by default (Trend
   Following, Momentum Breakout, Safe Mean Reversion); Aggressive Mean Reversion
-  joins the pool only if you've set `aggressive_mode.enabled: true`.
+  joins the pool only if you've set `aggressive_mode.enabled: true`. Each one is
+  also sent as its own follow-up message with Approve Paper Trade / Reject / Watch
+  Only buttons (see section 5 above for the listener that processes them) - set
+  `paper_trading.enabled: false` to turn that off and keep only the plain report.
 - **High Risk Dip Watchlist**: every ticker where Aggressive Mean Reversion
   triggered today, shown with a would-be entry/stop/target/R:R and whether it would
   have cleared the risk rules - informational only. The section header states
@@ -268,6 +359,28 @@ blank by design: Version 1 never executes trades, so nothing exits itself. Fill
 those in yourself as you track real-world outcomes (or wait for a later version
 that automates it).
 
+### `data/journal/paper_trades.csv`
+
+One row per candidate you explicitly tapped **Approve Paper Trade** on via
+Telegram - this is a strict subset of `trade_journal.csv` (which logs every alert
+automatically, regardless of your input) and requires `python -m
+src.approval_listener` to have been running when you tapped the button. Same
+`status`/`exit_price`/`pnl` manual-fill-in convention as the trade journal, plus
+`is_aggressive` so you can filter Aggressive paper trades out of your own
+performance tracking if you want to see Safe-only results. Nothing in this file
+was ever a real order - it is a paper record you asked for by tapping a button,
+nothing more.
+
+### `data/journal/pending_approvals.json`
+
+Working state for the approval flow - one entry per Top Candidate message sent,
+keyed by `report_date|symbol`, tracking PENDING / APPROVED / REJECTED /
+WATCH_ONLY / BLOCKED_AGGRESSIVE_DISABLED. Entries older than
+`paper_trading.pending_expiry_hours` (default 72) are silently dropped - tapping
+a button on an old message past that point does nothing. You generally don't
+need to look at this file directly; it exists so `approval_listener.py` can
+resolve a button press back to a specific candidate's full trade detail.
+
 ### Backtest output
 
 `backtest_<date>.csv` has one row per strategy (plus "Combined" and the buy-and-hold
@@ -289,27 +402,36 @@ ai-quant-research-bot/
     raw/          cached daily OHLCV per symbol
     processed/     reserved for future intermediate outputs
     reports/        daily CSV/JSON reports, app.log, backtest output
-    journal/          trade_journal.csv
+    journal/          trade_journal.csv, paper_trades.csv, pending_approvals.json,
+                        telegram_update_offset.txt, approval_listener.log
   src/
     main.py                 orchestrates the daily run
     data_collector.py        yfinance price + best-effort options fetch
     indicators.py             SMA/EMA/RSI/ATR/Bollinger/momentum/relative volume/volatility
     options_skew.py            ATM/OTM IV sampling + skew calculation
     strategies/
-      mean_reversion.py         Strategy 1
+      mean_reversion.py         Strategy 1 (Safe + Aggressive modes)
       momentum_breakout.py       Strategy 2
       trend_following.py          Strategy 3
       skew_map.py                  Contrarian Bid / Chase / Hedged Rally / Fear classifier
     risk_manager.py            universal trade rules + position sizing
     signal_scorer.py             0-100 scoring + labels
-    telegram_bot.py                Telegram Bot API client
-    report_writer.py                report text + CSV/JSON + journal
-    backtester.py                    standalone 1-year+ backtest engine
-    utils.py                          config/env loading, logging, error isolation
+    telegram_bot.py                generic Telegram Bot API client (incl. inline keyboards)
+    paper_trades.py                 approval-flow domain logic (callback_data, pending
+                                      approvals, decision processing, paper_trades.csv)
+    approval_listener.py             standalone process: polls Telegram, resolves button
+                                       presses via paper_trades.py
+    report_writer.py                  report text + CSV/JSON + journal
+    backtester.py                      standalone 1-year+ backtest engine
+    utils.py                            config/env loading, logging, error isolation
   tests/
     test_indicators.py
     test_risk_manager.py
     test_signal_scorer.py
+    test_strategy_assignment.py
+    test_mean_reversion_modes.py
+    test_paper_trades.py
+    test_approval_listener.py
 ```
 
 ## Scoring (0-100)
@@ -341,10 +463,18 @@ ai-quant-research-bot/
 - No margin, no options trading, no shorting - hard constraints in Version 1.
 
 A candidate becomes a **Top Candidate** only when it clears every rule above AND the
-risk manager approved it AND its overall label isn't Avoid.
+risk manager approved it AND its overall label isn't Avoid. This is the exact same
+gate that decides which candidates get an Approve Paper Trade button at all -
+tapping Approve can never make a candidate "more eligible" than it already was;
+it can only turn an already-eligible candidate into a row in `paper_trades.csv`.
+The one thing checked again, live, at the moment you tap Approve rather than just
+once at send time is `aggressive_mode.enabled` for Aggressive candidates (see
+"Read this before you trust the output" above).
 
 ## Disclaimer
 
-Research and educational tool only. Not financial advice. No trades are placed.
+Research and educational tool only. Not financial advice. No trades are placed -
+paper or real. Approving a candidate via Telegram only appends a row to a local
+CSV file; it never connects to a broker, places an order, or risks real money.
 Nothing here should be read as a recommendation to buy or sell any security. Do
 your own due diligence.

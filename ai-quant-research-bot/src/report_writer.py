@@ -200,6 +200,12 @@ def format_report_text(
 
     if top_candidates:
         candidates_text = "\n\n".join(format_candidate_block(e) for e in top_candidates)
+        if config.get("paper_trading", {}).get("enabled", True):
+            candidates_text += (
+                "\n\n(Each candidate above was also sent as its own message with Approve Paper "
+                "Trade / Reject / Watch Only buttons - tap one to record your decision. No real "
+                "trades are placed either way.)"
+            )
     else:
         candidates_text = "No candidates cleared the risk rules today."
 

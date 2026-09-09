@@ -11,7 +11,7 @@ import logging
 import sys
 from typing import Any
 
-from . import data_collector, indicators, options_skew, report_writer, risk_manager, signal_scorer
+from . import data_collector, indicators, options_skew, paper_trades, report_writer, risk_manager, signal_scorer
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
 from .utils import get_env_var, load_config, load_env, safe_run, setup_logging
 
@@ -91,6 +91,39 @@ def analyze_symbol(
     return entry
 
 
+def _send_paper_trade_approvals(
+    ticker_results: list[dict[str, Any]],
+    report_date: str,
+    token: str,
+    chat_id: str,
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """Send one Approve/Reject/Watch Only message per Top Candidate.
+
+    Deliberately reuses report_writer.select_top_candidates() rather than
+    filtering ticker_results itself - that's the single choke point that already
+    keeps Aggressive candidates out unless aggressive_mode.enabled is true AND
+    they're actually in Top Candidates, so this function can't accidentally offer
+    an approval button on something that shouldn't have one. High Risk Dip
+    Watchlist entries never reach this function at all.
+    """
+    from . import telegram_bot
+
+    for entry in report_writer.select_top_candidates(ticker_results, config):
+
+        def _send(e=entry):
+            text = paper_trades.format_approval_message(e)
+            keyboard = paper_trades.build_approval_keyboard(e["symbol"], report_date)
+            message_id = telegram_bot.send_message_with_keyboard(token, chat_id, text, keyboard, logger)
+            if message_id is None:
+                raise RuntimeError(f"Failed to send approval message for {e['symbol']}")
+            record = paper_trades.pending_record_from_entry(e, report_date, message_id, chat_id)
+            paper_trades.save_pending_approval(record, config)
+
+        safe_run(logger, f"{entry['symbol']} paper-trade approval message", _send)
+
+
 def run(config_path: str | None = None) -> int:
     load_env()
     config = load_config(config_path)
@@ -155,6 +188,9 @@ def run(config_path: str | None = None) -> int:
                 logger.info("Telegram report sent successfully.")
             else:
                 logger.error("Telegram report failed to send (see logged errors above).")
+
+            if config.get("paper_trading", {}).get("enabled", True):
+                _send_paper_trade_approvals(ticker_results, report_date, token, chat_id, config, logger)
         except RuntimeError as exc:
             logger.error("Telegram not configured: %s", exc)
     else:

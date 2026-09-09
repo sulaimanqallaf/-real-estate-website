@@ -145,6 +145,21 @@ telegram:
   max_message_chars: 3500
   top_candidates_limit: 8
 
+# Telegram approval flow for PAPER TRADES ONLY - never a real order, never IBKR.
+# main.py sends one extra message per Top Candidate with Approve/Reject/Watch Only
+# buttons; a separate, continuously-running process (`python -m
+# src.approval_listener` - see README) processes the button presses whenever they
+# happen and appends approvals to data/journal/paper_trades.csv. High Risk Dip
+# Watchlist entries never get buttons - informational only, always.
+paper_trading:
+  enabled: true                                # master switch for the whole approval flow
+  paper_trades_file: "paper_trades.csv"           # written under data.journal_dir
+  pending_approvals_file: "pending_approvals.json"  # written under data.journal_dir
+  update_offset_file: "telegram_update_offset.txt"    # approval_listener's persisted getUpdates offset
+  pending_expiry_hours: 72                              # a button tapped after this long is refused
+  poll_interval_seconds: 3                                # approval_listener's idle sleep between polls
+  poll_timeout_seconds: 30                                 # Telegram long-poll timeout per getUpdates call
+
 logging:
   level: "INFO"
   log_dir: "data/reports"
