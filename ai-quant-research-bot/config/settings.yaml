@@ -25,13 +25,19 @@ secondary_benchmark: QQQ        # only used for backtest comparison
 etf_tickers: [SPY, QQQ, VOO, VGT, SMH, GLD, USO]
 equity_tickers: [AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN]
 
-# Which strategies apply to which tickers, per the spec. A ticker not listed under a
-# strategy simply never triggers that strategy's candidate - it still gets scored on
-# the universal indicator criteria and still gets an options-skew classification.
+# Which strategies apply to which tickers. Every ticker in `tickers:` above is
+# assigned to at least one strategy, so every ticker can generate a trade candidate:
+#   SPY, QQQ                                        -> mean reversion + trend following
+#   VOO, VGT, SMH                                     -> trend following + momentum breakout
+#   AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN      -> momentum breakout + trend following
+#   GLD, USO                                             -> trend following only
+# A ticker not listed under a given strategy simply never triggers THAT strategy's
+# candidate - it still gets scored on the universal indicator criteria and still
+# gets an options-skew classification regardless.
 strategy_universe:
   mean_reversion: [SPY, QQQ]
-  momentum_breakout: [QQQ, VGT, SMH, NVDA, AMD]
-  trend_following: [VOO, VGT, SMH, GLD]
+  momentum_breakout: [VOO, VGT, SMH, AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN]
+  trend_following: [SPY, QQQ, VOO, VGT, SMH, AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN, GLD, USO]
 
 data:
   history_period: "2y"      # yfinance period for daily download (need 200D MA + 1y backtest)

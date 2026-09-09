@@ -5,11 +5,19 @@ strategy or report path can silently bypass them): no margin, no options trading
 no shorting, no real execution. This module only evaluates whether a *proposed*
 long candidate (entry/stop/target) from a strategy module should be presented as a
 trade idea, and if so, how many shares that implies at the configured risk-per-trade.
+
+The "price above SMA200" rule is waived specifically for Mean Reversion candidates
+(that strategy is, by definition, a dip-buy). Note that `strategies/mean_reversion.py`
+has its own separate `require_trend_intact` gate that currently still requires price
+above SMA200 before it will even propose a candidate - so this exemption only takes
+effect once that internal gate is relaxed. See README.md for the full explanation.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .strategies.mean_reversion import STRATEGY_NAME as MEAN_REVERSION_STRATEGY_NAME
 
 
 def evaluate_candidate(
@@ -33,14 +41,18 @@ def evaluate_candidate(
 
     blocked_reasons: list[str] = []
 
-    if risk_cfg["require_above_sma_200"]:
+    # The SMA200 filter is waived specifically for Mean Reversion: that strategy is
+    # by definition a dip-buy, and its whole premise is a temporary washout that can
+    # occur even when the longer-term trend (price vs. SMA200) has turned down.
+    is_mean_reversion = candidate["strategy"] == MEAN_REVERSION_STRATEGY_NAME
+    if risk_cfg["require_above_sma_200"] and not is_mean_reversion:
         if sma_200 != sma_200:  # NaN
             blocked_reasons.append("200D moving average not yet available.")
         elif price < sma_200:
             blocked_reasons.append("Price is below the 200D moving average.")
 
-    if rsi == rsi and rsi > risk_cfg["max_rsi_for_trade"]:  # NaN-safe
-        blocked_reasons.append(f"RSI {rsi:.1f} is above the {risk_cfg['max_rsi_for_trade']} overbought cutoff.")
+    if rsi == rsi and rsi >= risk_cfg["max_rsi_for_trade"]:  # NaN-safe; RSI must be strictly below the cutoff
+        blocked_reasons.append(f"RSI {rsi:.1f} is at or above the {risk_cfg['max_rsi_for_trade']} overbought cutoff.")
 
     risk_per_share = entry - stop
     reward_per_share = target - entry

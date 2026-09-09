@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import risk_manager
+from src.strategies.mean_reversion import STRATEGY_NAME as MEAN_REVERSION
 from src.utils import load_config
 
 CONFIG = load_config(Path(__file__).resolve().parent.parent / "config" / "settings.yaml")
@@ -48,6 +49,34 @@ def test_blocked_when_rsi_overbought():
     result = risk_manager.evaluate_candidate(make_candidate(), make_snapshot(rsi_14=80.0), CONFIG)
     assert result["tradeable"] is False
     assert any("overbought" in r.lower() for r in result["blocked_reasons"])
+
+
+def test_rsi_exactly_at_cutoff_is_blocked():
+    # RSI must be *strictly below* 75 to pass - 75.0 itself does not qualify.
+    result = risk_manager.evaluate_candidate(make_candidate(), make_snapshot(rsi_14=75.0), CONFIG)
+    assert result["tradeable"] is False
+    assert any("overbought" in r.lower() for r in result["blocked_reasons"])
+
+
+def test_rsi_just_below_cutoff_passes():
+    result = risk_manager.evaluate_candidate(make_candidate(), make_snapshot(rsi_14=74.9), CONFIG)
+    assert result["tradeable"] is True
+
+
+def test_mean_reversion_candidate_is_exempt_from_sma_200_rule():
+    # Price (100) is below SMA200 (110) - blocked for any other strategy, but Mean
+    # Reversion is explicitly exempt from this one rule.
+    candidate = make_candidate(strategy=MEAN_REVERSION)
+    result = risk_manager.evaluate_candidate(candidate, make_snapshot(sma_200=110.0), CONFIG)
+    assert result["tradeable"] is True
+    assert not any("200d" in r.lower() for r in result["blocked_reasons"])
+
+
+def test_non_mean_reversion_candidate_is_still_blocked_below_sma_200():
+    candidate = make_candidate(strategy="Trend Following")
+    result = risk_manager.evaluate_candidate(candidate, make_snapshot(sma_200=110.0), CONFIG)
+    assert result["tradeable"] is False
+    assert any("200d" in r.lower() for r in result["blocked_reasons"])
 
 
 def test_blocked_when_risk_reward_too_low():

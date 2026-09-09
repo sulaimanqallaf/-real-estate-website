@@ -27,21 +27,36 @@ A few things worth knowing up front, not buried in the code:
   IV can't be found, the report shows `Data Unavailable` for that ticker's skew
   rather than guessing. Skew is explicitly a watchlist layer, never a trade gate,
   per the spec.
-- **Strategies only fire on the tickers assigned to them.** Per your spec, Mean
-  Reversion only runs on SPY/QQQ, Momentum Breakout only on QQQ/VGT/SMH/NVDA/AMD,
-  and Trend Following only on VOO/VGT/SMH/GLD. That means AAPL, MSFT, META, TSLA,
-  GOOGL, AMZN, and USO never generate a trade candidate in Version 1 - they still
-  get scored and get a skew classification, but "Top Candidates" will never include
-  them unless you widen a strategy's ticker list in `config/settings.yaml`.
+- **Every ticker is assigned to at least one strategy.** SPY/QQQ run mean reversion
+  + trend following; VOO/VGT/SMH run trend following + momentum breakout;
+  AAPL/MSFT/NVDA/AMD/META/TSLA/GOOGL/AMZN run momentum breakout + trend following;
+  GLD/USO run trend following only. Every ticker CAN generate a trade candidate -
+  whether it actually does on a given day still depends on that day's price action
+  and the risk rules below. A ticker not listed under a given strategy still never
+  triggers *that* strategy's candidate, and still gets scored on the universal
+  indicator criteria and a skew classification regardless.
 - **A ticker's 0-100 label and its "Top Candidates" trade plan are deliberately
   decoupled, but gated together.** A valid Mean Reversion setup requires price to be
   temporarily *below* its 20D MA - which by construction drags down the momentum/
   trend portion of the score. So a real, risk-manager-approved dip-buy candidate can
   coexist with a mediocre overall score. To avoid printing a contradictory "Signal:
-  Avoid" directly above a detailed buy plan, **Top Candidates requires both**: the
-  risk manager approved the trade AND the label is not Avoid. A tradeable setup on
-  an Avoid-labeled ticker still shows up in the saved CSV/JSON (for your own review)
-  but is left out of the Telegram report and the trade journal.
+  Avoid" directly above a detailed buy plan, **Top Candidates requires all of**: the
+  risk manager approved the trade, the label is not Avoid, risk/reward is at least
+  1.5, RSI is strictly below 75, and price is above SMA 200 - except for Mean
+  Reversion candidates specifically, which are exempt from the SMA200 check (see the
+  next bullet). A tradeable setup on an Avoid-labeled ticker still shows up in the
+  saved CSV/JSON (for your own review) but is left out of the Telegram report and
+  the trade journal.
+- **Mean Reversion's SMA200 exemption has a wrinkle worth knowing.** The risk
+  manager waives the "price above SMA200" rule for Mean Reversion candidates, since
+  that strategy is explicitly a dip-buy. But `strategies/mean_reversion.py` still has
+  its own internal `require_trend_intact` gate (on by default in
+  `config/settings.yaml`), which requires price above SMA200 before the strategy
+  will even propose a candidate in the first place. Net effect: today, mean
+  reversion still only fires above the 200D MA in practice - the risk-manager
+  exemption is real and matters the moment you set `require_trend_intact: false`,
+  but until then it's a no-op. Flip that flag if you want genuine "buy the dip
+  during a longer downtrend" setups to reach the risk manager at all.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
@@ -277,13 +292,17 @@ ai-quant-research-bot/
 
 ## Risk rules (applied to every proposed trade)
 
-- No trade if price is below SMA 200.
-- No trade if RSI(14) is above 75.
-- No trade if risk/reward is below 1.5.
+- No trade if price is below SMA 200 - **except Mean Reversion candidates**, which
+  are exempt from this specific rule (see the wrinkle noted above).
+- No trade if RSI(14) is 75 or above (RSI must be strictly below 75 to pass).
+- No trade if risk/reward is below 1.5 (must be at least 1.5).
 - No trade if expected downside exceeds expected upside.
 - Position size = `risk_pct_per_trade`% of `account_equity`, divided by the per-share
   risk (entry minus stop) - both configurable in `config/settings.yaml`.
 - No margin, no options trading, no shorting - hard constraints in Version 1.
+
+A candidate becomes a **Top Candidate** only when it clears every rule above AND the
+risk manager approved it AND its overall label isn't Avoid.
 
 ## Disclaimer
 
