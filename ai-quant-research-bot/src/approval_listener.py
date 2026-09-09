@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paper_trades, telegram_bot
+from .execution import telegram_commands
 from .utils import get_env_var, load_config, load_env, resolve_path, setup_logging
 
 
@@ -44,10 +45,41 @@ def _save_offset(config: dict[str, Any], offset: int) -> None:
     path.write_text(str(offset))
 
 
+def _handle_text_message(update: dict[str, Any], token: str, chat_id: str, config: dict[str, Any], logger) -> bool:
+    """Phase 7 Part T: `/status`, `/positions`, `/orders`, `/performance`,
+    `/halt`, `/resume`. Returns True if `update` was a text command this
+    function handled (whether recognized or not authorized) - False means
+    "not a text message at all," so the caller can still try the
+    callback_query path."""
+    message = update.get("message")
+    if not message:
+        return False
+
+    source_chat_id = str(message.get("chat", {}).get("id", ""))
+    text = message.get("text", "")
+    command = telegram_commands.parse_command(text)
+    if command is None:
+        return False  # an ordinary message, not one of our commands - ignore silently
+
+    if source_chat_id != str(chat_id):
+        # Same authorization boundary as button presses: only the configured
+        # TELEGRAM_CHAT_ID may query status or halt/resume trading.
+        logger.warning("Ignoring command %s from unauthorized chat_id=%s", command, source_chat_id)
+        return True
+
+    reply = telegram_commands.handle_text_command(text, config, logger, requested_by=f"Telegram chat {chat_id}")
+    if reply:
+        telegram_bot.send_telegram_message(token, chat_id, reply, logger)
+    return True
+
+
 def handle_update(update: dict[str, Any], token: str, chat_id: str, config: dict[str, Any], logger) -> None:
+    if _handle_text_message(update, token, chat_id, config, logger):
+        return
+
     callback_query = update.get("callback_query")
     if not callback_query:
-        return  # not a button press (e.g. a plain text message) - nothing to do
+        return  # not a button press (e.g. a plain text message with no recognized command) - nothing to do
 
     message = callback_query.get("message") or {}
     source_chat_id = str(message.get("chat", {}).get("id", ""))

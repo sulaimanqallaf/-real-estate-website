@@ -251,6 +251,67 @@ def process_decision(
     return True, f"{symbol} set to watch only - no paper trade recorded."
 
 
+def close_trade_with_actual_fill(
+    trade_id: str, exit_price: float, exit_date: str, exit_reason: str, status: str, config: dict[str, Any], notes: str = "",
+) -> dict[str, Any] | None:
+    """Phase 7 Part V: close an OPEN row using the broker's ACTUAL exit fill,
+    rather than `paper_trade_tracker.py`'s daily-bar simulation guessing at
+    what would have happened. Called by `src.execution.learning_feedback`
+    the moment a broker-paper trade's stop or target leg actually fills.
+
+    Once this sets `status` to a terminal value, `paper_trade_tracker.
+    check_open_trades()` never touches this row again (it only ever
+    evaluates rows still `status == "OPEN"`) - so a trade closed here by a
+    real fill can never also be closed a second time by the bar-simulation
+    path. Returns the updated trade dict, or None if `trade_id` has no
+    matching OPEN row (e.g. already closed by a duplicate exit-fill poll -
+    safe to call more than once)."""
+    df = load_paper_trades_df(config)
+    if df.empty:
+        return None
+    matches = df.index[(df["trade_id"] == trade_id) & (df["status"] == "OPEN")]
+    if len(matches) == 0:
+        return None
+    idx = matches[0]
+    row = df.loc[idx].to_dict()
+
+    opened_at = datetime.strptime(str(row["opened_at"]), "%Y-%m-%d").date()
+    exit_date_only = datetime.strptime(exit_date, "%Y-%m-%d").date() if isinstance(exit_date, str) else exit_date
+    holding_days = (exit_date_only - opened_at).days
+    entry_price = float(row["entry_price"])
+    position_size = float(row["position_size"])
+    pnl_dollars = round((exit_price - entry_price) * position_size, 2)
+    pnl_pct = round((exit_price - entry_price) / entry_price * 100.0, 2) if entry_price else 0.0
+
+    # Rebuild every row as a plain dict and reconstruct the DataFrame from
+    # scratch (exactly like paper_trade_tracker.check_open_trades() does)
+    # rather than mutating cells of the already-loaded frame in place: a
+    # column that has been all-blank so far (e.g. exited_at, when every
+    # existing row is still OPEN) gets read back with an inferred numeric
+    # dtype, and assigning a string into it via .loc raises a pandas
+    # LossySetitemError/TypeError. Constructing pd.DataFrame(rows) fresh
+    # lets pandas infer dtypes from the ACTUAL mixed data being written.
+    updated_row = dict(row)
+    updated_row.update(
+        {
+            "status": status,
+            "exit_price": round(exit_price, 2),
+            "exited_at": exit_date_only.isoformat(),
+            "exit_reason": exit_reason,
+            "pnl_dollars": pnl_dollars,
+            "pnl_pct": pnl_pct,
+            "holding_days": holding_days,
+        }
+    )
+    if notes:
+        updated_row["notes"] = notes
+
+    rows = df.to_dict("records")
+    rows[df.index.get_loc(idx)] = updated_row
+    save_paper_trades_df(pd.DataFrame(rows, columns=df.columns), config)
+    return updated_row
+
+
 def _mode_for_strategy(strategy_name: str) -> str:
     """Safe/Aggressive only means something for Mean Reversion - every other
     strategy (Momentum Breakout, Trend Following) has no such split."""
@@ -296,7 +357,7 @@ def save_paper_trades_df(df: pd.DataFrame, config: dict[str, Any]) -> Path:
     return path
 
 
-def record_paper_trade(record: dict[str, Any], config: dict[str, Any]) -> Path:
+def record_paper_trade(record: dict[str, Any], config: dict[str, Any], trade_id: str | None = None) -> Path:
     """Create one OPEN paper position from an approved candidate.
 
     Default status is OPEN immediately - there is no separate PENDING state for
@@ -309,9 +370,17 @@ def record_paper_trade(record: dict[str, Any], config: dict[str, Any]) -> Path:
     Version 1 never executes trades, paper or real, beyond this ledger entry.
     exit_price/exited_at/exit_reason/pnl_dollars/pnl_pct/holding_days start blank
     and are filled in later by paper_trade_tracker.py as the position resolves.
+
+    `trade_id`: normally omitted (a fresh id is generated here, as always).
+    The Phase 7 execution layer passes one explicitly so the SAME trade_id
+    it already put on the broker-facing `OrderIntent` also lands in this
+    CSV row - the two are otherwise generated independently (each call to
+    `generate_trade_id` mints a different random suffix) and would
+    silently drift apart, breaking the link between a paper_trades.csv row
+    and the execution journal entry for the same trade.
     """
     trade = {
-        "trade_id": generate_trade_id(record["symbol"], record["report_date"]),
+        "trade_id": trade_id or generate_trade_id(record["symbol"], record["report_date"]),
         "approved_at": record.get("decided_at"),
         "ticker": record["symbol"],
         "strategy": record["strategy"],

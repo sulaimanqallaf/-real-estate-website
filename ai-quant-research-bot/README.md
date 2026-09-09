@@ -1515,6 +1515,253 @@ quant_agent:
 
 ---
 
+## Execution Layer: Autonomous IBKR PAPER Trading (Phase 7)
+
+**This layer is PAPER ONLY.** There is no code path anywhere in
+`src/execution/` that can connect to, or place an order against, a live
+IBKR account, and there is no configuration flag that enables one. Every
+prior phase's decision pipeline (strategies -> individual risk -> market
+regime -> portfolio risk -> Quant/ML Intelligence Layer) is unchanged;
+this phase only adds what happens AFTER a candidate has already survived
+all of that.
+
+### Hard constraints (enforced in code, not just documented)
+
+- Never connects to an IBKR LIVE account - `ibkr_client.verify_paper_account()`
+  raises `AccountModeError` (`LIVE_ACCOUNT_BLOCKED` / `ACCOUNT_MODE_UNVERIFIED`)
+  for anything except an unambiguous PAPER account, and there is no
+  `force`/`override`/`allow_live` parameter anywhere in this codebase that
+  can make it pass. A misconfigured LIVE port (7496 TWS / 4001 Gateway)
+  blocks regardless of what the account itself reports, as a second,
+  independent layer.
+- Never places a live-money order, never uses margin, never shorts, never
+  trades options - long US equities/ETFs only. `OrderIntent` has no
+  margin/leverage field to even express those; `order_state.validate_intent()`
+  refuses a non-`BUY` side and anything that doesn't look like a plain
+  equity ticker.
+- ML never overrides deterministic risk, and the Trader Agent (this
+  execution layer) never overrides the Risk Governor - `execution_policy.
+  classify_candidate()` can only classify a candidate as MORE cautious than
+  what label/individual-risk/regime/portfolio-risk already decided, never
+  less; an Avoid/risk-rejected/regime-blocked/portfolio-rejected candidate
+  always comes back `REJECT` regardless of ML confidence.
+- Missing or ambiguous account identity results in NO TRADING, not a
+  guess - this system fails closed by design.
+
+### Rollout: DRY_RUN first, then IBKR Paper, then (optionally) autonomous
+
+`config/settings.yaml`'s `execution.mode` supports exactly two values -
+`DRY_RUN` and `IBKR_PAPER` - **there is no `IBKR_LIVE` mode.**
+
+1. **`execution.mode: DRY_RUN`** (the default). Runs the complete decision
+   and order-intent construction pipeline every day, classifies every
+   candidate via `execution_policy.classify_candidate()`, and logs what
+   WOULD have auto-executed - but stops before ever contacting a broker.
+   Existing Telegram approval buttons behave exactly as in every prior
+   phase.
+2. **`execution.mode: IBKR_PAPER`** with `autonomous_paper.enabled: false`
+   (or `auto_execute.enabled: false`). Manually-approved trades ("Approve
+   Paper Trade" in Telegram) now actually place a real order against your
+   own IBKR Paper account, after `approval_bridge.execute_approved_trade()`
+   re-checks every gate that can legitimately have gone stale since the
+   button was sent (account mode, connection, circuit breakers, trading
+   hours, price/slippage, sizing, duplicates).
+3. **`execution.mode: IBKR_PAPER`** with BOTH `autonomous_paper.enabled: true`
+   AND `autonomous_paper.auto_execute.enabled: true`. A candidate that
+   clears every configured AUTO_EXECUTE bar (ML confidence, minimum score,
+   minimum risk/reward, data quality, etc.) now bypasses the Telegram
+   button and is submitted immediately - but Telegram still receives a
+   mandatory "🤖 AUTO PAPER TRADE EXECUTED" notice; auto execution is never
+   silent. **Both of these flags default to `false`** - no candidate
+   auto-executes merely because this code exists; a human must explicitly
+   flip both, and only after steps 1 and 2 have been exercised.
+
+### TWS / IB Gateway connection - no username or password ever needed here
+
+Run TWS or IB Gateway **on your own machine**, log into your own **Paper
+Trading** account yourself (this codebase never sees, stores, or
+transmits an IBKR username or password), then enable its API:
+
+- TWS: `Global Configuration -> API -> Settings` -> "Enable ActiveX and
+  Socket Clients" -> restrict to `127.0.0.1` (localhost only).
+- Default paper ports: `7497` (TWS Paper) or `4002` (IB Gateway Paper).
+  The corresponding LIVE ports, `7496`/`4001`, are recognized and
+  hard-blocked by `ibkr_client.py` regardless of what the account itself
+  reports - a misconfigured port is treated as a live-trading risk in its
+  own right.
+
+Required env vars (see `.env.example` - never commit real values):
+
+```
+IBKR_HOST=127.0.0.1
+IBKR_PORT=7497
+IBKR_CLIENT_ID=17
+IBKR_ACCOUNT_ID=            # your own Paper account id - never committed
+IBKR_EXPECTED_ACCOUNT_MODE=PAPER
+```
+
+`src/execution/ibkr_client.py` imports the official `ibapi` package
+**lazily** (only inside `connect()`, never at module import time) so
+every test, `DRY_RUN` mode, and the daily research run work with zero
+IBKR dependency installed - exactly like the SEC/FRED providers degrade
+cleanly with no credentials configured. Install it yourself, on your own
+machine, with `pip install ibapi` (or from IBKR's own TWS API download's
+`IBJts/source/pythonclient` directory, if the PyPI package doesn't build
+cleanly on your platform) before running `python -m src.execution.
+position_monitor` for real. Every automated test in this repo talks to
+`broker.FakeBroker` instead - no test anywhere depends on a real socket
+or on `ibapi` being importable.
+
+### Order lifecycle and bracket protection
+
+An eligible candidate becomes an immutable `OrderIntent` (`order_state.py`)
+that must pass `validate_intent()` (quantity > 0, long-only, plain-equity
+ticker, internally consistent entry/stop/target, risk within limit, PAPER
+account only) before `order_manager.py` - the only thing in this codebase
+allowed to call `broker.submit_order()` - will ever submit it.
+
+Rather than relying on IBKR's parent/child bracket "transmit" semantics
+(unverifiable from this environment - no real IBKR socket is reachable
+here to prove a mis-ordered transmit sequence can't submit a naked leg),
+`order_manager.py` submits the ENTRY order first, waits for a CONFIRMED
+fill, and only then submits the protective STOP and target LIMIT as exit
+children, sized to the ACTUAL filled quantity - never the originally
+requested size. A partial fill (say, 4 of 10 shares) protects only the 4
+filled shares; when the remaining 6 later fill, protection is resynced
+upward to 10 via `broker.replace_order()`, never a second, duplicate pair
+of exit orders.
+
+Lifecycle states: `CREATED -> SUBMITTED -> ACKNOWLEDGED -> (PARTIALLY_
+FILLED ->)* FILLED -> EXIT_PENDING -> CLOSED`, with `CANCELLED`/`REJECTED`/
+`ERROR` as terminal off-ramps. A rejection is detected via `broker.get_order()`
+(which, unlike `broker.open_orders()`, still returns a Rejected order) -
+`open_orders()` alone can never surface a rejection, since a rejected
+order is by definition excluded from "open" orders.
+
+### Duplicate prevention and reconciliation
+
+Every submission checks `OrderManager.is_duplicate()` first: the same
+`trade_id` already active, or an equivalent (ticker, strategy, entry,
+stop) intent already submitted. `restore_from_journal_rows()` rehydrates
+this check from the persisted `ExecutionJournal` at startup, so a process
+restart after an order was already submitted never resends it - even
+though the restarted process's in-memory `OrderManager` starts with no
+live `ManagedOrder` objects at all.
+
+`reconciliation.py` compares local journal state against the broker's own
+positions/open orders/executions at startup and after every reconnect.
+Any discrepancy (a local-open position the broker doesn't show, a broker
+position with no local record, an unrecognized order, a fill-quantity
+mismatch) blocks new entries via the `RECONCILIATION_FAILURE` circuit
+breaker until a human resolves it - it is never silently auto-resolved.
+
+### Circuit breakers and the manual kill switch
+
+`circuit_breaker.py` implements the account-level Risk Governor
+(`execution_risk` in `config/settings.yaml`: max risk per trade, max total
+open risk, max daily/weekly loss, max drawdown, max open positions, max
+new trades/day) plus kill switches for broker disconnection, unverified
+account mode, reconciliation failure, excessive rejections, stale data,
+and abnormal position state. `effective_execution_risk_limits()` clamps
+this layer's limits against the pre-existing `portfolio_risk` config via
+`min()` - it can never be looser than what already existed, only stricter.
+
+A tripped breaker blocks NEW entries only; existing protected exits keep
+being managed. The manual kill switch is a durable file
+(`data/runtime/trading_halt.json`, gitignored) that survives a process
+restart:
+
+```
+python -m src.execution.circuit_breaker halt --reason "..."
+python -m src.execution.circuit_breaker resume
+python -m src.execution.circuit_breaker status
+```
+
+`resume` only ever clears this manual flag - it can never clear a
+live-account block, an unverified account mode, a reconciliation failure,
+or any other hard breaker, all of which are independently re-evaluated
+from live state on the next real execution attempt.
+
+### Position monitor - a separate, long-running process
+
+`python -m src.execution.position_monitor` is a SEPARATE process from
+`python -m src.main`, which stays a once-a-day batch job and never loops
+forever. The monitor owns: connection health, polling entry fills and
+syncing stop/target protection, detecting a broker-paper trade's actual
+CLOSE and feeding it back into `paper_trades.csv` (see "Learning
+feedback" below), reconciliation, circuit-breaker evaluation, and Telegram
+exit notifications. It exits immediately (code 0) if `execution.mode` is
+not `IBKR_PAPER` - there is nothing for it to connect to otherwise.
+
+### Learning feedback (never auto-retrains)
+
+The moment a broker-paper trade's stop or target leg actually fills,
+`learning_feedback.check_exit_fills()` cancels the now-orphaned sibling
+leg (this design has no IBKR OCA/bracket grouping - see "Order lifecycle"
+above), and records the ACTUAL exit price, commission, holding time, and
+realized P&L into the SAME `paper_trades.csv` row the entry created (the
+`OrderIntent.trade_id` and the CSV row's `trade_id` are the identical
+value, passed through explicitly rather than independently regenerated) -
+never `paper_trade_tracker.py`'s daily-bar simulation guess, which is
+skipped automatically once a row's status is no longer `OPEN`. This makes
+the closed trade available to `performance_tracker.py`/`strategy_memory.py`
+exactly like any other closed paper trade. **This never triggers ML
+retraining** - `src/ml/trainer.py` remains an entirely separate, manual
+step.
+
+### Telegram command center
+
+`approval_listener.py` now also handles plain-text commands (in addition
+to the existing inline-keyboard Approve/Reject/Watch buttons), gated by
+the same `TELEGRAM_CHAT_ID` authorization check:
+
+- `/status` - execution mode, autonomous/auto-execute flags, manual halt state.
+- `/positions` - open paper_trades.csv rows.
+- `/orders` - active (non-terminal) managed orders from the execution journal.
+- `/performance` - `performance_tracker.compute_portfolio_performance()` summary.
+- `/halt` - trips the manual kill switch.
+- `/resume` - clears ONLY the manual kill switch (see "Circuit breakers" above).
+
+No secret (bot token, IBKR account id, credentials) is ever included in a
+formatted reply.
+
+### Config
+
+```yaml
+execution:
+  mode: DRY_RUN   # DRY_RUN | IBKR_PAPER - there is no IBKR_LIVE mode
+  journal_path: "data/journal/executions.jsonl"
+  halt_state_file: "data/runtime/trading_halt.json"
+  max_entry_slippage_pct: 0.003
+  trading_hours_timezone: "America/New_York"
+  trading_hours_start: "09:30"
+  trading_hours_end: "16:00"
+
+autonomous_paper:
+  enabled: false                # both must be explicitly true, by a human,
+  auto_execute:                 # after DRY_RUN and manually-approved PAPER
+    enabled: false              # trading have both been exercised
+    allowed_confidence: ["VERY_HIGH"]
+    minimum_signal_score: 85
+    minimum_risk_reward: 2.0
+    require_strategy_edge: false
+    require_good_data_quality: true
+    allow_reduced_size: true
+  approval:
+    enabled: true
+
+execution_risk:                 # additional to, never looser than, portfolio_risk
+  max_risk_per_trade_pct: 0.005
+  max_total_open_risk_pct: 0.02
+  max_daily_loss_pct: 0.01
+  max_weekly_loss_pct: 0.03
+  max_drawdown_pct: 0.10
+  max_open_positions: 6
+  max_new_trades_per_day: 3
+```
+
+---
+
 ## Project structure
 
 ```
@@ -1532,6 +1779,7 @@ ai-quant-research-bot/
                         telegram_update_offset.txt, approval_listener.log
     models/             trained model artifacts + metadata.json (src/ml/model_registry.py) -
                           written only by `python -m src.ml.trainer`, never by src.main
+    runtime/            manual kill-switch state (trading_halt.json) - Phase 7
   src/
     main.py                 orchestrates the daily run
     data_collector.py        yfinance price + best-effort options fetch
@@ -1596,6 +1844,31 @@ ai-quant-research-bot/
       predictor.py                                        MLPrediction, confidence bands, ensemble
       drift.py                                             feature/prediction/calibration/
                                                               data-quality drift monitoring
+    execution/                                          Phase 7 - PAPER ONLY, see section above
+      broker.py                                            Broker Protocol + FakeBroker (every
+                                                              test in this repo uses FakeBroker)
+      ibkr_client.py                                        real Broker impl over official ibapi -
+                                                              lazily imported, never exercised
+                                                              against a real socket in this repo
+      order_state.py                                        immutable OrderIntent + validation +
+                                                              lifecycle state constants
+      order_manager.py                                       submission, fill-aware bracket
+                                                                protection, idempotency, journal
+      execution_policy.py                                     AUTO_EXECUTE / REQUIRE_APPROVAL /
+                                                                  WATCH_ONLY / REJECT classification
+      circuit_breaker.py                                       account-level Risk Governor, kill
+                                                                  switches, manual halt file + CLI
+      reconciliation.py                                        local-vs-broker discrepancy detection
+      pretrade_checks.py                                       trading hours / event risk / slippage
+      approval_bridge.py                                       stale-approval re-check + AUTO_EXECUTE
+                                                                  execution-time gate re-verification
+      telegram_commands.py                                     /status /positions /orders
+                                                                  /performance /halt /resume
+      learning_feedback.py                                     actual broker fill -> paper_trades.csv
+                                                                  on a broker-paper trade's real close
+      position_monitor.py                                      separate long-running process
+                                                                  (`python -m src.execution.
+                                                                  position_monitor`)
   tests/
     test_indicators.py
     test_risk_manager.py
@@ -1622,6 +1895,16 @@ ai-quant-research-bot/
     test_ml_predictor_drift.py
     test_quant_agent_strategy_memory.py
     test_ml_integration.py
+    test_execution_broker_and_safety.py
+    test_execution_ibkr_client.py
+    test_execution_order_manager.py
+    test_execution_circuit_breaker.py
+    test_execution_reconciliation_and_monitor.py
+    test_execution_policy_and_pretrade.py
+    test_execution_approval_bridge.py
+    test_execution_telegram_commands.py
+    test_execution_learning_feedback.py
+    test_execution_synthetic_scenarios.py
 ```
 
 ## Scoring (0-100)

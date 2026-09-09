@@ -360,6 +360,55 @@ ml:
 quant_agent:
   eligible_score_threshold: 0   # a QuantAssessment's own quant_score at/above this (for an otherwise-eligible candidate) is labeled ELIGIBLE rather than WEAK - purely a reporting label, changes nothing about approval
 
+# Autonomous IBKR PAPER Trading Execution Layer (Phase 7) - see src/execution/
+# and README "Autonomous IBKR PAPER Trading Execution Layer". PAPER ONLY:
+# there is no live mode, no override flag, and no config value anywhere in
+# this file that can make src/execution/ibkr_client.py accept a live
+# account. `mode: DRY_RUN` performs the full decision/order-intent pipeline
+# and stops before broker transmission - this is the required first step
+# before ever flipping to IBKR_PAPER.
+execution:
+  mode: DRY_RUN   # DRY_RUN | IBKR_PAPER - there is no IBKR_LIVE mode in this codebase
+  journal_path: "data/journal/executions.jsonl"
+  halt_state_file: "data/runtime/trading_halt.json"
+  max_entry_slippage_pct: 0.003   # if the current market price has moved beyond this vs. the signal price, the entry is skipped (PRICE_MOVED_TOO_FAR), never chased
+  trading_hours_timezone: "America/New_York"
+  trading_hours_start: "09:30"
+  trading_hours_end: "16:00"   # regular session only in V1 - no pre-market/after-hours entries
+
+# Autonomous execution policy (Part D/S). BOTH of these must be explicitly
+# flipped to true, by a human, after DRY_RUN and manually-approved PAPER
+# trading have both been exercised and verified - see README's rollout
+# sequence. No candidate auto-executes merely because this code exists.
+autonomous_paper:
+  enabled: false
+  auto_execute:
+    enabled: false
+    allowed_confidence: ["VERY_HIGH"]
+    minimum_signal_score: 85
+    minimum_risk_reward: 2.0
+    require_strategy_edge: false
+    require_good_data_quality: true
+    allow_reduced_size: true
+  approval:
+    enabled: true
+
+# Account-level Risk Governor (Part K). These are an ADDITIONAL, execution-
+# time layer on top of the existing risk/regime/portfolio_risk limits -
+# never a replacement, and never looser. src/execution/circuit_breaker.py's
+# effective_execution_risk_limits() clamps max_open_positions and
+# max_total_open_risk_pct against portfolio_risk's own values (whichever is
+# stricter wins) so this section can never accidentally loosen what already
+# existed.
+execution_risk:
+  max_risk_per_trade_pct: 0.005
+  max_total_open_risk_pct: 0.02
+  max_daily_loss_pct: 0.01
+  max_weekly_loss_pct: 0.03
+  max_drawdown_pct: 0.10
+  max_open_positions: 6
+  max_new_trades_per_day: 3
+
 logging:
   level: "INFO"
   log_dir: "data/reports"

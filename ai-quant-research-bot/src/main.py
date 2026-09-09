@@ -30,6 +30,8 @@ from . import (
     strategy_memory,
 )
 from .data_providers import macro_provider, options_flow_provider
+from .execution import execution_policy, order_manager
+from .execution.broker import Broker
 from .ml import model_registry as ml_model_registry
 from .ml import predictor as ml_predictor
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
@@ -118,6 +120,7 @@ def _send_paper_trade_approvals(
     chat_id: str,
     config: dict[str, Any],
     logger: logging.Logger,
+    skip_tickers: set[str] | None = None,
 ) -> None:
     """Send one Approve/Reject/Watch Only message per Top Candidate.
 
@@ -127,10 +130,18 @@ def _send_paper_trade_approvals(
     they're actually in Top Candidates, so this function can't accidentally offer
     an approval button on something that shouldn't have one. High Risk Dip
     Watchlist entries never reach this function at all.
+
+    `skip_tickers` (Phase 7): symbols the execution layer already
+    AUTO_EXECUTEd this run - never send a redundant approval button for
+    something that already bypassed approval and placed a real PAPER
+    order (Part S).
     """
     from . import telegram_bot
 
+    skip_tickers = skip_tickers or set()
     for entry in report_writer.select_top_candidates(ticker_results, config):
+        if entry["symbol"] in skip_tickers:
+            continue
 
         def _send(e=entry):
             text = paper_trades.format_approval_message(e)
@@ -281,6 +292,127 @@ def _compute_quant_assessments(
     return assessments
 
 
+def _classify_execution_decisions(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    """Attaches entry["execution_decision"] to every ticker_result (Phase 7
+    Part D) - purely informational unless execution.mode == "IBKR_PAPER"
+    AND both autonomous_paper.enabled and auto_execute.enabled are true
+    (both default false). See execution_policy.py's hard invariant: this
+    can only classify a candidate as MORE cautious than what label/
+    individual-risk/regime/portfolio-risk already decided, never less."""
+    for entry in ticker_results:
+        entry["execution_decision"] = execution_policy.classify_candidate(entry, config)
+
+
+def _attempt_auto_execution(
+    entry: dict[str, Any],
+    broker: Broker,
+    manager: order_manager.OrderManager,
+    config: dict[str, Any],
+    logger: logging.Logger,
+    trade_id: str,
+) -> dict[str, Any]:
+    """One AUTO_EXECUTE candidate's execution-time re-checks + broker
+    submission - the exact same re-check discipline as
+    execution.approval_bridge.execute_approved_trade (Part R), applied to
+    the autonomous path (Part S) instead of a Telegram button. The
+    candidate's OWN entry price (this run's freshly fetched signal price)
+    is also "current_market_price" here since auto-execution happens
+    immediately after analysis, with no human-approval delay to go stale
+    over - unlike the approval-bridge path, where real time elapses."""
+    from .execution import approval_bridge
+
+    final = report_writer.final_position(entry)
+    record = {
+        "symbol": entry["symbol"], "strategy": final["strategy"], "score": entry["score"],
+        "entry": final["entry"], "stop_loss": final["stop_loss"], "target": final["target"],
+        "shares": final["shares"], "dollar_risk": final["dollar_risk"],
+        "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
+    }
+    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id)
+
+
+def _process_execution_layer(
+    ticker_results: list[dict[str, Any]],
+    report_date: str,
+    config: dict[str, Any],
+    logger: logging.Logger,
+    token: str | None,
+    chat_id: str | None,
+    broker: Broker | None = None,
+) -> set[str]:
+    """Phase 7 execution layer entry point from the daily run. Returns the
+    set of ticker symbols that were auto-executed this run, so
+    `_send_paper_trade_approvals` can skip sending a redundant approval
+    button for something that already bypassed approval (Part S).
+
+    `broker` is normally None in production - a real `IBKRClient` is only
+    constructed here if `execution.mode == "IBKR_PAPER"` AND at least one
+    candidate actually classified as AUTO_EXECUTE (never connects to
+    anything for a DRY_RUN run, or a run with nothing to auto-execute).
+    Tests inject a `FakeBroker` directly instead.
+    """
+    _classify_execution_decisions(ticker_results, config)
+
+    execution_mode = config.get("execution", {}).get("mode", "DRY_RUN")
+    auto_candidates = [e for e in ticker_results if e["execution_decision"].decision == execution_policy.DECISION_AUTO_EXECUTE]
+
+    if execution_mode != "IBKR_PAPER" or not auto_candidates:
+        if execution_mode == "DRY_RUN" and auto_candidates:
+            for entry in auto_candidates:
+                logger.info("DRY_RUN: %s would AUTO_EXECUTE if execution.mode were IBKR_PAPER - no broker contacted.", entry["symbol"])
+        return set()
+
+    owns_broker = broker is None
+    if owns_broker:
+        from .execution.ibkr_client import IBKRClient
+
+        broker = IBKRClient()
+        try:
+            broker.connect()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Auto-execution: could not connect to IBKR Paper (%s) - falling back to Telegram approval for all candidates this run.", exc)
+            return set()
+
+    executed_tickers: set[str] = set()
+    try:
+        journal = order_manager.ExecutionJournal(config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl"))
+        manager = order_manager.OrderManager(broker, config, journal)
+
+        for entry in auto_candidates:
+            trade_id = paper_trades.generate_trade_id(entry["symbol"], report_date)
+            result = safe_run(logger, f"{entry['symbol']} auto-execution", lambda e=entry, tid=trade_id: _attempt_auto_execution(e, broker, manager, config, logger, tid))
+            if result is None:
+                continue
+            if not result.get("executed"):
+                logger.warning("Auto-execution skipped for %s: %s", entry["symbol"], result.get("reasons"))
+                continue
+
+            executed_tickers.add(entry["symbol"])
+            final = report_writer.final_position(entry)
+            pending_record = {
+                "symbol": entry["symbol"], "strategy": final["strategy"], "signal": entry["label"], "score": entry["score"],
+                "entry": final["entry"], "stop_loss": final["stop_loss"], "target": final["target"],
+                "risk_reward": final["risk_reward"],
+                "shares": result["managed"].intent.quantity, "dollar_risk": final["dollar_risk"],
+                "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
+                "report_date": report_date, "decided_at": None,
+            }
+            paper_trades.record_paper_trade(pending_record, config, trade_id=trade_id)
+
+            if token and chat_id:
+                from . import telegram_bot
+                from .execution import approval_bridge
+
+                account_risk_pct = final["dollar_risk"] / config["risk"]["account_equity"] if config.get("risk", {}).get("account_equity") else None
+                notice = approval_bridge.format_auto_execution_notice(pending_record, result["managed"], account_risk_pct)
+                safe_run(logger, f"{entry['symbol']} auto-execution notice", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+    finally:
+        if owns_broker:
+            safe_run(logger, "broker disconnect", broker.disconnect)
+
+    return executed_tickers
+
+
 def _send_paper_trade_exit_notifications(
     closed_trades: list[dict[str, Any]],
     token: str,
@@ -400,6 +532,27 @@ def run(config_path: str | None = None) -> int:
         quant_agent.apply_quant_agent_filtering(ticker_results, quant_assessments, config)
 
     report_date = report_writer.today_str()
+
+    # Autonomous IBKR PAPER execution layer (Phase 7) - runs AFTER every
+    # deterministic gate and the Quant/ML layer above, per README's
+    # authoritative pipeline. execution.mode defaults to DRY_RUN and
+    # autonomous_paper.enabled/auto_execute.enabled both default to false,
+    # so by default this only ATTACHES entry["execution_decision"] for
+    # reporting and never contacts a broker - see execution_policy.py and
+    # _process_execution_layer's docstring for the full fail-closed
+    # contract. Best-effort token/chat_id here (never raises) purely so an
+    # auto-execution notice can be sent; the trade itself never depends on
+    # Telegram being configured.
+    import os
+
+    auto_executed_tickers = safe_run(
+        logger, "execution layer",
+        lambda: _process_execution_layer(
+            ticker_results, report_date, config, logger,
+            os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID"),
+        ),
+    ) or set()
+
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)
     logger.info("Saved report: %s | %s", csv_path, json_path)
 
@@ -426,7 +579,7 @@ def run(config_path: str | None = None) -> int:
                 logger.error("Telegram report failed to send (see logged errors above).")
 
             if config.get("paper_trading", {}).get("enabled", True):
-                _send_paper_trade_approvals(ticker_results, report_date, token, chat_id, config, logger)
+                _send_paper_trade_approvals(ticker_results, report_date, token, chat_id, config, logger, skip_tickers=auto_executed_tickers)
         except RuntimeError as exc:
             logger.error("Telegram not configured: %s", exc)
     else:

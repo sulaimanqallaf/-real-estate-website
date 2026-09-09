@@ -8,3 +8,12 @@ pytest>=7.4.0
 pyarrow>=14.0.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
+
+# Phase 7 (IBKR Paper execution) - OPTIONAL, only needed to actually run
+# src/execution/ibkr_client.py against a real TWS/IB Gateway Paper session.
+# Every import of ibapi in this codebase is lazy (inside a function body,
+# never at module import time), so the rest of the test suite and src.main
+# run fully without it installed. Install on your own machine with:
+#   pip install ibapi
+# (uncomment the line below if you want it pinned in this file instead)
+# ibapi>=9.81.1.post1

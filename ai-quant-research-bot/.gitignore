@@ -10,8 +10,10 @@ data/processed/*
 data/reports/*
 data/journal/*
 data/models/*
+data/runtime/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/reports/.gitkeep
 !data/journal/.gitkeep
 !data/models/.gitkeep
+!data/runtime/.gitkeep
