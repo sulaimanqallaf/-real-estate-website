@@ -1,0 +1,69 @@
+# AI Quant Bot configuration
+# Non-secret settings only. Telegram token/chat id live in .env (see .env.example).
+
+tickers:
+  - SPY
+  - QQQ
+  - VOO
+  - VGT
+  - SMH
+  - VXUS
+  - AAPL
+  - MSFT
+  - NVDA
+
+data:
+  history_period: "2y"     # yfinance period used for the daily download
+  interval: "1d"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  reports_dir: "data/reports"
+
+indicators:
+  momentum_short_days: 20
+  momentum_long_days: 60
+  sma_short: 50
+  sma_long: 200
+  rsi_period: 14
+  atr_period: 14
+  volume_avg_period: 20
+  volatility_window: 20      # rolling window (days) for daily volatility (std of returns)
+
+scoring:
+  # Points awarded for each condition. Must sum to 100 across the "true" cases.
+  points:
+    above_200d_ma: 20
+    above_50d_ma: 10
+    momentum_20d_positive: 15
+    momentum_60d_positive: 15
+    rsi_in_healthy_range: 15
+    volume_above_avg: 10
+    atr_not_extreme: 10
+    not_extended_above_50d: 5
+  rsi_healthy_min: 45
+  rsi_healthy_max: 68
+  atr_extreme_pct_of_price: 4.0   # ATR/price (%) above this is considered "extreme" volatility
+  max_extension_above_50d_pct: 8.0
+
+signals:
+  strong_buy_min_score: 75
+  watchlist_min_score: 50
+  # below watchlist_min_score => Avoid
+
+risk:
+  atr_stop_multiplier: 1.5     # stop = entry - 1.5x ATR
+  min_reward_risk_multiple: 1.5  # target risk multiple used to build the target price
+  min_risk_reward_ratio: 1.2   # trades below this R:R are not recommended
+  max_rsi_for_trade: 75        # RSI above this disqualifies a trade recommendation
+  require_above_200d_ma: true  # price below 200D MA disqualifies a trade recommendation
+  entry_zone_atr_fraction: 0.25  # entry zone = price +/- (fraction * ATR)
+
+telegram:
+  enabled: true
+  # token and chat_id are read from environment variables (.env):
+  #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+  max_message_chars: 3500   # keep under Telegram's 4096 hard limit, leave headroom
+
+logging:
+  level: "INFO"
+  log_dir: "data/reports"
