@@ -25,18 +25,30 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE
+from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE, STRATEGY_NAME_SAFE
 from .utils import resolve_path
 
 CALLBACK_PREFIX = "pt"
 VALID_ACTIONS = {"approve", "reject", "watch"}
 _DECISION_STATUS = {"approve": "APPROVED", "reject": "REJECTED", "watch": "WATCH_ONLY"}
+
+# paper_trades.csv schema. A row is created here (status=OPEN) the moment a
+# candidate is approved, then updated in place by paper_trade_tracker.py as it
+# moves toward TARGET_HIT / STOPPED / TIME_EXIT. See paper_trade_tracker.py's
+# module docstring for the full lifecycle and its same-bar conservative rule.
+PAPER_TRADE_COLUMNS = [
+    "trade_id", "approved_at", "ticker", "strategy", "mode", "signal", "score",
+    "entry_price", "stop_loss", "target_price", "risk_reward", "position_size",
+    "risk_amount", "status", "opened_at", "exit_price", "exited_at", "exit_reason",
+    "pnl_dollars", "pnl_pct", "holding_days", "notes",
+]
 
 
 # --- callback_data encoding (Telegram caps this at 64 bytes) ----------------------
@@ -217,44 +229,87 @@ def process_decision(
     return True, f"{symbol} set to watch only - no paper trade recorded."
 
 
-def record_paper_trade(record: dict[str, Any], config: dict[str, Any]) -> Path:
-    """Append one approved candidate to data/journal/paper_trades.csv.
+def _mode_for_strategy(strategy_name: str) -> str:
+    """Safe/Aggressive only means something for Mean Reversion - every other
+    strategy (Momentum Breakout, Trend Following) has no such split."""
+    if strategy_name == STRATEGY_NAME_SAFE:
+        return "Safe"
+    if strategy_name == STRATEGY_NAME_AGGRESSIVE:
+        return "Aggressive"
+    return "N/A"
 
-    Version 1 never executes trades, paper or real, beyond this ledger entry:
-    `status` starts at OPEN and exit_price/pnl are left blank for you to fill in
-    manually as you track the (paper) outcome, same convention as trade_journal.csv.
-    """
+
+def generate_trade_id(symbol: str, report_date: str) -> str:
+    return f"{symbol}_{report_date}_{uuid.uuid4().hex[:8]}"
+
+
+def _paper_trades_path(config: dict[str, Any]) -> Path:
     journal_dir = resolve_path(config["data"]["journal_dir"])
     journal_dir.mkdir(parents=True, exist_ok=True)
-    path = journal_dir / config["paper_trading"]["paper_trades_file"]
+    return journal_dir / config["paper_trading"]["paper_trades_file"]
 
-    row = {
+
+def load_paper_trades_df(config: dict[str, Any]) -> pd.DataFrame:
+    """The single read path for paper_trades.csv - used both here (to append a
+    new OPEN row) and by paper_trade_tracker.py / performance_tracker.py (to
+    read/update existing rows). Always returns the full expected column set,
+    even for a brand-new, empty file, so callers never have to special-case it."""
+    path = _paper_trades_path(config)
+    if not path.exists():
+        return pd.DataFrame(columns=PAPER_TRADE_COLUMNS)
+    return pd.read_csv(path, dtype={"trade_id": str})
+
+
+def save_paper_trades_df(df: pd.DataFrame, config: dict[str, Any]) -> Path:
+    """The single write path for paper_trades.csv - always a full rewrite of the
+    whole file from the given DataFrame (not an append), so a caller that loaded,
+    mutated a row, and calls this back is doing a clean read-modify-write, not a
+    duplicate-append."""
+    path = _paper_trades_path(config)
+    df.to_csv(path, index=False)
+    return path
+
+
+def record_paper_trade(record: dict[str, Any], config: dict[str, Any]) -> Path:
+    """Create one OPEN paper position from an approved candidate.
+
+    Default status is OPEN immediately - there is no separate PENDING state for
+    the *position* itself. (PENDING already means something else here: it's the
+    status of the pending-approval *request* in pending_approvals.json before a
+    button is tapped. By the time this function runs, Approve has already been
+    tapped, so the resulting position starts life OPEN - the paper-trade
+    equivalent of "this would already be live.")
+
+    Version 1 never executes trades, paper or real, beyond this ledger entry.
+    exit_price/exited_at/exit_reason/pnl_dollars/pnl_pct/holding_days start blank
+    and are filled in later by paper_trade_tracker.py as the position resolves.
+    """
+    trade = {
+        "trade_id": generate_trade_id(record["symbol"], record["report_date"]),
         "approved_at": record.get("decided_at"),
-        "alert_date": record["report_date"],
-        "symbol": record["symbol"],
+        "ticker": record["symbol"],
         "strategy": record["strategy"],
-        "is_aggressive": record["is_aggressive"],
+        "mode": _mode_for_strategy(record["strategy"]),
         "signal": record["signal"],
         "score": record["score"],
-        "entry": record["entry"],
+        "entry_price": record["entry"],
         "stop_loss": record["stop_loss"],
-        "target": record["target"],
+        "target_price": record["target"],
         "risk_reward": record["risk_reward"],
-        "expected_upside_pct": record["expected_upside_pct"],
-        "expected_downside_pct": record["expected_downside_pct"],
-        "shares": record["shares"],
-        "dollar_risk": record["dollar_risk"],
+        "position_size": record["shares"],
+        "risk_amount": record["dollar_risk"],
         "status": "OPEN",
+        "opened_at": record["report_date"],
         "exit_price": "",
-        "pnl": "",
+        "exited_at": "",
+        "exit_reason": "",
+        "pnl_dollars": "",
+        "pnl_pct": "",
+        "holding_days": "",
         "notes": "",
     }
 
-    new_df = pd.DataFrame([row])
-    if path.exists():
-        existing = pd.read_csv(path)
-        combined = pd.concat([existing, new_df], ignore_index=True)
-    else:
-        combined = new_df
-    combined.to_csv(path, index=False)
-    return path
+    existing = load_paper_trades_df(config)
+    new_row_df = pd.DataFrame([trade])
+    combined = pd.concat([existing, new_row_df], ignore_index=True) if not existing.empty else new_row_df
+    return save_paper_trades_df(combined, config)

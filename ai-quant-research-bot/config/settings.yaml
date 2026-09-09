@@ -152,13 +152,14 @@ telegram:
 # happen and appends approvals to data/journal/paper_trades.csv. High Risk Dip
 # Watchlist entries never get buttons - informational only, always.
 paper_trading:
-  enabled: true                                # master switch for the whole approval flow
+  enabled: true                                # master switch for the whole approval flow AND lifecycle tracking
   paper_trades_file: "paper_trades.csv"           # written under data.journal_dir
   pending_approvals_file: "pending_approvals.json"  # written under data.journal_dir
   update_offset_file: "telegram_update_offset.txt"    # approval_listener's persisted getUpdates offset
   pending_expiry_hours: 72                              # a button tapped after this long is refused
   poll_interval_seconds: 3                                # approval_listener's idle sleep between polls
   poll_timeout_seconds: 30                                 # Telegram long-poll timeout per getUpdates call
+  max_holding_days: 20                                      # OPEN paper trade force-exits at close after this many days
 
 logging:
   level: "INFO"

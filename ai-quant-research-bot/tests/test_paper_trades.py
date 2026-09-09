@@ -141,8 +141,16 @@ def test_approve_safe_candidate_writes_paper_trade(tmp_path, caplog):
     trades_path = Path(config["data"]["journal_dir"]) / config["paper_trading"]["paper_trades_file"]
     df = pd.read_csv(trades_path)
     assert len(df) == 1
-    assert df.iloc[0]["symbol"] == "NVDA"
-    assert df.iloc[0]["status"] == "OPEN"
+    row = df.iloc[0]
+    assert row["ticker"] == "NVDA"
+    assert row["status"] == "OPEN"
+    assert row["mode"] == "Safe"
+    assert row["opened_at"] == "2026-09-09"
+    assert row["entry_price"] == 100.0
+    assert row["position_size"] == 20
+    assert row["risk_amount"] == 100.0
+    assert str(row["trade_id"]).startswith("NVDA_2026-09-09_")
+    assert pd.isna(row["exit_price"])  # still open - no exit fields yet
 
     # The pending record itself should now reflect the decision.
     records = paper_trades.load_pending_approvals(config)
@@ -161,7 +169,7 @@ def test_approve_aggressive_candidate_succeeds_when_enabled(tmp_path):
     assert success is True
     trades_path = Path(config["data"]["journal_dir"]) / config["paper_trading"]["paper_trades_file"]
     assert trades_path.exists()
-    assert pd.read_csv(trades_path).iloc[0]["is_aggressive"] == True  # noqa: E712
+    assert pd.read_csv(trades_path).iloc[0]["mode"] == "Aggressive"
 
 
 def test_approve_aggressive_candidate_blocked_when_disabled_at_decision_time(tmp_path):
@@ -232,3 +240,26 @@ def test_unknown_pending_approval_is_refused(tmp_path):
     success, message = paper_trades.process_decision("approve", "GHOST", "2026-09-09", config, logging.getLogger("t"))
     assert success is False
     assert "No pending approval found" in message
+
+
+# --- schema helpers -------------------------------------------------------------
+
+
+def test_mode_for_strategy():
+    assert paper_trades._mode_for_strategy(STRATEGY_NAME_SAFE) == "Safe"
+    assert paper_trades._mode_for_strategy(STRATEGY_NAME_AGGRESSIVE) == "Aggressive"
+    assert paper_trades._mode_for_strategy("Trend Following") == "N/A"
+
+
+def test_generate_trade_id_is_unique_and_readable():
+    id_a = paper_trades.generate_trade_id("NVDA", "2026-09-09")
+    id_b = paper_trades.generate_trade_id("NVDA", "2026-09-09")
+    assert id_a != id_b
+    assert id_a.startswith("NVDA_2026-09-09_")
+
+
+def test_load_paper_trades_df_on_missing_file_has_full_schema(tmp_path):
+    config = fresh_config(tmp_path)
+    df = paper_trades.load_paper_trades_df(config)
+    assert df.empty
+    assert list(df.columns) == paper_trades.PAPER_TRADE_COLUMNS

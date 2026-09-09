@@ -107,6 +107,17 @@ A few things worth knowing up front, not buried in the code:
   you get around to checking your phone, tapping Approve on an Aggressive
   candidate will be refused right then - it does not fall back to whatever the
   flag was when the message went out.
+- **Only approving needs the listener - closing an open paper trade doesn't.**
+  `python -m src.approval_listener` must be running for a button tap to register
+  at all. But once a trade is `OPEN`, moving it to `TARGET_HIT`/`STOPPED`/
+  `TIME_EXIT` and sending the exit notification happens inside
+  `python -m src.main` itself, every day it runs - no listener involvement. The
+  listener's only job is turning a button tap into that first `OPEN` row.
+- **The paper trade lifecycle still executes nothing.** Checking stop/target/time
+  exits reads daily bars that were already fetched for the day's analysis and
+  updates a CSV row - there is no broker connection anywhere in this codebase, no
+  IBKR, no `ib_insync`, no order of any kind. See "Paper Trade Lifecycle" below
+  for the full mechanism and the roadmap note on what (eventually) comes after it.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
@@ -169,20 +180,28 @@ Each run:
 
 - Fetches daily history for every ticker in `config/settings.yaml`; any symbol that
   fails to download is logged and skipped without crashing the run.
+- **Checks every OPEN paper trade against that freshly fetched history** and
+  closes anything that hit its stop, target, or max holding period - see "Paper
+  Trade Lifecycle" below. This runs before today's new candidates are generated,
+  using the same price data, and is gated on `paper_trading.enabled` like
+  everything else paper-trading-related.
+- Sends one Telegram notification per paper trade that closed *this run* (never
+  a repeat for one closed earlier), before the daily report.
 - Fetches a best-effort options chain per ticker for skew (also isolated - an
   options failure never blocks the price/indicator/strategy pipeline).
 - Computes indicators, runs the three strategies against their assigned ticker
   universes, classifies skew, scores and ranks everything.
 - Saves `data/reports/report_<date>.csv` / `.json`, appends
   `data/journal/trade_journal.csv`, and logs to `data/reports/app.log`.
-- Sends the Telegram report (splitting into multiple messages if long). Set
-  `telegram.enabled: false` in the config to skip sending while still generating
-  reports.
+- Sends the Telegram report (splitting into multiple messages if long), now
+  including a "Paper Trading Performance" section. Set `telegram.enabled: false`
+  in the config to skip sending while still generating reports.
 - Sends one additional Approve Paper Trade / Reject / Watch Only message per Top
   Candidate and saves a pending-approval record for each in
   `data/journal/pending_approvals.json`. Set `paper_trading.enabled: false` to
-  skip this and only send the plain report. Nothing happens with a button press
-  until `python -m src.approval_listener` (next section) is actually running.
+  skip this (and the lifecycle check above) and only send the plain report.
+  Nothing happens with a button press until `python -m src.approval_listener`
+  (next section) is actually running.
 
 Run the test suite any time with:
 
@@ -362,14 +381,15 @@ that automates it).
 ### `data/journal/paper_trades.csv`
 
 One row per candidate you explicitly tapped **Approve Paper Trade** on via
-Telegram - this is a strict subset of `trade_journal.csv` (which logs every alert
+Telegram - a strict subset of `trade_journal.csv` (which logs every alert
 automatically, regardless of your input) and requires `python -m
-src.approval_listener` to have been running when you tapped the button. Same
-`status`/`exit_price`/`pnl` manual-fill-in convention as the trade journal, plus
-`is_aggressive` so you can filter Aggressive paper trades out of your own
-performance tracking if you want to see Safe-only results. Nothing in this file
-was ever a real order - it is a paper record you asked for by tapping a button,
-nothing more.
+src.approval_listener` to have been running when you tapped the button. Unlike
+`trade_journal.csv`, this file is **updated in place**, not just appended to:
+`python -m src.main` rewrites a trade's own row as it moves from `OPEN` to a
+closed status. See "Paper Trade Lifecycle" below for the full column list, the
+status values, and exactly how a position gets from `OPEN` to closed. Nothing in
+this file was ever a real order - it is a paper record created by tapping a
+Telegram button and closed automatically by daily bar data, nothing more.
 
 ### `data/journal/pending_approvals.json`
 
@@ -387,6 +407,146 @@ resolve a button press back to a specific candidate's full trade detail.
 benchmarks) with total return, win rate, average win/loss, profit factor, max
 drawdown, and Sharpe ratio. The per-strategy `backtest_trades_<strategy>_<date>.csv`
 files list every simulated trade if you want to inspect individual entries/exits.
+
+---
+
+## Paper Trade Lifecycle
+
+**Roadmap context, so this phase's scope is never mistaken for more than it is:**
+
+```
+Current:  Research -> Scoring -> Risk -> Telegram Approval -> Simulated Paper Trade Tracking
+Future:   IBKR Paper Execution, only after this simulated system proves stable.
+```
+
+Everything below is still simulation. There is no broker connection anywhere in
+this codebase - no IBKR, no `ib_insync`, no order placement of any kind, paper or
+real. "Tracking" means: read daily OHLCV bars that were already fetched for the
+day's analysis, compare them to a stored stop/target, and update a CSV row. That
+is the entire mechanism.
+
+### How an approved trade becomes a tracked position
+
+The moment you tap **Approve Paper Trade**, `paper_trades.record_paper_trade()`
+writes one row to `data/journal/paper_trades.csv` with `status: OPEN` immediately
+- there is no separate "pending" state for the position itself. (`PENDING` is a
+status that belongs to the *approval request* in `pending_approvals.json`, before
+you've tapped anything; by the time a position exists at all, that decision has
+already been made, so it starts life OPEN - the paper-trade equivalent of "this
+would already be live.") Each row gets a unique `trade_id`
+(`<ticker>_<approval-date>_<8 hex chars>`) so later updates always target exactly
+one row, never accidentally two.
+
+**Full column list**: `trade_id`, `approved_at`, `ticker`, `strategy`, `mode`
+(`Safe` / `Aggressive` / `N/A` - only Mean Reversion has a mode), `signal`,
+`score`, `entry_price`, `stop_loss`, `target_price`, `risk_reward`,
+`position_size`, `risk_amount`, `status`, `opened_at`, `exit_price`, `exited_at`,
+`exit_reason`, `pnl_dollars`, `pnl_pct`, `holding_days`, `notes`.
+
+**Status values**: `OPEN`, `TARGET_HIT`, `STOPPED`, `TIME_EXIT`, `CANCELLED`.
+`CANCELLED` is defined for completeness (e.g. if you ever want to manually retire
+a position by hand-editing the CSV) but nothing in the codebase sets it
+automatically today - only `TARGET_HIT`, `STOPPED`, and `TIME_EXIT` are reachable
+through normal operation.
+
+### How `python -m src.main` tracks OPEN positions every day
+
+Right after fetching that day's price history (before generating any *new*
+candidates), `main.run()` calls `paper_trade_tracker.check_open_trades()`, which:
+
+1. Loads every row from `paper_trades.csv` and skips anything not `status: OPEN`
+   outright - a closed trade is never re-examined, by this run or any future one.
+2. For each OPEN trade, walks every daily bar **strictly after** `opened_at`, in
+   chronological order (oldest first) - never today's bar in isolation if the bot
+   skipped a day or two; every intervening bar gets checked so a stop/target hit
+   on a day nobody happened to run the bot is still caught correctly. No bar's
+   own high/low/close is ever compared against information from a *later* bar -
+   that's what "no lookahead" means here, concretely.
+3. On each bar, in this order: **if that day's low <= stop_loss, the stop is
+   considered hit; else if that day's high >= target_price, the target is
+   considered hit; else if the trade has now been held >= `max_holding_days`, it
+   force-exits at that day's close.** Whichever condition fires first (in bar
+   order) closes the trade - a bar with neither condition leaves it OPEN and the
+   walk continues to the next bar.
+4. Any newly-closed trade's row is updated in place - `status`, `exit_price`,
+   `exited_at`, `exit_reason`, `pnl_dollars`, `pnl_pct`, and `holding_days` are
+   all filled in - and the whole file is rewritten once. If nothing closed, the
+   file isn't rewritten at all.
+
+**Same-bar conservative assumption**: if a single day's low <= stop_loss AND high
+>= target_price both, the stop is assumed to have won. This is not a rule
+invented specifically for paper trading - it's the exact same assumption
+`backtester.py`'s `_run_strategy_backtest` already uses for the same reason (see
+that module's docstring). Reusing it here means the codebase has exactly one
+answer to "which one wins on a wild bar," not two different ones depending on
+whether a trade was simulated historically or is live today.
+
+**Time-based exit**: `paper_trading.max_holding_days` (default 20) in
+`config/settings.yaml` - not hardcoded. A trade that's been open at least that
+many calendar days without hitting stop or target exits at the latest available
+close with status `TIME_EXIT`.
+
+**Idempotency**: because only `OPEN` rows are ever touched, running
+`python -m src.main` (or the tracker) twice on the same day - or twice on
+identical data at any time - produces exactly the same result both times. The
+second run finds every relevant trade already in a terminal status, closes
+nothing new, rewrites nothing, and sends nothing. No double P&L, no duplicate
+rows, no reopened trades, no repeated Telegram notification - all four are a
+direct consequence of "only evaluate `OPEN` rows," not separate special-cased
+guards bolted on afterward.
+
+### Telegram exit notifications
+
+Exactly one message per trade that closed *during that run's* tracker call -
+never a trade that was already closed before the run started, since
+`check_open_trades()` only ever returns the newly-closed set. Sent before the
+daily report, so time-sensitive exit news isn't buried under it:
+
+```
+🎯 Paper Target Hit          🛑 Paper Stop Hit          ⏱ Paper Time Exit
+```
+
+Each includes ticker, strategy (and mode, for Mean Reversion), entry, exit, P&L
+in both % and $, holding days, and the exit reason - plus a standing reminder
+that it's a paper trade only.
+
+### Performance analytics
+
+`src/performance_tracker.py` computes everything below purely from **closed**
+rows in `paper_trades.csv`, and only ever reads that file - `paper_trades.py`
+creates a row on approval, `paper_trade_tracker.py` updates it as the position
+resolves, and `performance_tracker.py` never writes to it at all, keeping
+"creating/updating a position" and "analyzing already-closed positions" as
+separate concerns. With zero closed trades, every function here returns
+`has_data: False` rather than a wall of fabricated 0% metrics - callers are
+expected to check that flag before showing anything.
+
+**Portfolio-wide** (`compute_portfolio_performance`): total/open/closed trade
+counts, wins, losses, win rate, average win %, average loss %, profit factor,
+total P&L in $ and %, average/best/worst trade %, average holding days, and max
+consecutive wins/losses. `expectancy_per_trade_dollars` only appears once a
+group has at least `performance_tracker.MIN_TRADES_FOR_ADVANCED_STATS` (5)
+closed trades - below that, a single trade's outcome would be presented as if it
+were a stable per-trade expectation, which it isn't. `profit_factor` and
+`avg_loss_pct` are `None` (never a fabricated value) when a group has zero
+losing trades so far.
+
+**Strategy-level** (`compute_strategy_breakdown`): the same metric set grouped
+three ways - by strategy family (Mean Reversion / Momentum Breakout / Trend
+Following, with Mean Reversion's Safe and Aggressive rows combined), by Mean
+Reversion mode specifically (Safe vs. Aggressive, split back out), and by
+ticker. A group only appears if it has at least one closed trade - there's no
+placeholder zero-trade entry for a strategy that hasn't closed anything yet, so
+code built later (deciding which strategies "don't prove an edge") can tell "no
+data" apart from "proven bad" by checking membership, not trusting a value.
+
+### Daily Telegram "Paper Trading Performance" section
+
+Appended to the daily report (gated on `paper_trading.enabled`, same flag as
+everything else paper-trading-related): open positions, closed trades, win rate,
+total P&L, best strategy, worst strategy - ranked by total P&L $. With zero
+closed trades it prints one clean line ("No closed paper trades yet - N open
+position(s) being tracked.") instead of a block of misleading 0% figures.
 
 ---
 
@@ -418,12 +578,18 @@ ai-quant-research-bot/
     signal_scorer.py             0-100 scoring + labels
     telegram_bot.py                generic Telegram Bot API client (incl. inline keyboards)
     paper_trades.py                 approval-flow domain logic (callback_data, pending
-                                      approvals, decision processing, paper_trades.csv)
+                                      approvals, decision processing) + creates each
+                                       OPEN row and owns paper_trades.csv's read/write I/O
     approval_listener.py             standalone process: polls Telegram, resolves button
                                        presses via paper_trades.py
-    report_writer.py                  report text + CSV/JSON + journal
-    backtester.py                      standalone 1-year+ backtest engine
-    utils.py                            config/env loading, logging, error isolation
+    paper_trade_tracker.py            paper trade lifecycle: stop/target/time-exit
+                                        detection, updates paper_trades.csv rows,
+                                         exit-notification formatting
+    performance_tracker.py            portfolio + strategy/mode/ticker analytics,
+                                        read-only from paper_trades.csv
+    report_writer.py                   report text + CSV/JSON + journal
+    backtester.py                       standalone 1-year+ backtest engine
+    utils.py                             config/env loading, logging, error isolation
   tests/
     test_indicators.py
     test_risk_manager.py
@@ -432,6 +598,8 @@ ai-quant-research-bot/
     test_mean_reversion_modes.py
     test_paper_trades.py
     test_approval_listener.py
+    test_paper_trade_tracker.py
+    test_performance_tracker.py
 ```
 
 ## Scoring (0-100)

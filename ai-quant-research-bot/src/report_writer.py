@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from . import performance_tracker
 from .strategies import trend_following
 from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE
 from .utils import resolve_path
@@ -108,6 +109,47 @@ def format_high_risk_dip_watchlist(ticker_results: list[dict[str, Any]], config:
         body = "No aggressive dip setups today."
 
     return f"High Risk Dip Watchlist (Aggressive Mode: {mode_label}):\n\n{body}"
+
+
+def format_paper_trading_summary(config: dict[str, Any]) -> str:
+    """Daily "Paper Trading Performance" section - section 9 of the lifecycle
+    phase. Shows only what the data actually supports: with zero closed trades
+    it says so plainly instead of printing a wall of fake 0% metrics."""
+    portfolio = performance_tracker.compute_portfolio_performance(config)
+    header = "Paper Trading Performance:"
+
+    if not portfolio["has_data"]:
+        if portfolio["total_trades"] == 0:
+            return f"{header}\n\nNo paper trades yet."
+        return f"{header}\n\nNo closed paper trades yet. {portfolio['open_trades']} open position(s) being tracked."
+
+    breakdown = performance_tracker.compute_strategy_breakdown(config)
+    by_strategy = breakdown.get("by_strategy", {})
+
+    best_label = worst_label = "N/A"
+    if by_strategy:
+        ranked = sorted(by_strategy.items(), key=lambda kv: kv[1]["total_pnl_dollars"], reverse=True)
+        name, stats = ranked[0]
+        best_label = f"{name} (${stats['total_pnl_dollars']:.2f}, {stats['sample_size']} trades)"
+        if len(ranked) > 1:
+            name, stats = ranked[-1]
+            worst_label = f"{name} (${stats['total_pnl_dollars']:.2f}, {stats['sample_size']} trades)"
+        else:
+            worst_label = "N/A (only one strategy has closed trades so far)"
+
+    total_pnl_line = f"Total P&L: ${portfolio['total_pnl_dollars']:.2f}"
+    if portfolio["total_pnl_pct"] is not None:
+        total_pnl_line += f" ({portfolio['total_pnl_pct']:.2f}%)"
+
+    return (
+        f"{header}\n\n"
+        f"Open positions: {portfolio['open_trades']}\n"
+        f"Closed trades: {portfolio['closed_trades']}\n"
+        f"Win rate: {portfolio['win_rate_pct']:.1f}%\n"
+        f"{total_pnl_line}\n"
+        f"Best strategy: {best_label}\n"
+        f"Worst strategy: {worst_label}"
+    )
 
 
 def build_explanation(entry: dict[str, Any]) -> str:
@@ -244,10 +286,12 @@ def format_report_text(
 
     high_risk_section = format_high_risk_dip_watchlist(ticker_results, config)
 
-    return (
-        f"{header}\n\n{summary}\n\nTop Candidates:\n\n{candidates_text}"
-        f"\n\n{high_risk_section}\n\n{footer}"
-    )
+    sections = [header, summary, f"Top Candidates:\n\n{candidates_text}", high_risk_section]
+    if config.get("paper_trading", {}).get("enabled", True):
+        sections.append(format_paper_trading_summary(config))
+    sections.append(footer)
+
+    return "\n\n".join(sections)
 
 
 def _entry_to_flat_row(entry: dict[str, Any]) -> dict[str, Any]:

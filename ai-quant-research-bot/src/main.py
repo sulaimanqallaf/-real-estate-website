@@ -11,7 +11,16 @@ import logging
 import sys
 from typing import Any
 
-from . import data_collector, indicators, options_skew, paper_trades, report_writer, risk_manager, signal_scorer
+from . import (
+    data_collector,
+    indicators,
+    options_skew,
+    paper_trade_tracker,
+    paper_trades,
+    report_writer,
+    risk_manager,
+    signal_scorer,
+)
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
 from .utils import get_env_var, load_config, load_env, safe_run, setup_logging
 
@@ -124,6 +133,28 @@ def _send_paper_trade_approvals(
         safe_run(logger, f"{entry['symbol']} paper-trade approval message", _send)
 
 
+def _send_paper_trade_exit_notifications(
+    closed_trades: list[dict[str, Any]],
+    token: str,
+    chat_id: str,
+    logger: logging.Logger,
+) -> None:
+    """One Telegram message per trade closed THIS run - never a trade closed in
+    a previous run, since paper_trade_tracker.check_open_trades() only ever
+    returns newly-closed trades. That's what keeps this duplicate-free."""
+    from . import telegram_bot
+
+    for trade in closed_trades:
+
+        def _send(t=trade):
+            text = paper_trade_tracker.format_exit_notification(t)
+            ok = telegram_bot.send_telegram_message(token, chat_id, text, logger)
+            if not ok:
+                raise RuntimeError(f"Failed to send exit notification for {t['trade_id']}")
+
+        safe_run(logger, f"{trade['ticker']} paper-trade exit notification", _send)
+
+
 def run(config_path: str | None = None) -> int:
     load_env()
     config = load_config(config_path)
@@ -138,6 +169,17 @@ def run(config_path: str | None = None) -> int:
     if not price_data:
         logger.error("No symbols could be fetched. Aborting run.")
         return 1
+
+    # Check existing OPEN paper positions against freshly fetched daily bars
+    # BEFORE generating today's new candidates - see paper_trade_tracker.py for
+    # the no-lookahead walk and the same-bar stop-wins conservative rule.
+    newly_closed_trades: list[dict[str, Any]] = []
+    if config.get("paper_trading", {}).get("enabled", True):
+        newly_closed_trades = safe_run(
+            logger,
+            "paper trade lifecycle check",
+            lambda: paper_trade_tracker.check_open_trades(price_data, config, logger),
+        ) or []
 
     snapshots: dict[str, dict[str, float]] = {}
     for symbol, df in price_data.items():
@@ -182,6 +224,10 @@ def run(config_path: str | None = None) -> int:
         try:
             token = get_env_var("TELEGRAM_BOT_TOKEN")
             chat_id = get_env_var("TELEGRAM_CHAT_ID")
+
+            if newly_closed_trades:
+                _send_paper_trade_exit_notifications(newly_closed_trades, token, chat_id, logger)
+
             max_chars = config["telegram"].get("max_message_chars", 3500)
             ok = telegram_bot.send_report(token, chat_id, report_text, max_chars, logger)
             if ok:
