@@ -17,6 +17,10 @@ Simplifications (documented rather than hidden, since this is a research tool):
 
 Options skew is NOT backtested in Version 1 (Yahoo's free IV history isn't reliably
 available historically) - only the three price-based strategies are.
+
+Mean Reversion is backtested in its Safe mode only (mean_reversion.evaluate()'s
+default mode="safe") - Aggressive mode is a live-report-only feature (see
+report_writer.py's "High Risk Dip Watchlist") and is not exercised here.
 """
 
 from __future__ import annotations

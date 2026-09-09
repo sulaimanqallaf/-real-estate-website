@@ -66,10 +66,23 @@ indicators:
 
 strategies:
   mean_reversion:
+    # SAFE mode (default, always used for Top Candidates / the trade journal).
     ma_window: 20
     std_dev_threshold: 1.5      # price must be below MA by > 1.5 std devs
     require_trend_intact: true   # "trend not broken" == price still above SMA200
     atr_stop_multiplier: 1.0      # tighter stop for a reversion trade
+
+    # AGGRESSIVE mode: a second, riskier dip-buy lens on the SAME tickers (SPY/QQQ),
+    # requiring a deeper washout and NOT requiring price to be above SMA200. Always
+    # computed and shown in the "High Risk Dip Watchlist" report section regardless
+    # of `enabled` below - the flag only controls whether it may ever become a Top
+    # Candidate or reach the trade journal. Leave `enabled: false` unless you have
+    # explicitly decided you want aggressive dip-buys to be tradeable.
+    aggressive_mode:
+      enabled: false               # master switch - see README "High Risk Dip Watchlist"
+      std_dev_threshold: 2.0        # deeper washout required than Safe mode
+      require_trend_intact: false    # the whole point of aggressive mode: no SMA200 gate
+      atr_stop_multiplier: 1.75        # wider stop - catching a falling knife is riskier
 
   momentum_breakout:
     breakout_window: 20            # 20-day high breakout

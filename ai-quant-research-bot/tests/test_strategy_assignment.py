@@ -91,7 +91,7 @@ def test_every_ticker_has_at_least_one_strategy_module_actually_invoked():
     snapshot = make_bullish_snapshot()
     for ticker in CONFIG["tickers"]:
         result = main.analyze_symbol(ticker, snapshot, None, snapshot, CONFIG)
-        invoked = [result["trend_result"], result["breakout_result"], result["mean_reversion_result"]]
+        invoked = [result["trend_result"], result["breakout_result"], result["mean_reversion_safe_result"]]
         assert any(r is not None for r in invoked), f"{ticker} had no strategy module invoked at all"
 
 

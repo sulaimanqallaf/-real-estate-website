@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import risk_manager
-from src.strategies.mean_reversion import STRATEGY_NAME as MEAN_REVERSION
+from src.strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE, STRATEGY_NAME_SAFE
 from src.utils import load_config
 
 CONFIG = load_config(Path(__file__).resolve().parent.parent / "config" / "settings.yaml")
@@ -63,10 +63,17 @@ def test_rsi_just_below_cutoff_passes():
     assert result["tradeable"] is True
 
 
-def test_mean_reversion_candidate_is_exempt_from_sma_200_rule():
+def test_mean_reversion_safe_candidate_is_exempt_from_sma_200_rule():
     # Price (100) is below SMA200 (110) - blocked for any other strategy, but Mean
-    # Reversion is explicitly exempt from this one rule.
-    candidate = make_candidate(strategy=MEAN_REVERSION)
+    # Reversion (either mode) is explicitly exempt from this one rule.
+    candidate = make_candidate(strategy=STRATEGY_NAME_SAFE)
+    result = risk_manager.evaluate_candidate(candidate, make_snapshot(sma_200=110.0), CONFIG)
+    assert result["tradeable"] is True
+    assert not any("200d" in r.lower() for r in result["blocked_reasons"])
+
+
+def test_mean_reversion_aggressive_candidate_is_exempt_from_sma_200_rule():
+    candidate = make_candidate(strategy=STRATEGY_NAME_AGGRESSIVE)
     result = risk_manager.evaluate_candidate(candidate, make_snapshot(sma_200=110.0), CONFIG)
     assert result["tradeable"] is True
     assert not any("200d" in r.lower() for r in result["blocked_reasons"])

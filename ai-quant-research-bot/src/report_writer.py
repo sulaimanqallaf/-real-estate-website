@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from .strategies import trend_following
+from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE
 from .utils import resolve_path
 
 
@@ -67,6 +68,48 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
     )
 
 
+def format_high_risk_dip_block(entry: dict[str, Any]) -> str:
+    """One "High Risk Dip Watchlist" entry - informational only, never a trade plan."""
+    aggressive = entry["mean_reversion_aggressive_result"]
+    risk = entry["aggressive_risk_result"]
+
+    lines = [entry["symbol"], f"Price: {_fmt(entry['snapshot']['close'])}", aggressive["candidate"]["note"]]
+
+    if risk:
+        lines.append(f"Would-be entry: {risk['entry']}")
+        lines.append(f"Would-be target: {risk['target']}")
+        lines.append(f"Would-be stop loss: {risk['stop_loss']}")
+        lines.append(f"Would-be risk/reward: {_fmt(risk['risk_reward'])}")
+        if risk["tradeable"]:
+            lines.append("Risk-rule check: would otherwise pass every risk rule")
+        else:
+            lines.append("Risk-rule check: blocked - " + "; ".join(risk["blocked_reasons"]))
+
+    return "\n".join(lines)
+
+
+def format_high_risk_dip_watchlist(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    aggressive_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
+    mode_label = (
+        "ENABLED - can enter Top Candidates/journal once it clears every risk rule"
+        if aggressive_enabled
+        else "DISABLED - informational only, never auto-approved or paper traded"
+    )
+
+    triggered_entries = [
+        r
+        for r in ticker_results
+        if r.get("mean_reversion_aggressive_result") and r["mean_reversion_aggressive_result"].get("candidate")
+    ]
+
+    if triggered_entries:
+        body = "\n\n".join(format_high_risk_dip_block(e) for e in triggered_entries)
+    else:
+        body = "No aggressive dip setups today."
+
+    return f"High Risk Dip Watchlist (Aggressive Mode: {mode_label}):\n\n{body}"
+
+
 def build_explanation(entry: dict[str, Any]) -> str:
     breakdown = entry["score_breakdown"]
     positives = []
@@ -102,13 +145,27 @@ def select_top_candidates(ticker_results: list[dict[str, Any]], config: dict[str
     on a temporary dip) on a ticker whose overall 0-100 score is still weak - that's
     real and informative, but presenting it as a top pick right under "Signal: Avoid"
     would be self-contradictory. Both filters are required together.
+
+    This is also the single choke point for both the Telegram Top Candidates section
+    AND the trade journal (append_to_journal calls this too), so it independently
+    re-checks that an Aggressive mean-reversion candidate never passes through here
+    unless aggressive_mode.enabled is explicitly true - even though main.py's
+    analyze_symbol already keeps Aggressive candidates out of best_risk_result while
+    disabled, this is a deliberate second, defense-in-depth check on a rule the spec
+    calls out as a hard "must never" - it should never rely on a single code path.
     """
+    aggressive_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
     top_n = config["telegram"]["top_candidates_limit"]
-    tradeable_entries = [
-        r
-        for r in ticker_results
-        if r["best_risk_result"] and r["best_risk_result"]["tradeable"] and r["label"] != "Avoid"
-    ]
+
+    def is_eligible(entry: dict[str, Any]) -> bool:
+        risk = entry["best_risk_result"]
+        if not risk or not risk["tradeable"] or entry["label"] == "Avoid":
+            return False
+        if risk["strategy"] == STRATEGY_NAME_AGGRESSIVE and not aggressive_enabled:
+            return False
+        return True
+
+    tradeable_entries = [r for r in ticker_results if is_eligible(r)]
     tradeable_entries.sort(key=lambda r: r["score"], reverse=True)
     return tradeable_entries[:top_n]
 
@@ -169,12 +226,20 @@ def format_report_text(
         footer_parts.append("Skipped (data error): " + ", ".join(failed_symbols))
     footer = "\n\n".join(footer_parts)
 
-    return f"{header}\n\n{summary}\n\nTop Candidates:\n\n{candidates_text}\n\n{footer}"
+    high_risk_section = format_high_risk_dip_watchlist(ticker_results, config)
+
+    return (
+        f"{header}\n\n{summary}\n\nTop Candidates:\n\n{candidates_text}"
+        f"\n\n{high_risk_section}\n\n{footer}"
+    )
 
 
 def _entry_to_flat_row(entry: dict[str, Any]) -> dict[str, Any]:
     snap = entry["snapshot"]
     risk = entry["best_risk_result"] or {}
+    aggressive_result = entry.get("mean_reversion_aggressive_result")
+    aggressive_triggered = bool(aggressive_result and aggressive_result.get("candidate"))
+    aggressive_risk = entry.get("aggressive_risk_result") or {}
     return {
         "symbol": entry["symbol"],
         "signal": entry["label"],
@@ -205,6 +270,13 @@ def _entry_to_flat_row(entry: dict[str, Any]) -> dict[str, Any]:
         "dollar_risk": risk.get("dollar_risk"),
         "blocked_reasons": "; ".join(risk.get("blocked_reasons", [])) if risk else "",
         "explanation": entry["explanation"],
+        "aggressive_dip_triggered": aggressive_triggered,
+        "aggressive_entry": aggressive_risk.get("entry"),
+        "aggressive_stop_loss": aggressive_risk.get("stop_loss"),
+        "aggressive_target": aggressive_risk.get("target"),
+        "aggressive_risk_reward": aggressive_risk.get("risk_reward"),
+        "aggressive_would_pass_risk_rules": aggressive_risk.get("tradeable"),
+        "aggressive_blocked_reasons": "; ".join(aggressive_risk.get("blocked_reasons", [])) if aggressive_risk else "",
     }
 
 
@@ -231,6 +303,10 @@ def append_to_journal(ticker_results: list[dict[str, Any]], config: dict[str, An
     Version 1 never executes trades, so this journal is a record of what was
     *alerted*, not of any position actually taken. Fill in exit_price/pnl/status
     manually as you track outcomes, or a later version can automate that.
+
+    Reuses select_top_candidates(), which is where the Aggressive mean-reversion
+    "must never be paper traded... unless explicitly enabled" rule is enforced -
+    this function never needs its own copy of that check.
     """
     journal_dir = resolve_path(config["data"]["journal_dir"])
     journal_dir.mkdir(parents=True, exist_ok=True)

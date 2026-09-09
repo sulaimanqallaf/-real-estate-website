@@ -43,26 +43,41 @@ A few things worth knowing up front, not buried in the code:
   Avoid" directly above a detailed buy plan, **Top Candidates requires all of**: the
   risk manager approved the trade, the label is not Avoid, risk/reward is at least
   1.5, RSI is strictly below 75, and price is above SMA 200 - except for Mean
-  Reversion candidates specifically, which are exempt from the SMA200 check (see the
-  next bullet). A tradeable setup on an Avoid-labeled ticker still shows up in the
-  saved CSV/JSON (for your own review) but is left out of the Telegram report and
-  the trade journal.
-- **Mean Reversion's SMA200 exemption has a wrinkle worth knowing.** The risk
-  manager waives the "price above SMA200" rule for Mean Reversion candidates, since
-  that strategy is explicitly a dip-buy. But `strategies/mean_reversion.py` still has
-  its own internal `require_trend_intact` gate (on by default in
-  `config/settings.yaml`), which requires price above SMA200 before the strategy
-  will even propose a candidate in the first place. Net effect: today, mean
-  reversion still only fires above the 200D MA in practice - the risk-manager
-  exemption is real and matters the moment you set `require_trend_intact: false`,
-  but until then it's a no-op. Flip that flag if you want genuine "buy the dip
-  during a longer downtrend" setups to reach the risk manager at all.
+  Reversion candidates specifically, which are exempt from the SMA200 check (see
+  below). A tradeable setup on an Avoid-labeled ticker still shows up in the saved
+  CSV/JSON (for your own review) but is left out of the Telegram report and the
+  trade journal - this applies to Aggressive mean-reversion setups too, so a deep,
+  ugly-looking dip can clear every risk rule and *still* never reach Top Candidates
+  if its overall score lands on Avoid.
+- **Mean Reversion runs in two modes: Safe (default, always eligible) and
+  Aggressive (opt-in, never eligible unless you explicitly turn it on).** Both run
+  on the same tickers (SPY/QQQ) and are always computed and reported every day -
+  the difference is what's allowed to become a Top Candidate / trade journal entry:
+
+  | | `require_trend_intact` | Dip depth required | Eligible for Top Candidates/journal? |
+  |---|---|---|---|
+  | Safe | `true` (default, leave it) | 1.5 std devs below 20D MA | Yes, same as any other strategy |
+  | Aggressive | `false` (no SMA200 gate) | 2.0 std devs below 20D MA | **Only if** `aggressive_mode.enabled: true` |
+
+  With `aggressive_mode.enabled: false` (the default - **leave it this way unless
+  you've decided otherwise**), Aggressive setups still show up every day in a
+  separate **"High Risk Dip Watchlist"** report section - entry/stop/target/R:R and
+  whether it *would* have passed the risk rules, purely informational - but they are
+  hard-blocked from Top Candidates and the trade journal no matter how good they
+  look. That block is enforced twice, independently: once in `main.py` (Aggressive
+  candidates never enter the pool risk_manager picks from unless enabled) and again
+  in `report_writer.select_top_candidates()` (the single choke point both the
+  Telegram report and the journal draw from, which re-checks the flag itself). Flip
+  `enabled: true` only once you've decided you want aggressive dip-buys to be
+  tradeable - at that point an Aggressive candidate competes on equal footing with
+  every other strategy's candidate and must still clear every other risk rule.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
   a signal closes (no lookahead); a stop and target hitting the same bar assumes the
   stop wins (conservative). See `src/backtester.py`'s module docstring for the full
-  list of simplifications.
+  list of simplifications. It only backtests Safe Mean Reversion - Aggressive mode
+  isn't run through the backtester in Version 1.
 
 ---
 
@@ -213,20 +228,30 @@ Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.dai
 - **Best sector/ETF**: the highest-scoring ticker among `config.etf_tickers`.
 - **Top Candidates**: tickers with a strategy-generated, risk-manager-approved trade
   plan AND a non-Avoid label (see the caveat above), ranked by score, capped at
-  `telegram.top_candidates_limit`.
+  `telegram.top_candidates_limit`. Only Safe strategies count here by default (Trend
+  Following, Momentum Breakout, Safe Mean Reversion); Aggressive Mean Reversion
+  joins the pool only if you've set `aggressive_mode.enabled: true`.
+- **High Risk Dip Watchlist**: every ticker where Aggressive Mean Reversion
+  triggered today, shown with a would-be entry/stop/target/R:R and whether it would
+  have cleared the risk rules - informational only. The section header states
+  whether Aggressive Mode is currently ENABLED or DISABLED so it's never ambiguous
+  why something here isn't (or is) also in Top Candidates.
 - **Avoid list**: every ticker whose score fell below `weak_watchlist_min`.
 - **Risk warnings**: a standing disclaimer, plus any triggered-but-blocked setups
   (a real strategy signal that failed a risk rule - RSI, SMA200, R:R, or downside >
   upside) so you can see what almost fired and why it didn't.
 - The CSV/JSON hold every ticker's full snapshot (indicators, score breakdown, skew,
-  trade plan if any) for your own analysis, including entries left out of Telegram.
+  trade plan if any, and the Aggressive dip evaluation whether or not it's enabled)
+  for your own analysis, including entries left out of Telegram.
 
 ### `data/journal/trade_journal.csv`
 
 One append-only row per ticker actually surfaced in a day's Top Candidates -
-strategy, entry/stop/target, risk/reward, position size. `status`, `exit_price`, and
-`pnl` are blank by design: Version 1 never executes trades, so nothing exits itself.
-Fill those in yourself as you track real-world outcomes (or wait for a later version
+strategy, entry/stop/target, risk/reward, position size. Aggressive Mean Reversion
+never appears here while `aggressive_mode.enabled` is false, no matter how good a
+dip setup looks - see the mode table above. `status`, `exit_price`, and `pnl` are
+blank by design: Version 1 never executes trades, so nothing exits itself. Fill
+those in yourself as you track real-world outcomes (or wait for a later version
 that automates it).
 
 ### Backtest output

@@ -6,18 +6,24 @@ no shorting, no real execution. This module only evaluates whether a *proposed*
 long candidate (entry/stop/target) from a strategy module should be presented as a
 trade idea, and if so, how many shares that implies at the configured risk-per-trade.
 
-The "price above SMA200" rule is waived specifically for Mean Reversion candidates
-(that strategy is, by definition, a dip-buy). Note that `strategies/mean_reversion.py`
-has its own separate `require_trend_intact` gate that currently still requires price
-above SMA200 before it will even propose a candidate - so this exemption only takes
-effect once that internal gate is relaxed. See README.md for the full explanation.
+The "price above SMA200" rule is waived for Mean Reversion candidates, in either of
+its two modes (Safe or Aggressive) - that strategy is, by definition, a dip-buy.
+Safe mode's own `require_trend_intact` gate still requires price above SMA200
+before it will even propose a candidate, so the exemption is currently a no-op for
+Safe. Aggressive mode has `require_trend_intact: false` by default, so its
+candidates genuinely can and do land here with price below SMA200 - see
+report_writer.select_top_candidates for the separate, mandatory gate that keeps
+Aggressive candidates out of Top Candidates / the trade journal unless
+config.strategies.mean_reversion.aggressive_mode.enabled is explicitly true.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from .strategies.mean_reversion import STRATEGY_NAME as MEAN_REVERSION_STRATEGY_NAME
+from .strategies.mean_reversion import STRATEGY_NAME_AGGRESSIVE, STRATEGY_NAME_SAFE
+
+MEAN_REVERSION_STRATEGY_NAMES = {STRATEGY_NAME_SAFE, STRATEGY_NAME_AGGRESSIVE}
 
 
 def evaluate_candidate(
@@ -44,7 +50,7 @@ def evaluate_candidate(
     # The SMA200 filter is waived specifically for Mean Reversion: that strategy is
     # by definition a dip-buy, and its whole premise is a temporary washout that can
     # occur even when the longer-term trend (price vs. SMA200) has turned down.
-    is_mean_reversion = candidate["strategy"] == MEAN_REVERSION_STRATEGY_NAME
+    is_mean_reversion = candidate["strategy"] in MEAN_REVERSION_STRATEGY_NAMES
     if risk_cfg["require_above_sma_200"] and not is_mean_reversion:
         if sma_200 != sma_200:  # NaN
             blocked_reasons.append("200D moving average not yet available.")

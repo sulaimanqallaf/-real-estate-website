@@ -24,18 +24,36 @@ def analyze_symbol(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     universe = config["strategy_universe"]
+    aggressive_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
 
     trend_result = trend_following.evaluate(snapshot, config) if symbol in universe["trend_following"] else None
     breakout_result = (
         momentum_breakout.evaluate(snapshot, config) if symbol in universe["momentum_breakout"] else None
     )
-    mean_rev_result = (
-        mean_reversion.evaluate(snapshot, config) if symbol in universe["mean_reversion"] else None
-    )
 
+    mean_rev_safe_result = None
+    mean_rev_aggressive_result = None
+    aggressive_risk_result = None
+    if symbol in universe["mean_reversion"]:
+        mean_rev_safe_result = mean_reversion.evaluate(snapshot, config, mode="safe")
+        mean_rev_aggressive_result = mean_reversion.evaluate(snapshot, config, mode="aggressive")
+        # Always risk-evaluate the aggressive candidate for the "High Risk Dip
+        # Watchlist" report section, regardless of aggressive_enabled - this is
+        # purely informational (would it have passed?) and is never, by itself,
+        # what makes an aggressive candidate eligible for Top Candidates.
+        if mean_rev_aggressive_result.get("candidate"):
+            aggressive_risk_result = risk_manager.evaluate_candidate(
+                mean_rev_aggressive_result["candidate"], snapshot, config
+            )
+
+    # Aggressive candidates only enter the pool competing for best_risk_result (and
+    # therefore Top Candidates / the trade journal) when explicitly enabled.
     raw_candidates = [
-        r["candidate"] for r in (trend_result, breakout_result, mean_rev_result) if r and r.get("candidate")
+        r["candidate"] for r in (trend_result, breakout_result, mean_rev_safe_result) if r and r.get("candidate")
     ]
+    if aggressive_enabled and mean_rev_aggressive_result and mean_rev_aggressive_result.get("candidate"):
+        raw_candidates.append(mean_rev_aggressive_result["candidate"])
+
     best_risk_result = risk_manager.evaluate_best_candidate(raw_candidates, snapshot, config) if raw_candidates else None
 
     skew_classification = skew_map.classify_skew(
@@ -61,7 +79,9 @@ def analyze_symbol(
         "score_breakdown": score_result["breakdown"],
         "trend_result": trend_result,
         "breakout_result": breakout_result,
-        "mean_reversion_result": mean_rev_result,
+        "mean_reversion_safe_result": mean_rev_safe_result,
+        "mean_reversion_aggressive_result": mean_rev_aggressive_result,
+        "aggressive_risk_result": aggressive_risk_result,
         "skew_snapshot": skew_snapshot,
         "skew_classification": skew_classification,
         "best_risk_result": best_risk_result,
