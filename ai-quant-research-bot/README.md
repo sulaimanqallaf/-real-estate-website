@@ -27,22 +27,31 @@ A Mac-friendly Python research tool that:
    layer described below. Both names are kept because each predates the
    other's naming - see "Big Money Data Engine" for the disambiguation this
    causes in the report.
+9. Optionally layers in a **Quant/ML Intelligence** assessment (see "Quant /
+   ML Intelligence Layer" below) - a rule-score + regime-fit + Big Money +
+   ML-prediction + strategy-performance-memory composite, purely advisory
+   and stricter-only. It cannot promote an Avoid candidate, cannot override
+   the individual risk manager, market regime filter, or portfolio risk
+   manager, cannot enable Aggressive mode, and cannot increase a position's
+   size - see that section for the enforced invariant and its one narrow,
+   explicitly-configured exception (an optional additive rejection).
 
 **Full pipeline:**
 
 ```
 Market Data -> Indicators -> Strategy Signals -> Signal Score -> Individual Risk
-Manager -> Market Regime Filter -> Portfolio Risk Manager -> Top Candidates ->
-Telegram Approval -> Simulated Paper Trade -> Lifecycle Tracking -> Performance
-Analytics
+Manager -> Market Regime Filter -> Portfolio Risk Manager -> ML Intelligence ->
+Top Candidates -> Telegram Approval -> Simulated Paper Trade -> Lifecycle
+Tracking -> Performance Analytics
 ```
 
 The Big Money Data Engine (institutional/insider/macro/options-flow context)
-runs ALONGSIDE this pipeline, not IN it: it's computed after the Portfolio Risk
-Manager has already decided ACCEPT/ACCEPT_WITH_REDUCED_SIZE/REJECT for every
-candidate, and only ever attaches read-only context to what already survived
-that chain - it has no mechanism to move a candidate earlier or later in the
-sequence above. See "Big Money Data Engine" below.
+and the Quant/ML Intelligence layer both run AFTER the Portfolio Risk Manager
+has already decided ACCEPT/ACCEPT_WITH_REDUCED_SIZE/REJECT for every
+candidate - neither has a mechanism to move a candidate earlier in the
+sequence above, and both only ever attach read-only context (Big Money) or
+advisory/stricter-only context (ML) to what already survived that chain. See
+"Big Money Data Engine" and "Quant / ML Intelligence Layer" below.
 
 **This version does not place trades, connect to a broker, use margin, trade
 options, or short anything.** It only collects data, analyzes it, scores it, sends
@@ -174,6 +183,18 @@ A few things worth knowing up front, not buried in the code:
   configured, most of its components honestly show "Data Unavailable" rather
   than a guess - see "Big Money Data Engine" below for the full detail and the
   point-in-time rules it follows.
+- **The Quant / ML Intelligence layer (new this phase) is advisory and
+  stricter-only, never an execution system and never self-modifying.** It
+  cannot promote an Avoid candidate, cannot override the individual risk
+  manager/market regime filter/portfolio risk manager, cannot enable
+  Aggressive mode, and cannot increase a position's size - the one
+  exception is a narrow, off-by-default, explicitly-configured
+  (`ml.use_for_filtering`) additive rejection of an already-otherwise-
+  eligible candidate. Training is a separate, offline command
+  (`python -m src.ml.trainer`) - `python -m src.main` never trains or
+  retrains anything, and only ever loads whatever CHAMPION model is already
+  registered, degrading cleanly to "ML: Data Unavailable" with none. See
+  "Quant / ML Intelligence Layer" below.
 
 ---
 
@@ -281,6 +302,45 @@ rate, average win/loss, profit factor, max drawdown, and Sharpe ratio per strate
 a blended "Combined" block, and SPY/QQQ buy-and-hold comparisons. Output goes to
 `data/reports/backtest_<date>.csv` (summary) and
 `data/reports/backtest_trades_<strategy>_<date>.csv` (every simulated trade).
+
+### ML dataset build, training, and registry inspection
+
+All three of these are OFFLINE, standalone commands - none of them run as
+part of `python -m src.main`, and none of them are required for the daily
+bot to work (it degrades cleanly to "ML: Data Unavailable" with no models
+registered). See "Quant / ML Intelligence Layer" below for the full design.
+
+Build a point-in-time Parquet dataset for one ticker (fetches fresh price
+history via the existing `data_collector`):
+
+```bash
+python -c "
+from src import data_collector, dataset_builder
+from src.utils import load_config, setup_logging
+config = load_config()
+logger = setup_logging(config)
+df = data_collector.fetch_symbol_history('AMD', config, logger)
+rows = dataset_builder.build_dataset_rows('AMD', df, config)
+dataset_builder.save_dataset(rows, 'AMD', config, dataset_builder.pd.Timestamp.today().strftime('%Y-%m-%d'))
+"
+```
+
+Train (and run the audit -> split -> walk-forward -> baseline ->
+champion/challenger workflow) offline:
+
+```bash
+python -m src.ml.trainer --ticker AMD --horizon 10 --task classification --model-type gradient_boosting
+```
+
+Inspect the registry (which models exist, which is CHAMPION) from a Python
+shell:
+
+```python
+from src.ml.model_registry import ModelRegistry
+registry = ModelRegistry("data/models")
+for meta in registry.list_metadata():
+    print(meta.model_id, meta.status, meta.horizon, meta.metrics.get("test"))
+```
 
 ---
 
@@ -1107,6 +1167,354 @@ the label in. Output is written under `data.dataset.output_dir` (default
 
 ---
 
+## Quant / ML Intelligence Layer
+
+**One sentence if you read nothing else: ML here is advisory and
+stricter-only - it cannot override any deterministic risk control, cannot
+promote an Avoid candidate, cannot enable Aggressive mode, and cannot
+increase a position's size.** Every invariant in that sentence is enforced
+structurally (not just documented) in `src/quant_agent.py` and tested
+directly in `tests/test_quant_agent_strategy_memory.py`.
+
+This phase adds a decision-support layer that learns from the point-in-time
+dataset (`dataset_builder.py`, Phase 5) and estimates trade quality - not an
+execution phase, not a system that trades on its own, and not a system that
+retrains itself based on how one trade turns out.
+
+### ML architecture
+
+```
+src/ml/
+  labels.py            classification/regression targets from forward_*d_return
+  features.py           the explicit feature whitelist + leak-safe imputation
+  audit.py                pre-training data-quality/leakage checks
+  splits.py                chronological train/val/test + walk-forward folds
+  models.py                 Logistic Regression / Random Forest / HistGradientBoosting
+  calibration.py              Platt/sigmoid or isotonic probability calibration
+  validator.py                  metrics, overfit detection, baselines, walk-forward runner
+  trainer.py                     OFFLINE training entry point (python -m src.ml.trainer)
+  model_registry.py               artifact storage + champion/challenger lifecycle
+  predictor.py                     MLPrediction schema, confidence bands, ensemble
+  drift.py                          feature/prediction/calibration/data-quality drift
+src/quant_agent.py    orchestrates rule score + regime + Big Money + ML + strategy
+                        memory into one QuantAssessment - the hard-invariant enforcement point
+src/strategy_memory.py  unconditioned + regime-conditioned historical strategy edge
+                          from CLOSED paper trades only
+```
+
+`src/ml/features.py`'s `FEATURE_WHITELIST` is `dataset_builder.FEATURE_COLUMNS`
+verbatim - every ML feature is a column that module already computes and
+already proved point-in-time-safe (see Phase 5's causal SMC tests); this
+phase does not duplicate that logic, it only selects from it. Two extra
+feature groups were added to `dataset_builder.py` *additively* to support
+Part C's "Strategy" and "Regime" groups: `mean_reversion_safe_active`/
+`momentum_breakout_active`/`trend_following_active` (reusing the actual
+strategy `evaluate()` functions, not new trigger logic) and
+`regime_primary_code`/`regime_volatility_elevated`/`regime_risk_off`/
+`regime_confidence` (computed the same way the live regime engine is,
+truncated to each row's own timestamp when SPY/QQQ history is supplied -
+`None`, never fabricated, otherwise). `smc_liquidity_sweep_high_count`/
+`_low_count` were added the same way to complete the SMC feature group.
+
+### Dependencies evaluated for this phase
+
+- **`scikit-learn`** - added. Logistic Regression, Random Forest, and
+  `HistGradientBoostingClassifier`/`Regressor` (see below) all come from it,
+  along with the calibration and metric utilities this phase uses.
+- **`scipy`** - added (a `scikit-learn` dependency already, made explicit
+  here since `validator.py` calls `scipy.stats.spearmanr` directly for rank
+  correlation).
+- **`xgboost`** - evaluated, NOT added. Its wheel is ~130MB - far outside
+  "prefer fewer dependencies... do not introduce large ML frameworks."
+- **`lightgbm`** - evaluated, NOT added. Its wheel is small (~3.5MB), but
+  adding it would mean wrapping a SECOND gradient-boosting library's API on
+  top of the one `scikit-learn` already provides via
+  `HistGradientBoostingClassifier`/`Regressor` (which ships at zero extra
+  dependency cost, handles missing values natively with no imputation step,
+  and satisfies the "gradient boosting" model-family requirement directly).
+  Choosing it would have meant more surface to wrap, test, and maintain for
+  a family this codebase already has covered by its one added dependency.
+
+### Point-in-time feature policy (Part I, restated for ML specifically)
+
+Every FEATURE column a model ever sees is computed using ONLY
+`price_df.iloc[:i+1]` (bars up to and including that row) or already-
+`available_at`-filtered institutional/insider/macro/SMC inputs - see
+`dataset_builder.build_feature_row()`. LABEL columns
+(`forward_5d_return`/`forward_10d_return`/`forward_20d_return`) are the ONE
+place allowed to look forward, because a label is not a feature.
+`src/ml/features.py` and `src/ml/labels.py` keep `FEATURE_COLUMNS` and
+`LABEL_COLUMNS` as separate, non-overlapping lists so this is a structural
+fact, checked directly in `tests/test_ml_audit_splits.py` and
+`tests/test_dataset_builder.py`.
+
+**Imputation statistics are fit on the TRAINING split only.**
+`features.fit_feature_spec()` computes per-feature medians from whatever
+DataFrame it's given; `trainer.py` always gives it the train split, never
+validation/test/predict-time data - filling a missing test-split value with
+a statistic computed FROM the test split would leak that split's own
+distribution into "features," a subtler version of the same lookahead
+problem the rest of this codebase is built to avoid.
+
+### Train / validation / test chronology (Part E)
+
+**Never a random shuffle.** `src/ml/splits.py`'s `chronological_split()`
+sorts the WHOLE dataset by timestamp first (default 60% train / 20%
+validation / 20% test, in that chronological order, both configurable), so
+for a multi-ticker dataset the split boundary falls at the same calendar
+date for every ticker - never a later NVDA row in "train" while an earlier
+AAPL row (from the same market regime) sits in "test." That specific
+cross-ticker leak is exactly what sorting globally before slicing prevents.
+
+### Walk-forward validation (Part F)
+
+`splits.walk_forward_folds()` produces rolling (fixed-size train window) or
+expanding (default; train window grows each fold) folds with NO overlap
+between a fold's train and validation windows and no fold's validation
+window preceding an earlier fold's. `validator.run_walk_forward_evaluation()`
+trains a genuinely FRESH model on each fold's own training slice (never
+reusing a later fold's fit) and aggregates metrics across folds - this is
+what actually answers "does this generalize across different market
+periods," not just one lucky train/test split.
+
+**Metrics computed** - classification: accuracy, precision, recall, F1,
+ROC-AUC, PR-AUC, Brier score; regression: MAE, RMSE, R², directional
+accuracy, rank correlation. **Trading-oriented** (Part F: "the model is
+useful only if stronger predictions correspond to better realized
+outcomes"): `validator.decile_analysis()` (average realized forward return
+grouped by prediction-score decile - a useful model shows a roughly
+monotonic increase from decile 0 to 9) and `validator.top_bucket_stats()`
+(hit rate and expected return for only the model's most-confident
+predictions).
+
+### Classification vs. regression targets (Part B)
+
+Both targets come from the SAME `forward_{5,10,20}d_return` columns -
+`labels.build_regression_target()` returns that column as-is; `labels.
+build_classification_target()` thresholds it against a configurable hurdle
+(`config.ml.classification_thresholds`, e.g. `10d: 0.015` = a forward return
+above 1.5% over 10 days counts as "success"). Both preserve `NaN` wherever
+the underlying forward return isn't known yet - never coerced to 0/failure.
+
+### Calibration (Part G)
+
+`src/ml/calibration.py` fits Platt/sigmoid scaling (< 200 validation
+samples) or isotonic regression (>= 200) on the VALIDATION split's raw
+predicted probabilities vs. actual outcomes - never on training data, which
+would just calibrate a model to agree with predictions it already
+memorized. With fewer than 50 usable samples, or only one class present,
+`fit_calibration()` returns `available=False` and every downstream consumer
+(`predictor.py`, the report) shows "Data Unavailable" rather than a
+calibrated number with false precision.
+
+### Overfitting defenses (Part H)
+
+Time-aware splits and walk-forward evaluation (above) are the primary
+defenses; on top of those: `validator.detect_overfit()` compares a chosen
+metric (ROC-AUC for classification, R² for regression) between train and
+validation/test, and returns `OVERFIT_WARNING` when training performance
+exceeds the held-out metric by more than a configurable relative margin
+(default 15%). This warning is carried in a model's own metadata and is one
+of the champion/challenger promotion criteria (below) - a challenger with a
+NEW overfit warning the champion didn't have is blocked from promotion
+regardless of any other metric. Model families default to modest complexity
+(`models.DEFAULT_HYPERPARAMETERS`) rather than maximum-depth/unlimited
+trees, and hyperparameter tuning (Part L) uses small, fixed grids
+(`models.DEFAULT_PARAM_GRIDS` - 2-3 values per knob) rather than a large
+search, and is never run against a single backtest's total return.
+
+### Baseline comparison (Part I)
+
+A model's test-split metric is compared against, for classification: the
+majority-class baseline, a plain 20-day-momentum-direction baseline, and the
+EXISTING rule-based 0-100 signal score rescaled to a probability
+(`validator.rule_score_baseline()`); for regression: a zero-return baseline
+and the historical average return. `validator.compare_to_baselines()`
+reports `adds_incremental_value: False` - explicitly, not silently - whenever
+the ML metric doesn't clear every baseline. A synthetic dataset where a
+feature legitimately correlates with the rule score itself (see Synthetic
+Scenario A in the final report) is expected to show this honestly: if the
+existing rule system already captures the same signal, ML adding "value" is
+not something to fake.
+
+### Model registry + champion/challenger (Parts J/K)
+
+Every trained model is saved under `data/models/<model_id>/` (`model.joblib`
++ human-readable `metadata.json`: model_type, task/target, horizon,
+trained_at, train/validation/test date ranges, feature list,
+hyperparameters, metrics, code/schema version, a content-based dataset
+fingerprint, and status). **`save_model()` always writes to a brand-new
+`model_id` - there is no code path that overwrites an existing artifact.**
+
+**The champion slot is keyed by `(task, target, horizon, model_type)` - one
+champion PER MODEL FAMILY, not one overall.** This is what makes Part K
+(challenger promotion) and Part O (a 3-model ensemble) compose: a new
+Logistic Regression challenger only ever competes against the current
+Logistic Regression champion, never against the Random Forest or
+HistGradientBoosting champion for that same horizon - so the ensemble at
+prediction time can load "the current champion of each of the three
+families" and combine them, while each family's own lineage is
+independently promotion-gated.
+
+`model_registry.decide_promotion()` requires a challenger to beat the
+existing champion on **at least two of three** criteria (better PR-AUC,
+better Brier score, stronger top-bucket expected return) AND show no NEW
+overfit warning - never a single-metric autonomous promotion. With no
+existing champion, the first challenger is promoted by default. A losing
+challenger is never discarded - it stays in the registry with `CHALLENGER`
+status, fully inspectable.
+
+### Predictor output + confidence bands (Parts M/N)
+
+`predictor.predict_for_ticker()` loads every model family's current
+champion for the configured horizon, builds one `MLPrediction`:
+
+```
+MLPrediction(ticker, horizon, expected_return, raw_probability,
+             calibrated_probability, confidence_band, model_id,
+             data_quality, warnings, model_agreement, contributions)
+```
+
+`confidence_band` (`VERY_HIGH`/`HIGH`/`MEDIUM`/`LOW`/`UNAVAILABLE`) is never
+a bare probability cutoff - it combines the calibrated probability's
+distance from 0.5, the champion's OWN historical validation/test ROC-AUC
+(a champion barely better than a coin flip can never produce anything above
+`LOW`, however extreme one prediction looks), current data quality
+(`GOOD`/`PARTIAL`/`UNAVAILABLE`), and cross-model agreement. Missing a
+champion, missing required features, or a corrupt/unloadable artifact all
+degrade to `unavailable_prediction()` - never an exception, never a
+fabricated number.
+
+### Model ensemble (Part O)
+
+`predictor.ensemble_predict()` drops any family that didn't produce a
+result (never averages a missing model in as 0), optionally weights by each
+family's own validation-quality (ROC-AUC above 0.5), and reports dispersion
+across the models that DID respond. Strong disagreement lowers the
+resulting confidence band even at the same nominal probability - e.g.
+Logistic Regression bullish (0.85), Random Forest neutral (0.50), Gradient
+Boosting bearish (0.15) collapses what would otherwise be a `VERY_HIGH` band
+down to `LOW`. See `tests/test_ml_predictor_drift.py`'s disagreement test.
+
+### Quant Agent (Part P)
+
+`src/quant_agent.py` is explicitly **not an LLM personality** - a plain
+deterministic combination of the rule-based signal score, market-regime fit,
+Big Money composite, ML prediction, and strategy performance memory into one
+`QuantAssessment` per ticker (`quant_score`, `rule_score`, `ml_confidence`,
+`expected_return`, `big_money_score`, `regime_fit`, `strategy_edge`,
+`decision`, `reasons`, `warnings`). **The hard invariant:**
+`assess_candidate()` only ever READS `entry["label"]`/
+`entry["best_risk_result"]`/`entry["regime_evaluation"]`/
+`entry["portfolio_evaluation"]` to decide what to report - it has no code
+path that writes to any of them. Any upstream rejection (Avoid label,
+individual risk not tradeable, regime block, portfolio REJECT) makes the
+assessment `NOT_ELIGIBLE` and says so; there is no way for a strong ML
+signal to change that outcome. `tests/test_quant_agent_strategy_memory.py`
+checks this directly and exhaustively (every combination of
+label/tradeable/regime-blocked/portfolio-decision).
+
+The ONE configured exception (`config.ml.use_for_filtering`, default
+`false`) lets an OTHERWISE-eligible candidate get a NEW, additional
+rejection when the ML signal is both negative and at least
+`minimum_confidence_for_filtering` confident (default `HIGH`) -
+`apply_quant_agent_filtering()` can only ever ADD a rejection reason to an
+existing `ACCEPT`, never remove an existing `REJECT`, never touch
+`label`/`best_risk_result`/`regime_evaluation`, and never touch a
+position's size.
+
+**Position sizing (Part T):** Phase 6 deliberately stops at that binary,
+explicitly-opt-in block rather than adding a fourth ML-driven resize stage
+to the sizing chain (individual -> regime -> portfolio) - the phase brief's
+own preference is "report/ranking-only unless clean architecture already
+supports a safe reduction multiplier," and a binary additive block is both
+safer to reason about and easier to test exhaustively than a new resize
+path. A `<=1.0` ML size multiplier is a defensible next step for a future
+phase, not implemented here.
+
+### Strategy performance memory (Parts Q/R)
+
+`src/strategy_memory.py` reuses `performance_tracker.py`'s CLOSED-trade read
+path (never re-deriving win-rate/profit-factor logic) and adds grouping:
+unconditioned per-strategy-family edge (`compute_strategy_edge()`), and
+regime-conditioned edge (`compute_regime_conditioned_strategy_edge()` - e.g.
+"Momentum Breakout in BULL_TREND" vs. "Momentum Breakout in SIDEWAYS").
+Regime-conditioning depends on a new `regime_at_entry` column added
+*additively* to `paper_trades.PAPER_TRADE_COLUMNS` (populated from
+`entry["regime_evaluation"]["regime"]` at approval time) - trades recorded
+before this column existed simply have no value there and are excluded from
+any regime-conditioned breakdown, never guessed. **Never claims an edge
+below a minimum sample size** (10 for unconditioned, 8 for conditioned) -
+`StrategyEdge.has_sufficient_sample` is `False` and every derived stat is
+`None` until then; `edge_direction` reports `INSUFFICIENT_SAMPLE`, not a
+fabricated `POSITIVE`/`NEGATIVE`.
+
+### Drift monitoring (Part W)
+
+`src/ml/drift.py` checks feature-distribution drift (a feature's recent
+mean shifted materially from its training-time mean/std),
+prediction-distribution drift, calibration drift (recent Brier score
+materially worse than at training/validation time), a recent realized
+hit-rate drop, and missing-data increase - emitting
+`FEATURE_DRIFT`/`PERFORMANCE_DRIFT`/`CALIBRATION_DRIFT`/`DATA_QUALITY_DRIFT`
+warnings. **This module only ever reports - it never retrains, never
+changes a model's registry status, never swaps the champion.** A drift
+warning is a prompt to run the offline retraining workflow deliberately,
+never an automatic production change.
+
+### Offline retraining workflow (Part X)
+
+**Training is completely separate from the daily research/trading run.**
+`src/main.py` never imports `src/ml/trainer.py` and never calls anything in
+it - the daily run only ever LOADS whatever CHAMPION models are already
+registered (`main._compute_quant_assessments()`), degrading cleanly to "ML:
+Data Unavailable" when none exist, exactly like the Big Money providers with
+no credentials configured. No model is trained or swapped mid-run.
+
+Train (and run the full champion/challenger workflow) offline with:
+
+```bash
+python -m src.ml.trainer --ticker AMD --horizon 10 --task classification --model-type gradient_boosting
+```
+
+`--task` is `classification` or `regression`; `--model-type` is
+`logistic_regression`/`random_forest`/`gradient_boosting`; `--horizon` is
+`5`/`10`/`20`. Omit `--dataset-path` to fetch fresh history via
+`data_collector` and build a dataset on the fly, or pass an existing
+Parquet file from `data/processed/ml/`. Prints a JSON summary (audit
+result, train/validation/test/walk-forward metrics, baseline comparison,
+overfit warning, and the promotion decision) and exits non-zero on failure.
+
+### Report integration (Part U)
+
+- **Top Candidate context line**: `ML: HIGH | P(success): 67% | Exp 10D:
+  +3.1%` / `Model agreement: 89%` / `Strategy edge: Positive in current
+  regime.`, or an explicit `ML: Data Unavailable` line - never silently
+  omitted.
+- **Quant / ML Intelligence section**: the highest-scoring assessed ticker
+  today, how many tickers had no ML data at all, and a standing reminder
+  that this is advisory and cannot override the existing gates. Skipped
+  entirely if `ml.enabled` is false.
+
+### Config
+
+```yaml
+ml:
+  enabled: true
+  use_for_filtering: false
+  minimum_confidence_for_filtering: HIGH
+  primary_horizon: 10
+  registry_dir: "data/models"
+  classification_thresholds:
+    "5d": 0.01
+    "10d": 0.015
+    "20d": 0.02
+quant_agent:
+  eligible_score_threshold: 0
+```
+
+---
+
 ## Project structure
 
 ```
@@ -1117,10 +1525,13 @@ ai-quant-research-bot/
   config/settings.yaml
   data/
     raw/          cached daily OHLCV per symbol
-    processed/     reserved for future intermediate outputs
+    processed/     reserved for future intermediate outputs, plus processed/ml/
+                     (point-in-time Parquet datasets from dataset_builder.py)
     reports/        daily CSV/JSON reports, app.log, backtest output
     journal/          trade_journal.csv, paper_trades.csv, pending_approvals.json,
                         telegram_update_offset.txt, approval_listener.log
+    models/             trained model artifacts + metadata.json (src/ml/model_registry.py) -
+                          written only by `python -m src.ml.trainer`, never by src.main
   src/
     main.py                 orchestrates the daily run
     data_collector.py        yfinance price + best-effort options fetch
@@ -1164,6 +1575,27 @@ ai-quant-research-bot/
       macro_provider.py                        FRED macro series
       options_flow_provider.py                  options/flow interface + mock provider
       market_provider.py                         ProviderResult wrapper around data_collector
+    quant_agent.py                            rule+regime+Big Money+ML+strategy-memory
+                                                orchestration - the ML hard-invariant
+                                                 enforcement point (never trains, never executes)
+    strategy_memory.py                        unconditioned + regime-conditioned historical
+                                                strategy edge from CLOSED paper trades
+    ml/
+      labels.py                                 classification/regression targets
+      features.py                                feature whitelist + leak-safe imputation
+      audit.py                                    pre-training data-quality/leakage checks
+      splits.py                                    chronological + walk-forward splits
+      models.py                                     Logistic Regression / Random Forest /
+                                                       HistGradientBoosting
+      calibration.py                                 Platt/sigmoid or isotonic calibration
+      validator.py                                    metrics, overfit detection, baselines,
+                                                          walk-forward runner
+      trainer.py                                       OFFLINE training entry point only -
+                                                           never imported by src.main
+      model_registry.py                                  artifact storage + champion/challenger
+      predictor.py                                        MLPrediction, confidence bands, ensemble
+      drift.py                                             feature/prediction/calibration/
+                                                              data-quality drift monitoring
   tests/
     test_indicators.py
     test_risk_manager.py
@@ -1184,6 +1616,12 @@ ai-quant-research-bot/
     test_big_money.py
     test_dataset_builder.py
     test_big_money_integration.py
+    test_ml_audit_splits.py
+    test_ml_models_validator.py
+    test_ml_registry_trainer.py
+    test_ml_predictor_drift.py
+    test_quant_agent_strategy_memory.py
+    test_ml_integration.py
 ```
 
 ## Scoring (0-100)

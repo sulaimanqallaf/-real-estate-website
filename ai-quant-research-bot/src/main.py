@@ -11,22 +11,29 @@ import logging
 import sys
 from typing import Any
 
+import pandas as pd
+
 from . import (
     big_money,
     data_collector,
+    dataset_builder,
     indicators,
     market_regime,
     options_skew,
     paper_trade_tracker,
     paper_trades,
     portfolio_risk,
+    quant_agent,
     report_writer,
     risk_manager,
     signal_scorer,
+    strategy_memory,
 )
 from .data_providers import macro_provider, options_flow_provider
+from .ml import model_registry as ml_model_registry
+from .ml import predictor as ml_predictor
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
-from .utils import get_env_var, load_config, load_env, safe_run, setup_logging
+from .utils import get_env_var, load_config, load_env, resolve_path, safe_run, setup_logging
 
 
 def analyze_symbol(
@@ -219,6 +226,61 @@ def _compute_big_money_scores(
     return scores
 
 
+def _compute_quant_assessments(
+    ticker_results: list[dict[str, Any]],
+    price_data: dict[str, Any],
+    regime: market_regime.MarketRegime,
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> dict[str, quant_agent.QuantAssessment]:
+    """Phase 6 Quant/ML Intelligence layer - runs AFTER the regime/portfolio
+    pipeline and Big Money scoring, strictly as decision-support context
+    (see quant_agent.py's module docstring for the hard invariant: this can
+    never promote an Avoid, never bypass a risk/regime/portfolio rejection).
+
+    **This never trains anything** - `ml.trainer` is a separate, offline
+    entry point (Part X); this only ever LOADS whatever CHAMPION models are
+    already registered under `config.ml.registry_dir`, and degrades cleanly
+    to "Data Unavailable" per-ticker if none exist yet (the common case in a
+    fresh checkout, exactly like the Big Money providers in Phase 5 with no
+    credentials configured)."""
+    ml_cfg = config.get("ml", {})
+    horizon = ml_cfg.get("primary_horizon", 10)
+    registry_dir = ml_cfg.get("registry_dir", "data/models")
+    registry = ml_model_registry.ModelRegistry(resolve_path(registry_dir))
+
+    benchmark_price_data = {s: price_data[s] for s in ("SPY", "QQQ") if s in price_data}
+
+    assessments: dict[str, quant_agent.QuantAssessment] = {}
+    for entry in ticker_results:
+        ticker = entry["symbol"]
+        risk = entry.get("best_risk_result")
+        strategy_name = risk["strategy"] if risk else None
+
+        def _predict() -> ml_predictor.MLPrediction | None:
+            df = price_data.get(ticker)
+            if df is None or len(df) < 2:
+                return None
+            row = dataset_builder.build_feature_row(
+                ticker, df, len(df) - 1, config, benchmark_price_data=benchmark_price_data
+            )
+            feature_row = pd.DataFrame([row])
+            return ml_predictor.predict_for_ticker(ticker, feature_row, registry, horizon, config)
+
+        prediction = safe_run(logger, f"{ticker} ML prediction", _predict)
+
+        strategy_edge = None
+        if strategy_name is not None:
+            strategy_edge = safe_run(
+                logger, f"{ticker} strategy memory",
+                lambda s=strategy_name: strategy_memory.edge_for_strategy_in_regime(config, s, regime.primary),
+            )
+
+        assessments[ticker] = quant_agent.assess_candidate(entry, prediction, strategy_edge, config)
+
+    return assessments
+
+
 def _send_paper_trade_exit_notifications(
     closed_trades: list[dict[str, Any]],
     token: str,
@@ -324,6 +386,18 @@ def run(config_path: str | None = None) -> int:
             logger, "Big Money scoring", lambda: _compute_big_money_scores(ticker_results, config, logger)
         ) or {}
         big_money.apply_big_money_ranking_filter(ticker_results, big_money_scores, config)
+
+    # Quant / ML Intelligence layer (Phase 6) - runs AFTER Portfolio Risk and
+    # Big Money, per the authoritative pipeline order in README "Quant / ML
+    # Intelligence Layer". Only ever loads already-registered CHAMPION
+    # models (never trains - see src/ml/trainer.py, a separate offline
+    # entry point) and only ever adds context/an optional additive
+    # rejection - see quant_agent.py's hard invariant.
+    if config.get("ml", {}).get("enabled", True):
+        quant_assessments = safe_run(
+            logger, "Quant/ML assessment", lambda: _compute_quant_assessments(ticker_results, price_data, regime, config, logger)
+        ) or {}
+        quant_agent.apply_quant_agent_filtering(ticker_results, quant_assessments, config)
 
     report_date = report_writer.today_str()
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)

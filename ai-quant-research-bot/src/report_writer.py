@@ -73,6 +73,7 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
         )
         plan_str += format_sizing_context(entry, individual, final)
         plan_str += format_big_money_context_line(entry)
+        plan_str += format_quant_agent_context_line(entry)
 
     return (
         f"{entry['symbol']}\n"
@@ -131,6 +132,69 @@ def format_big_money_context_line(entry: dict[str, Any]) -> str:
         return "Institutional context: Data Unavailable\n"
     composite = "Data Unavailable" if score.composite_score is None else f"{score.composite_score:+.2f}"
     return f"Institutional context: Big Money composite {composite} (data quality {score.data_quality_score * 100:.0f}%)\n"
+
+
+def format_quant_agent_context_line(entry: dict[str, Any]) -> str:
+    """Item (Part U): a short, per-candidate Quant/ML Intelligence context
+    block. Empty string when no assessment was attached at all (module
+    disabled). Prints an explicit "ML: Data Unavailable" rather than
+    omitting the line silently when ML itself has nothing - same
+    unavailable-vs-neutral discipline as the Big Money section."""
+    assessment = entry.get("quant_assessment")
+    if assessment is None:
+        return ""
+
+    lines = []
+    if assessment.ml_confidence == "UNAVAILABLE":
+        lines.append("ML: Data Unavailable")
+    else:
+        parts = [f"ML: {assessment.ml_confidence}"]
+        if assessment.calibrated_probability is not None:
+            parts.append(f"P(success): {assessment.calibrated_probability * 100:.0f}%")
+        if assessment.expected_return is not None and assessment.horizon:
+            parts.append(f"Exp {assessment.horizon.upper()}: {assessment.expected_return:+.1%}")
+        lines.append(" | ".join(parts))
+        if assessment.model_agreement is not None:
+            lines.append(f"Model agreement: {assessment.model_agreement * 100:.0f}%")
+
+    if assessment.strategy_edge not in ("UNKNOWN", "INSUFFICIENT_SAMPLE"):
+        lines.append(f"Strategy edge: {assessment.strategy_edge.capitalize()} in current regime.")
+    elif assessment.strategy_edge == "INSUFFICIENT_SAMPLE":
+        lines.append("Strategy edge: insufficient sample size.")
+
+    return "\n".join(lines) + "\n"
+
+
+def format_quant_agent_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """Part U: a concise Quant/ML Intelligence section - never floods the
+    report with raw model internals. Skipped entirely if `ml.enabled` is
+    false."""
+    if not config.get("ml", {}).get("enabled", True):
+        return ""
+
+    header = "Quant / ML Intelligence:"
+    assessed = [r for r in ticker_results if r.get("quant_assessment") is not None]
+    if not assessed:
+        return f"{header}\n\nData Unavailable - no Quant/ML assessment was computed this run."
+
+    available = [r for r in assessed if r["quant_assessment"].ml_confidence != "UNAVAILABLE"]
+    lines = []
+    if available:
+        best = max(available, key=lambda r: r["quant_assessment"].quant_score or 0)
+        lines.append(f"Highest Quant score: {best['symbol']} ({best['quant_assessment'].quant_score}, ML {best['quant_assessment'].ml_confidence}).")
+    else:
+        lines.append("ML: Data Unavailable for every ticker today (no registered model, or missing features).")
+
+    unavailable_count = len(assessed) - len(available)
+    if unavailable_count:
+        lines.append(f"ML Data Unavailable for {unavailable_count}/{len(assessed)} tickers today.")
+
+    lines.append(
+        "Advisory only - cannot override the signal label, individual risk manager, market regime filter, "
+        "portfolio risk manager, or aggressive-mode rules, and never increases a position's size."
+    )
+
+    return f"{header}\n\n" + "\n".join(lines)
 
 
 def format_high_risk_dip_block(entry: dict[str, Any]) -> str:
@@ -479,6 +543,9 @@ def format_report_text(
     big_money_section = format_big_money_section(ticker_results, config)
     if big_money_section:
         sections.append(big_money_section)
+    quant_agent_section = format_quant_agent_section(ticker_results, config)
+    if quant_agent_section:
+        sections.append(quant_agent_section)
     if config.get("portfolio_risk", {}).get("enabled", True):
         sections.append(format_portfolio_risk_summary(config))
     if config.get("paper_trading", {}).get("enabled", True):

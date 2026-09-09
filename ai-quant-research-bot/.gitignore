@@ -9,7 +9,9 @@ data/raw/*
 data/processed/*
 data/reports/*
 data/journal/*
+data/models/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/reports/.gitkeep
 !data/journal/.gitkeep
+!data/models/.gitkeep

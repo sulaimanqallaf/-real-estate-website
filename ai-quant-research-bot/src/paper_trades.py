@@ -48,6 +48,13 @@ PAPER_TRADE_COLUMNS = [
     "entry_price", "stop_loss", "target_price", "risk_reward", "position_size",
     "risk_amount", "status", "opened_at", "exit_price", "exited_at", "exit_reason",
     "pnl_dollars", "pnl_pct", "holding_days", "notes",
+    # Phase 6 addition: the market regime active when this trade was approved
+    # (entry["regime_evaluation"]["regime"], if the regime pipeline ran) - lets
+    # src/strategy_memory.py compute regime-conditioned strategy edge (e.g.
+    # "Momentum Breakout in BULL_TREND") from real trade history going
+    # forward. Blank for any row recorded before this column existed - never
+    # backfilled with a guess.
+    "regime_at_entry",
 ]
 
 
@@ -155,6 +162,7 @@ def pending_record_from_entry(
     entry: dict[str, Any], report_date: str, message_id: int, chat_id: str
 ) -> dict[str, Any]:
     risk = _final_position(entry)
+    regime_eval = entry.get("regime_evaluation")
     return {
         "report_date": report_date,
         "symbol": entry["symbol"],
@@ -164,6 +172,7 @@ def pending_record_from_entry(
         "is_aggressive": risk["strategy"] == STRATEGY_NAME_AGGRESSIVE,
         "signal": entry["label"],
         "score": entry["score"],
+        "regime_at_entry": regime_eval["regime"] if regime_eval is not None else None,
         "entry": risk["entry"],
         "stop_loss": risk["stop_loss"],
         "target": risk["target"],
@@ -270,7 +279,11 @@ def load_paper_trades_df(config: dict[str, Any]) -> pd.DataFrame:
     path = _paper_trades_path(config)
     if not path.exists():
         return pd.DataFrame(columns=PAPER_TRADE_COLUMNS)
-    return pd.read_csv(path, dtype={"trade_id": str})
+    df = pd.read_csv(path, dtype={"trade_id": str})
+    # Reindex to the full current schema so a file written before a column
+    # was added (e.g. regime_at_entry, Phase 6) still loads safely - missing
+    # columns come back as NaN, never a crash, never a fabricated value.
+    return df.reindex(columns=PAPER_TRADE_COLUMNS)
 
 
 def save_paper_trades_df(df: pd.DataFrame, config: dict[str, Any]) -> Path:
@@ -320,6 +333,7 @@ def record_paper_trade(record: dict[str, Any], config: dict[str, Any]) -> Path:
         "pnl_pct": "",
         "holding_days": "",
         "notes": "",
+        "regime_at_entry": record.get("regime_at_entry"),
     }
 
     existing = load_paper_trades_df(config)

@@ -329,6 +329,37 @@ dataset:
   output_dir: "data/processed/ml"
   min_history_bars: 200
 
+# Quant / ML Intelligence layer (Phase 6) - see src/ml/, src/quant_agent.py,
+# and README "Quant / ML Intelligence Layer". Advisory/stricter-only: it
+# CANNOT override the individual risk manager, market regime filter,
+# portfolio risk manager, or aggressive-mode gate; it cannot promote an
+# Avoid candidate; it cannot increase a position's size. `use_for_filtering`
+# defaults to false - ML is report/ranking context only until explicitly
+# turned on, and even then it can only ADD a stricter rejection on top of an
+# already-otherwise-eligible candidate, never remove one.
+ml:
+  enabled: true
+  use_for_filtering: false
+  minimum_confidence_for_filtering: HIGH   # ML must be at least this confident (in a NEGATIVE signal) before use_for_filtering can block anything
+  primary_horizon: 10                       # which forward_Nd_return horizon the daily report's ML section uses (5, 10, or 20)
+  registry_dir: "data/models"                # trained model artifacts + metadata (see src/ml/model_registry.py) - never written to by src.main, only read
+  classification_thresholds:                  # forward return a horizon must exceed to count as "success" for the classification target
+    "5d": 0.01
+    "10d": 0.015
+    "20d": 0.02
+
+# Structural price features (Fair Value Gaps, swing highs/lows, order
+# blocks, BOS/CHoCH, liquidity sweeps) already configured under `smc:`
+# above (Phase 5) are reused as-is here - see src/ml/features.py's
+# FEATURE_WHITELIST, which is dataset_builder.FEATURE_COLUMNS verbatim.
+
+# Quant Agent (src/quant_agent.py) - combines rule score, regime fit, Big
+# Money context, ML prediction, and strategy performance memory into one
+# reporting QuantAssessment per ticker. Never a gate by itself; see
+# quant_agent.py's module docstring.
+quant_agent:
+  eligible_score_threshold: 0   # a QuantAssessment's own quant_score at/above this (for an otherwise-eligible candidate) is labeled ELIGIBLE rather than WEAK - purely a reporting label, changes nothing about approval
+
 logging:
   level: "INFO"
   log_dir: "data/reports"
