@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 from . import (
+    big_money,
     data_collector,
     indicators,
     market_regime,
@@ -23,6 +24,7 @@ from . import (
     risk_manager,
     signal_scorer,
 )
+from .data_providers import macro_provider, options_flow_provider
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
 from .utils import get_env_var, load_config, load_env, safe_run, setup_logging
 
@@ -160,6 +162,63 @@ def _classify_regime_safely(
     return result if result is not None else fallback
 
 
+def _fetch_macro_snapshot_safely(config: dict[str, Any], logger: logging.Logger) -> dict[str, Any] | None:
+    """Best-effort, always-safe macro context for the report: fed funds rate
+    and the 10Y-2Y spread, gated entirely on FRED_API_KEY. Returns None (never
+    a fabricated value) if FRED isn't configured or a fetch fails - see
+    data_providers/macro_provider.py."""
+    if not config.get("providers", {}).get("fred", {}).get("enabled", True):
+        return None
+
+    def _fetch():
+        fed_funds = macro_provider.fetch_series_latest(macro_provider.SERIES_FED_FUNDS_RATE)
+        ten_year = macro_provider.fetch_series_latest(macro_provider.SERIES_10Y_TREASURY)
+        two_year = macro_provider.fetch_series_latest(macro_provider.SERIES_2Y_TREASURY)
+        if not fed_funds.ok and not ten_year.ok:
+            return None
+        spread = None
+        if ten_year.ok and two_year.ok:
+            spread = macro_provider.compute_yield_curve_spread(ten_year.data[0], two_year.data[0])
+        return {
+            "fed_funds_rate": fed_funds.data[0].value if fed_funds.ok else None,
+            "yield_curve_spread": spread,
+        }
+
+    return safe_run(logger, "macro context (FRED)", _fetch)
+
+
+def _compute_big_money_scores(
+    ticker_results: list[dict[str, Any]], config: dict[str, Any], logger: logging.Logger
+) -> dict[str, Any]:
+    """Best-effort Big Money component scoring per ticker - context only, run
+    AFTER the regime/portfolio pipeline so it has no mechanism to influence
+    those decisions (see big_money.apply_big_money_ranking_filter's
+    docstring). `institutional_facts`/`insider_features` are None here: this
+    phase ships the SEC 13F/Form4 parsing and point-in-time logic fully
+    tested (see src/data_providers/sec_provider.py), but the daily bot does
+    not yet maintain a persisted filing-history store to diff against, so
+    those two components honestly report Data Unavailable in live runs today
+    rather than fabricating a score from a single snapshot with no prior
+    quarter to compare - see README "Big Money Data Engine"."""
+    flow_provider = options_flow_provider.get_default_provider(config)
+    scores: dict[str, Any] = {}
+    for entry in ticker_results:
+        ticker = entry["symbol"]
+        relative_volume = entry["snapshot"].get("relative_volume")
+
+        flow_result = safe_run(logger, f"{ticker} options flow", lambda t=ticker: flow_provider.fetch_events(t, config))
+        flow_events = flow_result.data if flow_result is not None and flow_result.ok else None
+
+        scores[ticker] = big_money.compute_big_money_score(
+            ticker,
+            institutional_facts=None,
+            insider_features=None,
+            flow_events=flow_events,
+            relative_volume=relative_volume,
+        )
+    return scores
+
+
 def _send_paper_trade_exit_notifications(
     closed_trades: list[dict[str, Any]],
     token: str,
@@ -252,6 +311,19 @@ def run(config_path: str | None = None) -> int:
             ticker_results, regime, open_trades_df, price_data, config, logger
         ),
     )
+
+    # Big Money / institutional context - runs AFTER the regime/portfolio
+    # pipeline above and only ever adds entry["big_money_score"] (plus, if
+    # config.big_money.use_for_ranking is set, a purely additive cautionary
+    # note); it has no mechanism to change best_risk_result, regime_evaluation,
+    # or portfolio_evaluation, and apply_big_money_ranking_filter() explicitly
+    # refuses to touch an Avoid-labeled entry. See big_money.py and README
+    # "Big Money Data Engine".
+    if config.get("big_money", {}).get("enabled", True):
+        big_money_scores = safe_run(
+            logger, "Big Money scoring", lambda: _compute_big_money_scores(ticker_results, config, logger)
+        ) or {}
+        big_money.apply_big_money_ranking_filter(ticker_results, big_money_scores, config)
 
     report_date = report_writer.today_str()
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)

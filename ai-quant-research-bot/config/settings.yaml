@@ -285,6 +285,50 @@ market_regime:
     HIGH_VOLATILITY: 75
     RISK_OFF: 80
 
+# Big Money Data Engine (Phase 5) - institutional/insider/macro/options-flow
+# CONTEXT, never a trade gate. See src/big_money.py and README "Big Money
+# Data Engine". `use_for_ranking: false` (default) means this is purely
+# reporting/context: it's computed and shown, but never changes which
+# candidates clear risk/regime/portfolio/aggressive-mode gates. Even with
+# `use_for_ranking: true`, big_money.py's own contract forbids promoting an
+# Avoid-labeled candidate or touching best_risk_result/regime_evaluation/
+# portfolio_evaluation - see apply_big_money_ranking_filter()'s docstring.
+big_money:
+  enabled: true
+  use_for_ranking: false
+  ranking_caution_threshold: -0.30   # composite score at/below this adds a cautionary note when use_for_ranking is true
+
+# Smart Money Concepts structural price features (Fair Value Gaps, swing
+# highs/lows, order blocks, BOS/CHoCH, liquidity sweeps) - see
+# src/smc_features.py. Every feature carries an explicit `available_at`
+# separate from the bar it structurally belongs to, so nothing here can leak
+# future candles into an earlier point-in-time row - see README "Causal SMC
+# feature handling".
+smc:
+  enabled: true
+  swing_left_bars: 2
+  swing_right_bars: 2                     # a swing isn't "available" until this many bars AFTER it exist
+  order_block_lookahead_bars: 3            # confirming-move window after a candidate order-block candle
+  order_block_impulse_threshold_pct: 1.5
+
+# External data providers backing the Big Money layer - see src/data_providers/.
+# Each is independently optional; a disabled/unconfigured provider returns a
+# clean "Data Unavailable" result (never a crash, never a fabricated value).
+providers:
+  sec:
+    enabled: true            # gated further at runtime on the SEC_IDENTITY env var (see .env.example)
+  fred:
+    enabled: true            # gated further at runtime on the FRED_API_KEY env var (see .env.example)
+  options_flow:
+    enabled: false           # no paid vendor wired up yet - always resolves to the mock/no-data provider
+
+# Point-in-time ML dataset builder output (src/dataset_builder.py) - Parquet
+# files, never used to train a model in this phase. See README "ML dataset
+# design".
+dataset:
+  output_dir: "data/processed/ml"
+  min_history_bars: 200
+
 logging:
   level: "INFO"
   log_dir: "data/reports"

@@ -72,6 +72,7 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
             f"Strategy: {final['strategy']}\n"
         )
         plan_str += format_sizing_context(entry, individual, final)
+        plan_str += format_big_money_context_line(entry)
 
     return (
         f"{entry['symbol']}\n"
@@ -114,6 +115,22 @@ def format_sizing_context(entry: dict[str, Any], individual: dict[str, Any], fin
         lines.append("Portfolio note: " + " ".join(portfolio_eval["warnings"]))
 
     return "\n".join(lines) + "\n"
+
+
+def format_big_money_context_line(entry: dict[str, Any]) -> str:
+    """Item (Part J): a short, single-line institutional context note for one
+    Top Candidate - never a trade signal, just context. Empty string when no
+    Big Money score was attached at all (module disabled) or when the score
+    has no data (every component `None`) - printed as an explicit "Data
+    Unavailable" line only when the field IS present but genuinely empty, so
+    the report never looks like this was silently skipped."""
+    score = entry.get("big_money_score")
+    if score is None:
+        return ""
+    if not score.has_any_data:
+        return "Institutional context: Data Unavailable\n"
+    composite = "Data Unavailable" if score.composite_score is None else f"{score.composite_score:+.2f}"
+    return f"Institutional context: Big Money composite {composite} (data quality {score.data_quality_score * 100:.0f}%)\n"
 
 
 def format_high_risk_dip_block(entry: dict[str, Any]) -> str:
@@ -197,6 +214,56 @@ def format_portfolio_risk_summary(config: dict[str, Any]) -> str:
     if state["largest_sector"]:
         lines.append(f"Largest sector: {state['largest_sector']} ({state['largest_sector_fraction'] * 100:.2f}%)")
     lines.append(f"Available risk budget: {available_budget_fraction * 100:.2f}%")
+
+    return f"{header}\n\n" + "\n".join(lines)
+
+
+def format_big_money_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """Part J: a concise Big Money / Institutional Context section - facts and
+    a transparent composite score, never a trade signal on its own, and
+    deliberately NOT a dump of raw filings (see module docstring in
+    `big_money.py`). Skipped entirely (empty string) if `big_money.enabled` is
+    false. Distinguishes "no data available today" from "data available and
+    neutral" throughout - never collapses the two."""
+    if not config.get("big_money", {}).get("enabled", True):
+        return ""
+
+    header = "Big Money / Institutional Context:"
+    scored = [r for r in ticker_results if r.get("big_money_score") is not None]
+    with_data = [r for r in scored if r["big_money_score"].has_any_data]
+
+    if not scored:
+        return f"{header}\n\nData Unavailable - Big Money context was not computed this run."
+
+    if not with_data:
+        return (
+            f"{header}\n\nData Unavailable for every ticker today (no institutional/insider/options-flow "
+            f"source returned data) - not the same as \"neutral,\" just genuinely unknown right now."
+        )
+
+    ranked = sorted(with_data, key=lambda r: r["big_money_score"].composite_score or 0.0, reverse=True)
+    lines = []
+    strongest = ranked[0]
+    weakest = ranked[-1]
+    if strongest["big_money_score"].composite_score is not None:
+        lines.append(
+            f"Strongest context: {strongest['symbol']} ({strongest['big_money_score'].composite_score:+.2f}, "
+            f"data quality {strongest['big_money_score'].data_quality_score * 100:.0f}%)"
+        )
+    if weakest is not strongest and weakest["big_money_score"].composite_score is not None:
+        lines.append(
+            f"Weakest context: {weakest['symbol']} ({weakest['big_money_score'].composite_score:+.2f}, "
+            f"data quality {weakest['big_money_score'].data_quality_score * 100:.0f}%)"
+        )
+
+    missing_count = len(scored) - len(with_data)
+    if missing_count:
+        lines.append(f"Data Unavailable for {missing_count}/{len(scored)} tickers today.")
+
+    lines.append(
+        "Context only - never bypasses the signal label, individual risk manager, market regime filter, "
+        "portfolio risk manager, or aggressive-mode rules."
+    )
 
     return f"{header}\n\n" + "\n".join(lines)
 
@@ -409,6 +476,9 @@ def format_report_text(
     high_risk_section = format_high_risk_dip_watchlist(ticker_results, config)
 
     sections = [header, summary, f"Top Candidates:\n\n{candidates_text}", high_risk_section]
+    big_money_section = format_big_money_section(ticker_results, config)
+    if big_money_section:
+        sections.append(big_money_section)
     if config.get("portfolio_risk", {}).get("enabled", True):
         sections.append(format_portfolio_risk_summary(config))
     if config.get("paper_trading", {}).get("enabled", True):

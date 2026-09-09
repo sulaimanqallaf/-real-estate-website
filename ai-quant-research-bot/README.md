@@ -16,6 +16,17 @@ A Mac-friendly Python research tool that:
 6. Sends one Approve Paper Trade / Reject / Watch Only button set per Top
    Candidate; approvals are recorded in `data/journal/paper_trades.csv`.
 7. Includes a standalone backtester (1+ year, per strategy, vs. buy-and-hold).
+8. Optionally layers in institutional/insider/macro/options-flow **context**
+   (the "Big Money Data Engine" - see that section below) on top of every
+   candidate, purely for reporting and, if explicitly configured, a stricter
+   ranking signal - never a gate of its own. Note the naming overlap with
+   item 2's options-skew "big money" positioning layer: that's the older,
+   unrelated Contrarian Bid/Chase/Hedged Rally/Fear classifier from Version 1;
+   "Big Money Data Engine" (`src/big_money.py`, new in this phase) is the
+   institutional-holdings/insider-activity/macro/options-flow aggregation
+   layer described below. Both names are kept because each predates the
+   other's naming - see "Big Money Data Engine" for the disambiguation this
+   causes in the report.
 
 **Full pipeline:**
 
@@ -25,6 +36,13 @@ Manager -> Market Regime Filter -> Portfolio Risk Manager -> Top Candidates ->
 Telegram Approval -> Simulated Paper Trade -> Lifecycle Tracking -> Performance
 Analytics
 ```
+
+The Big Money Data Engine (institutional/insider/macro/options-flow context)
+runs ALONGSIDE this pipeline, not IN it: it's computed after the Portfolio Risk
+Manager has already decided ACCEPT/ACCEPT_WITH_REDUCED_SIZE/REJECT for every
+candidate, and only ever attaches read-only context to what already survived
+that chain - it has no mechanism to move a candidate earlier or later in the
+sequence above. See "Big Money Data Engine" below.
 
 **This version does not place trades, connect to a broker, use margin, trade
 options, or short anything.** It only collects data, analyzes it, scores it, sends
@@ -148,6 +166,14 @@ A few things worth knowing up front, not buried in the code:
   stop wins (conservative). See `src/backtester.py`'s module docstring for the full
   list of simplifications. It only backtests Safe Mean Reversion - Aggressive mode
   isn't run through the backtester in Version 1.
+- **Big Money / institutional context (new this phase) is reporting, not a
+  trade gate - and is never proof of institutional intent.** It cannot
+  promote an Avoid-labeled candidate, and cannot touch the individual risk
+  manager, market regime filter, or portfolio risk manager's decisions, even
+  with `big_money.use_for_ranking: true`. With no `SEC_IDENTITY`/`FRED_API_KEY`
+  configured, most of its components honestly show "Data Unavailable" rather
+  than a guess - see "Big Money Data Engine" below for the full detail and the
+  point-in-time rules it follows.
 
 ---
 
@@ -189,6 +215,16 @@ parameters, scoring weights, risk rules, account equity, backtest settings) live
 `config/settings.yaml` - edit it directly. `risk.account_equity` and
 `risk.risk_pct_per_trade` are not secrets, just defaults; set them to your real
 numbers so position sizing means something.
+
+Two more `.env` values are optional and independent of everything else - the bot
+runs fine with either or both left blank, cleanly reporting "Data Unavailable"
+for whichever is missing (see "Big Money Data Engine" below):
+
+- `SEC_IDENTITY` - a descriptive User-Agent (name + contact email/URL) SEC
+  EDGAR requires from automated requesters, for the 13F/Form 4 provider.
+- `FRED_API_KEY` - a free key from
+  [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html)
+  for the macro context provider.
 
 ---
 
@@ -786,6 +822,291 @@ any kind anywhere in this codebase. See "Paper Trade Lifecycle" above.
 
 ---
 
+## Big Money Data Engine
+
+A provider-based layer for institutional/insider/macro/options-flow
+**context** - built for future ML and better trade filtering, but in this
+phase strictly reporting/optional-ranking, never a trade gate of its own. If
+you only read one sentence from this whole section, read this one: **Big
+Money context is not proof of institutional intent.** A manager filing a 13F
+doesn't tell you why they bought, whether they've since sold, or whether the
+position is 0.01% or 40% of their book beyond what `portfolio_weight` shows;
+an insider buying stock says nothing about size, and insiders sell for
+reasons (taxes, diversification, a house down payment) that have nothing to
+do with their view of the company. Treat every number in this section as a
+fact about a filing, never as a signal to act on by itself.
+
+### Provider architecture
+
+`src/data_providers/` holds one module per external data source, all sharing
+one contract (`base.py`'s `ProviderResult`): `source`, `status` (`ok` /
+`unavailable` / `error`), `data`, `fetched_at`, `available_at`, `freshness`,
+`error`, `confidence`. Only `status == "ok"` means `data` is meaningful -
+`unavailable` (not configured, or genuinely nothing there) and `error` (a
+fetch/parse actually failed) are kept distinct so a caller can say *why*
+something is missing instead of flattening every non-answer into a blank.
+**No provider ever fabricates a missing value** - this is the same
+"Data Unavailable, never a guess" discipline the options-skew layer already
+established in Version 1, just formalized into a shared contract:
+
+| Provider | What it covers | Gated on |
+|---|---|---|
+| `sec_provider.py` | 13F institutional holdings + Form 4 insider transactions | `SEC_IDENTITY` env var |
+| `macro_provider.py` | FRED macro series (fed funds, 10Y/2Y Treasury, CPI, unemployment) | `FRED_API_KEY` env var |
+| `options_flow_provider.py` | Unusual options sweeps/blocks/dark-pool prints - interface only | no vendor wired up (always the mock) |
+| `market_provider.py` | Thin `ProviderResult` wrapper around the existing `data_collector` price fetch | always available |
+
+Swapping in a real options-flow vendor later (ORATS, Tradier, Polygon,
+Unusual Whales, QuantData, ...) means implementing `OptionsFlowProvider`'s two
+methods and updating `get_default_provider()` - nothing else in this codebase
+depends on which vendor it is, by design.
+
+### Point-in-time correctness
+
+**This is one of the most important rules in this phase.** Every fact this
+engine handles has two dates, and this codebase always uses the second one to
+decide what a candidate could have "known":
+
+- **13F holdings**: a `report_period` (the quarter-end the snapshot
+  describes) and a `filing_date` (when the SEC actually received it - up to
+  45 days later). `Holding.available_at` is always `filing_date`. A manager's
+  June 30 position, filed August 14, is NOT knowable on July 1 - see
+  `tests/test_sec_provider.py::test_report_period_date_cannot_leak_data_early`.
+- **Form 4 insider transactions**: a `transaction_date` and a `filing_date`
+  (up to a couple of business days later). `InsiderTransaction.available_at`
+  is always `filing_date`.
+- **Macro (FRED) series**: an `observation_date` (the period a data point
+  describes, e.g. "March CPI") and a `release_date` (when FRED actually
+  published it, e.g. in April). `MacroObservation.available_at` prefers
+  `release_date`, falling back to `observation_date` only when FRED doesn't
+  report one.
+- **SMC structural features**: see "Causal SMC feature handling" below - the
+  same principle, applied to price structure instead of filings.
+
+Every one of these `available_at` fields exists so a consumer (the daily
+report, or `dataset_builder.py`) can ask "what did we actually know as of
+this moment" without accidentally including something that hadn't happened
+yet in the real world.
+
+### SEC 13F: manager-level institutional holdings
+
+**Important correction, carried through the whole module:** a 13F is filed
+by an institutional investment MANAGER (a hedge fund, an asset manager) -
+NOT by the company whose stock it holds. Every 13F object in
+`sec_provider.py` is keyed by manager first (`manager_cik`/`manager_name`),
+with the held ticker/CUSIP as a field on that record, never the reverse.
+
+`parse_13f_info_table_xml()` parses the real SEC 13F-HR "information table"
+XML schema (the `informationTable`/`infoTable` namespace) into raw rows;
+`build_holdings_from_filing()` turns those into normalized `Holding` objects,
+resolving ticker from CUSIP via a caller-supplied map (SEC filings carry only
+CUSIP, never a ticker) - an unmapped CUSIP yields `ticker=None`, never a
+guessed symbol. `compute_holding_changes()` compares one manager's current
+filing to their prior one (same manager only, matched by CUSIP) and
+classifies each holding as `new` / `increased` / `reduced` / `exited` /
+`unchanged`, with `shares_change_pct` and `value_change_pct`.
+
+`institutional_raw_facts()` aggregates these classified changes into a raw
+tally per ticker across every manager - **it deliberately does NOT decide
+"institutional buying = bullish."** It hands back plain counts (how many
+managers newly bought, added, trimmed, or exited) and a total dollar value
+change; `big_money.py`'s `score_institutional_accumulation()` is the one
+place that turns those facts into a transparent -1..+1 number, and even that
+function returns `None` (never a fabricated `0.0`) when there's no 13F data
+for a ticker at all.
+
+Live fetching (`fetch_recent_filings()`, `fetch_filing_document()`) is
+best-effort and fully optional, gated on `SEC_IDENTITY` (SEC requires every
+automated requester to identify itself - see `.env.example`). **This phase
+ships the parsing/normalization/point-in-time logic fully tested, but the
+daily bot does not yet maintain a persisted filing-history store to diff
+"this quarter" against "last quarter" automatically** - so in a live run
+today, `institutional_score` will typically show Data Unavailable rather than
+a fabricated single-snapshot guess. That's a documented gap for a future
+phase, not a shortcut taken silently.
+
+### SEC Form 4: insider activity
+
+`parse_form4_xml()` parses the real (unnamespaced) Form 4 `ownershipDocument`
+schema into issuer/reporting-owner/transaction rows; `build_insider_transactions()`
+normalizes them, attaching `filing_date` (from the filing index, not the XML
+body itself) as the point-in-time anchor.
+
+**Not every Form 4 transaction is an ordinary buy or sell.** Only transaction
+code `P` (open-market purchase) and `S` (open-market sale) count toward
+`insider_buy_value_30d`/`insider_sell_value_30d`/`net_insider_value_30d`/
+`insider_buy_count_30d` - grants/awards (`A`), option exercises (`M`),
+conversions (`C`), tax withholding (`F`), gifts (`G`), and every other
+standard code are parsed and classified (`InsiderTransaction.classification`)
+but never counted as if they were an ordinary market trade. `cluster_buying`
+requires BOTH enough buy transactions AND enough *distinct* insiders in the
+trailing window - one person buying three times is not a cluster.
+`compute_insider_features()` only counts transactions whose `available_at`
+(filing date) already falls within the lookback window as of `as_of` -
+never one filed after the fact.
+
+### Causal SMC feature handling
+
+`src/smc_features.py` implements Fair Value Gaps, swing highs/lows, order
+blocks, Break of Structure (BOS), Change of Character (CHoCH), and liquidity
+sweeps - simple, inspectable pandas, no external SMC library (see
+"Dependencies" below for why `smartmoneyconcepts` specifically was evaluated
+and not used).
+
+**Mandatory rule, enforced by construction: NO LOOKAHEAD LEAKAGE.** A public
+swing-high detector typically looks `right` bars into the future to confirm a
+swing, then attaches the result to the swing bar's OWN timestamp - silently
+leaking future information into what looks like a point-in-time feature.
+Every feature here instead carries two separate timestamps:
+
+- `bar_time`: the bar the structure structurally belongs to (the swing
+  candle, the FVG's middle candle, ...).
+- `available_at`: the EARLIEST bar at which the feature could actually have
+  been computed using only bars up to and including that bar - always `>=
+  bar_time`, and strictly later whenever confirmation needs future bars (a
+  swing high needs `right` bars after it; a simplified order block needs
+  `lookahead_bars` bars of confirming move; BOS/CHoCH and liquidity sweeps
+  need no extra lag beyond the breakout/sweep bar itself, but only ever
+  reference a swing whose OWN `available_at` already precedes them).
+
+`get_features_as_of(feature_table, as_of)` is the enforcement point every
+consumer (`dataset_builder.py`, any future model) must use - it filters to
+`available_at <= as_of`, never `bar_time <= as_of` (which would reintroduce
+exactly the leak this module exists to prevent).
+
+The mandatory regression test,
+`tests/test_smc_features.py::test_truncated_recompute_matches_full_history_filtered_by_available_at`,
+proves the causal contract directly: recomputing every feature using ONLY
+the first `T` bars produces EXACTLY the same feature set as computing over
+the FULL price history and then filtering to `available_at <= df.index[T-1]`
+- checked at five different truncation points. A companion test,
+`test_future_candles_cannot_change_an_already_produced_feature_row`, proves
+appending brand-new future bars never rewrites a feature row that was already
+knowable before those bars existed.
+
+### `available_at` vs. `bar_time`/`report_period`/`observation_date`: one discipline, three names
+
+Every provider and the SMC module use the SAME idea under whatever name fits
+that domain - `available_at` is always "the earliest moment this is honestly
+knowable," and it is always what gates a feature into a point-in-time
+dataset row. `bar_time`/`report_period`/`transaction_date`/`observation_date`
+are the OTHER date each object also carries (what the fact is *about*), kept
+purely as descriptive metadata - never used to decide availability.
+
+### "Data Unavailable" vs. "neutral": never the same thing
+
+A recurring failure mode in this kind of system is collapsing "we have no
+data" and "the data says neutral" into the same `0.0`, silently claiming
+certainty about something unknown. This codebase never does that, in this
+phase or any prior one (see the options-skew and performance-analytics
+`Data Unavailable` conventions from Version 1):
+
+- A component score (`institutional_score`, `insider_score`,
+  `options_flow_score`, ...) is `None` when there's no underlying data -
+  never a fabricated `0.0`. `0.0` from `score_relative_volume()` means "volume
+  was exactly average," a real, meaningful fact - not "unknown."
+- `BigMoneyScore.composite_score` is `None` (not `0.0`) when every component
+  is `None`; `data_quality_score` separately says how many of the possible
+  components actually had data, so a composite built on one thin component
+  is never confused with one built on four solid ones.
+- The report says so explicitly: "Data Unavailable" is printed as its own
+  word, distinct from any numeric score, wherever a component or the whole
+  composite has nothing behind it.
+
+### Big Money feature aggregation (`src/big_money.py`)
+
+`compute_big_money_score()` combines whatever components have data
+(`institutional_accumulation_score`, `insider_score`, `options_flow_score`,
+`relative_volume_score`, `sector_flow_score`) into one composite -1..+1 score
+via a transparent weighted average, always with the full per-component
+breakdown attached (`BigMoneyScore.components`). Missing components are
+EXCLUDED from both the weighted sum and the weight normalization, never
+treated as `0.0` - a ticker with one strongly positive component and four
+missing ones is not diluted toward zero by phantom neutral values.
+
+**Governance rule, enforced structurally, not just by convention:**
+`apply_big_money_ranking_filter()` runs strictly AFTER the Market Regime
+Filter and Portfolio Risk Manager have already decided
+ACCEPT/ACCEPT_WITH_REDUCED_SIZE/REJECT for every candidate. It:
+
+1. Always attaches `entry["big_money_score"]` for reporting, regardless of
+   `config.big_money.use_for_ranking`.
+2. With `use_for_ranking: false` (the default), does nothing else at all.
+3. With `use_for_ranking: true`, may ONLY add a purely informational
+   cautionary note (`entry["big_money_notes"]`) when the composite score is
+   unusually weak - and explicitly refuses to do even that for an
+   Avoid-labeled entry. It never writes to `entry["label"]`,
+   `entry["best_risk_result"]`, `entry["regime_evaluation"]`, or
+   `entry["portfolio_evaluation"]` - it has no code path that touches those
+   fields at all, so there is no configuration of this feature that can
+   promote an Avoid candidate or move a rejected one into Top Candidates. See
+   `tests/test_big_money.py`'s `test_ranking_filter_never_promotes_an_avoid_labeled_entry`
+   and `test_ranking_filter_never_touches_risk_regime_or_portfolio_fields`.
+
+### ML dataset design (`src/dataset_builder.py`)
+
+Produces a Parquet-backed, point-in-time feature store for a **future** ML
+step - no model is trained in this phase. Rows are keyed by
+`(timestamp, ticker)`. The builder keeps two column lists explicitly
+separate:
+
+- `FEATURE_COLUMNS`: every one computed using ONLY `price_df.iloc[:i+1]`
+  (bars up to and including row `i`) plus already-point-in-time-filtered
+  SMC/institutional/insider/macro/Big Money inputs.
+- `LABEL_COLUMNS` (`forward_5d_return`, `forward_10d_return`,
+  `forward_20d_return`): the ONE place this module is allowed - and
+  required - to look forward, because a label is not a feature. A model
+  trained on these rows only ever sees features it could have seen "live,"
+  scored against outcomes that hadn't happened yet.
+
+A row near the end of the available price history has `None` labels (the
+horizon hasn't happened yet) but fully populated features - this is expected,
+not a bug; re-running the builder later once those future bars exist fills
+the label in. Output is written under `data.dataset.output_dir` (default
+`data/processed/ml/`) as one Parquet file per ticker per run date.
+
+### Report integration
+
+- **Big Money / Institutional Context section**: a concise summary (never a
+  raw filing dump) - strongest/weakest context ticker today, how many
+  tickers had no data at all, and a standing reminder that this is context,
+  never a bypass of the existing gates. Skipped entirely if
+  `big_money.enabled` is false.
+- **Top Candidate context line**: one line per candidate -
+  `Institutional context: Big Money composite +0.42 (data quality 40%)`, or
+  an explicit `Institutional context: Data Unavailable` when there's nothing
+  behind it - never silently omitted in a way that could be mistaken for "no
+  context was checked."
+
+### Dependencies evaluated for this phase
+
+- **`pyarrow`** - added, actively used for the `dataset_builder.py` Parquet
+  output.
+- **`smartmoneyconcepts`** - evaluated, NOT added. It's small
+  (~13KB) and pandas-based, but verifying its internal confirmation windows
+  are lag-safe without vendoring and auditing its source wasn't practical
+  given this phase's "no lookahead leakage" requirement is explicitly
+  mandatory. Reimplementing FVG/swing/order-block/BOS/CHoCH detection
+  directly in `smc_features.py` gave full, testable control over
+  `available_at` instead.
+- **`edgartools`** - evaluated, NOT added. It's a full-featured EDGAR client
+  (~3.5MB wheel, pydantic-based) oriented around interactive/notebook use,
+  and every genuinely useful piece of SEC functionality for this phase (13F
+  info-table XML, Form 4 XML, the `submissions` JSON endpoint) has a small,
+  well-documented public schema this codebase parses directly in
+  `sec_provider.py` - consistent with how `data_collector.py` already talks
+  to yfinance and Telegram directly rather than through a heavier wrapper.
+- **OpenBB** - considered per the phase brief, not adopted. It's a large
+  platform-style dependency oriented around its own SDK/terminal ecosystem;
+  adopting it would mean designing around OpenBB's abstractions rather than
+  this codebase's own small `ProviderResult` contract, for a benefit (one
+  more possible data source) the provider-Protocol design in
+  `data_providers/` already gets without it. Documented here, per the phase
+  brief, as an optional future provider if a specific OpenBB-backed source
+  is ever needed - the architecture doesn't preclude it.
+
+---
+
 ## Project structure
 
 ```
@@ -831,6 +1152,18 @@ ai-quant-research-bot/
     report_writer.py                   report text + CSV/JSON + journal
     backtester.py                       standalone 1-year+ backtest engine
     utils.py                             config/env loading, logging, error isolation
+    smc_features.py                       causal Smart Money Concepts structural
+                                            features (FVG/swing/order block/BOS/CHoCH)
+    big_money.py                           institutional/insider/options-flow/macro
+                                             component scoring + composite (context only)
+    dataset_builder.py                      point-in-time ML feature/label builder,
+                                              Parquet output - no model trained
+    data_providers/
+      base.py                                shared ProviderResult contract
+      sec_provider.py                         13F manager holdings + Form 4 insiders
+      macro_provider.py                        FRED macro series
+      options_flow_provider.py                  options/flow interface + mock provider
+      market_provider.py                         ProviderResult wrapper around data_collector
   tests/
     test_indicators.py
     test_risk_manager.py
@@ -844,6 +1177,13 @@ ai-quant-research-bot/
     test_market_regime.py
     test_portfolio_risk.py
     test_regime_portfolio_integration.py
+    test_sec_provider.py
+    test_macro_provider.py
+    test_options_flow_provider.py
+    test_smc_features.py
+    test_big_money.py
+    test_dataset_builder.py
+    test_big_money_integration.py
 ```
 
 ## Scoring (0-100)
