@@ -139,20 +139,30 @@ def build_explanation(entry: dict[str, Any]) -> str:
 
 
 def select_top_candidates(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Candidates actually worth surfacing: risk-manager-approved AND not labeled Avoid.
+    """Candidates actually worth surfacing. All four of these are required:
 
-    A strategy can compute a valid, tradeable entry/stop/target (e.g. Mean Reversion
-    on a temporary dip) on a ticker whose overall 0-100 score is still weak - that's
-    real and informative, but presenting it as a top pick right under "Signal: Avoid"
-    would be self-contradictory. Both filters are required together.
+    1. The risk manager approved the trade (`best_risk_result["tradeable"]`).
+    2. If the candidate is Aggressive mean reversion, aggressive_mode.enabled must
+       be true - see the strategy-name check below.
+    3. The ticker's overall signal label is not Avoid.
+    4. Risk/reward clears `risk.min_risk_reward_ratio` - folded into (1), since
+       evaluate_candidate() already rejects anything below that threshold.
 
-    This is also the single choke point for both the Telegram Top Candidates section
-    AND the trade journal (append_to_journal calls this too), so it independently
-    re-checks that an Aggressive mean-reversion candidate never passes through here
-    unless aggressive_mode.enabled is explicitly true - even though main.py's
-    analyze_symbol already keeps Aggressive candidates out of best_risk_result while
-    disabled, this is a deliberate second, defense-in-depth check on a rule the spec
-    calls out as a hard "must never" - it should never rely on a single code path.
+    Enabling aggressive_mode only satisfies (2) - it makes an Aggressive candidate
+    ELIGIBLE to be considered here, it does not exempt it from (3) or (4). A ticker
+    crashing hard enough to trigger Aggressive mean reversion very often lands on
+    an Avoid label on the universal 0-100 checklist regardless of how the dip-buy
+    trade itself scores - enabling the flag does not change that. A strategy can
+    compute a valid, tradeable entry/stop/target on a ticker whose overall score is
+    still weak - that's real and informative, but presenting it as a top pick right
+    under "Signal: Avoid" would be self-contradictory, so (1) and (3) are both
+    required together regardless of which strategy produced the candidate.
+
+    This is also the single choke point for both the Telegram Top Candidates
+    section AND the trade journal (append_to_journal calls this too), so (2) is
+    re-checked here independently of main.py's analyze_symbol (which already keeps
+    Aggressive candidates out of best_risk_result while disabled) - a deliberate
+    second, defense-in-depth check on a rule specified as a hard "must never".
     """
     aggressive_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
     top_n = config["telegram"]["top_candidates_limit"]

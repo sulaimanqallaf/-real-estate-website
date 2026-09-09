@@ -71,6 +71,20 @@ A few things worth knowing up front, not buried in the code:
   `enabled: true` only once you've decided you want aggressive dip-buys to be
   tradeable - at that point an Aggressive candidate competes on equal footing with
   every other strategy's candidate and must still clear every other risk rule.
+
+  **Enabled aggressive mode means eligible, not automatically tradable. A candidate
+  can still be blocked by the overall signal score label.** Turning
+  `aggressive_mode.enabled` on does not promote anything into Top Candidates by
+  itself - it only lets an Aggressive candidate be *considered* alongside every
+  other strategy's candidate. `select_top_candidates()` still requires all four of:
+  (1) the risk manager approved the trade, (2) `aggressive_mode.enabled` is true if
+  the candidate is Aggressive, (3) the ticker's overall signal label is not Avoid,
+  and (4) the risk/reward threshold passes (folded into (1), since the risk manager
+  itself rejects anything below `min_risk_reward_ratio`). A ticker crashing hard
+  enough to trigger Aggressive mean reversion very often lands on an Avoid label on
+  the universal 0-100 checklist (see the decoupled-but-gated-together bullet above)
+  - enabling the flag does not change that; it can still be right there in the High
+  Risk Dip Watchlist and nowhere near Top Candidates.
 - **The backtester is a research approximation, not a portfolio simulator.** Each
   strategy gets its own independent capital pool; there's no shared-margin or
   cross-strategy position limit modeling. Entries fill at the next bar's open after
