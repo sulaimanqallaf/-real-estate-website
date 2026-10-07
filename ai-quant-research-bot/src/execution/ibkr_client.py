@@ -24,10 +24,26 @@ place `IBKRClient` is meant to actually run is on the user's own machine,
 against their own local TWS Paper session, which they start and log into
 themselves (see README) - this module never needs, stores, or transmits an
 IBKR username or password.
+
+**Connection + account verification are wired for real (`connect()`,
+`account_summary()`); order placement/position/execution tracking are
+NOT YET wired** (`positions()`, `open_orders()`, `get_order()`,
+`submit_order()`, `cancel_order()`, `replace_order()`, `executions()` all
+still raise `NotImplementedError`). This is a deliberate scope cut, not an
+oversight: the connection/account-verification code below has never been
+run against a real TWS socket from this environment (no IBKR is reachable
+from this sandbox), so it is written carefully against the documented
+`ibapi` callback contract but UNVERIFIED until exercised on a real machine
+- expanding scope to order placement before that first real-world check
+would mean writing untestable, safety-critical code two layers deep. Wire
+the rest only after `python -m src.execution.ibkr_client` (see `main()`
+below) has been confirmed working against your own local TWS Paper
+session.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -114,6 +130,28 @@ def classify_account_id(account_id: str) -> str:
     return ACCOUNT_MODE_UNKNOWN
 
 
+def _with_account_values(summary: AccountSummary, account_values: dict[str, str]) -> AccountSummary:
+    """Fills in net_liquidation/available_funds/buying_power from TWS's own
+    `reqAccountSummary` response - `verify_paper_account()` itself never
+    needs these (account mode is decided from id/port alone), but
+    `account_summary()`'s callers (sizing, circuit breakers) do."""
+
+    def _float(tag: str) -> float | None:
+        raw = account_values.get(tag)
+        try:
+            return float(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    return AccountSummary(
+        account_id=summary.account_id,
+        account_mode=summary.account_mode,
+        net_liquidation=_float("NetLiquidation"),
+        available_funds=_float("AvailableFunds"),
+        buying_power=_float("BuyingPower"),
+    )
+
+
 @dataclass
 class IBKRConfig:
     host: str
@@ -148,10 +186,20 @@ class IBKRClient:
     anything other than CONNECTED.
     """
 
+    # Seconds to wait for TWS's connection handshake (nextValidId) and for
+    # its account-summary stream to finish (accountSummaryEnd) before
+    # treating either as failed. TWS normally answers both in well under a
+    # second over localhost; a long wait here would only delay correctly
+    # detecting a dead/unreachable TWS, never help a real one connect.
+    _HANDSHAKE_TIMEOUT_SECONDS = 10
+    _ACCOUNT_SUMMARY_TIMEOUT_SECONDS = 10
+
     def __init__(self, config: IBKRConfig | None = None):
         self.config = config or IBKRConfig.from_env()
         self._state = CONNECTION_DISCONNECTED
         self._app = None
+        self._wrapper = None
+        self._network_thread: threading.Thread | None = None
         self._verified_account: AccountSummary | None = None
 
     def connection_state(self) -> str:
@@ -166,8 +214,24 @@ class IBKRClient:
         try:
             self._app = self._build_app()
             self._app.connect(self.config.host, self.config.port, self.config.client_id)
+
+            self._network_thread = threading.Thread(target=self._app.run, daemon=True, name="ibkr-client-network")
+            self._network_thread.start()
+
+            if not self._wrapper.connected_event.wait(self._HANDSHAKE_TIMEOUT_SECONDS):
+                raise IBKRConnectionError(
+                    f"No response from TWS/Gateway at {self.config.host}:{self.config.port} within "
+                    f"{self._HANDSHAKE_TIMEOUT_SECONDS}s (nextValidId never received) - confirm TWS is "
+                    "running, API access is enabled (Global Configuration -> API -> Settings), and the "
+                    "socket port matches."
+                )
+            if self._wrapper.error_messages:
+                code, text = self._wrapper.error_messages[0]
+                raise IBKRConnectionError(f"TWS reported error {code} during connect: {text}")
+
             account_id, reported_mode = self._fetch_account_identity()
-            self._verified_account = verify_paper_account(account_id, reported_mode, self.config.port, self.config.expected_account_mode)
+            verified = verify_paper_account(account_id, reported_mode, self.config.port, self.config.expected_account_mode)
+            self._verified_account = _with_account_values(verified, self._wrapper.account_values)
             self._state = CONNECTION_CONNECTED
         except AccountModeError:
             self._state = CONNECTION_HALTED
@@ -175,24 +239,73 @@ class IBKRClient:
             raise
         except Exception as exc:  # noqa: BLE001 - any other connection failure degrades, never crashes the caller
             self._state = CONNECTION_DISCONNECTED
+            self.disconnect()
             raise IBKRConnectionError(str(exc)) from exc
 
     def _build_app(self) -> Any:
-        """Lazy `ibapi` import - see module docstring. Only reached when a
-        real connection is actually attempted."""
-        from ibapi.client import EClient  # noqa: F401
-        from ibapi.wrapper import EWrapper  # noqa: F401
+        """Lazy `ibapi` import - see module docstring. `_IBWrapper`/`_IBApp`
+        are defined inside this method (not at module level) so importing
+        `ibkr_client.py` itself never requires `ibapi` to be installed -
+        only actually calling `connect()` does."""
+        from ibapi.client import EClient
+        from ibapi.wrapper import EWrapper
 
-        raise NotImplementedError(
-            "IBKRClient's real EClient/EWrapper wiring is intentionally not exercised in this "
-            "environment (no TWS/IB Gateway is reachable here) - implement the concrete "
-            "EWrapper callbacks (nextValidId, accountSummary, position, openOrder, "
-            "orderStatus, execDetails, error) against your local TWS Paper session before "
-            "using this class outside of tests. See README 'IBKR PAPER connection'."
-        )
+        class _IBWrapper(EWrapper):
+            def __init__(self) -> None:
+                EWrapper.__init__(self)
+                self.connected_event = threading.Event()
+                self.account_summary_event = threading.Event()
+                self.managed_accounts: list[str] = []
+                self.account_values: dict[str, str] = {}
+                self.error_messages: list[tuple[int, str]] = []
+
+            def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
+                self.connected_event.set()
+
+            def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+                self.managed_accounts = [a for a in accountsList.split(",") if a]
+
+            def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str) -> None:  # noqa: N802
+                self.account_values[tag] = value
+
+            def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
+                self.account_summary_event.set()
+
+            def error(self, reqId, errorCode: int, errorString: str, advancedOrderRejectJson: str = "") -> None:  # noqa: N802
+                # ibapi reports plenty of benign informational "errors" (e.g.
+                # market-data farm connection notices) through this same
+                # callback - only codes below 1000 are real request/connection
+                # errors worth surfacing to connect()'s caller.
+                if errorCode < 1000:
+                    self.error_messages.append((errorCode, errorString))
+
+        class _IBApp(EClient):
+            def __init__(self, wrapper: "_IBWrapper") -> None:
+                EClient.__init__(self, wrapper)
+
+        wrapper = _IBWrapper()
+        self._wrapper = wrapper
+        return _IBApp(wrapper)
 
     def _fetch_account_identity(self) -> tuple[str | None, str | None]:
-        raise NotImplementedError("Populated by the concrete EWrapper callbacks - see _build_app().")
+        """Account id comes from TWS's own `managedAccounts` callback (sent
+        automatically right after the connection handshake - no explicit
+        request needed). Reported mode is derived from that id via
+        `classify_account_id()`: the TWS API has no separate "is this
+        account paper or live" field - the DU/DF-vs-U id prefix IS the
+        documented signal IBKR itself expects client applications to use."""
+        account_id = self._wrapper.managed_accounts[0] if self._wrapper.managed_accounts else None
+        if not account_id:
+            return None, None
+
+        self._app.reqAccountSummary(9001, "All", "NetLiquidation,AvailableFunds,BuyingPower")
+        self._wrapper.account_summary_event.wait(self._ACCOUNT_SUMMARY_TIMEOUT_SECONDS)
+        try:
+            self._app.cancelAccountSummary(9001)
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+
+        return account_id, classify_account_id(account_id)
 
     def disconnect(self) -> None:
         if self._app is not None:
@@ -200,6 +313,8 @@ class IBKRClient:
                 self._app.disconnect()
             except Exception:  # noqa: BLE001
                 pass
+        if self._network_thread is not None and self._network_thread.is_alive():
+            self._network_thread.join(timeout=5)
         self._state = CONNECTION_DISCONNECTED
         self._verified_account = None
 
@@ -230,3 +345,48 @@ class IBKRClient:
 
     def executions(self) -> list[BrokerExecution]:
         raise NotImplementedError("Populated by the concrete EWrapper 'execDetails' callback.")
+
+
+def main() -> int:
+    """`python -m src.execution.ibkr_client` - the safest possible
+    connection check (Part B/Y). Connects, verifies the account is PAPER,
+    prints a safe summary (no secrets, no account id beyond what's needed
+    to show PAPER/LIVE/UNKNOWN), disconnects. **Never places an order and
+    never reads `execution.mode` from config.yaml** - running this command
+    itself has no side effect on the rest of the system either way."""
+    config = IBKRConfig.from_env()
+    client = IBKRClient(config)
+
+    print(f"Connecting to {config.host}:{config.port} (client id {config.client_id})...")
+    try:
+        client.connect()
+    except AccountModeError as exc:
+        print("connected: no")
+        print("account type: BLOCKED")
+        print(f"reason: {exc}")
+        print("execution mode: DRY_RUN (unaffected by this check)")
+        print("live path available: no")
+        return 1
+    except IBKRConnectionError as exc:
+        print("connected: no")
+        print(f"reason: {exc}")
+        print("account type: unknown")
+        print("execution mode: DRY_RUN (unaffected by this check)")
+        print("live path available: no")
+        return 1
+
+    try:
+        account = client.account_summary()
+        print("connected: yes")
+        print(f"account type: {account.account_mode.lower()}")
+        print(f"account id prefix: {account.account_id[:2]}**" if account.account_id else "account id prefix: n/a")
+        print("execution mode: DRY_RUN (unaffected by this check - this command never places an order)")
+        print("live path available: no")
+    finally:
+        client.disconnect()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

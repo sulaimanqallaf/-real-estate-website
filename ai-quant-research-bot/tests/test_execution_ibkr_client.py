@@ -130,3 +130,60 @@ def test_ibkr_client_submit_order_refuses_when_not_connected():
     client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
     with pytest.raises(ibkr_client.IBKRConnectionError):
         client.submit_order(object())
+
+
+def test_with_account_values_parses_numeric_tags():
+    base = ibkr_client.AccountSummary(account_id="DU1", account_mode=ACCOUNT_MODE_PAPER, net_liquidation=None, available_funds=None, buying_power=None)
+    enriched = ibkr_client._with_account_values(base, {"NetLiquidation": "100000.5", "AvailableFunds": "50000", "BuyingPower": "200000"})
+    assert enriched.net_liquidation == 100000.5
+    assert enriched.available_funds == 50000.0
+    assert enriched.buying_power == 200000.0
+    assert enriched.account_id == "DU1"
+    assert enriched.account_mode == ACCOUNT_MODE_PAPER
+
+
+def test_with_account_values_tolerates_missing_or_unparseable_tags():
+    base = ibkr_client.AccountSummary(account_id="DU1", account_mode=ACCOUNT_MODE_PAPER, net_liquidation=None, available_funds=None, buying_power=None)
+    enriched = ibkr_client._with_account_values(base, {"NetLiquidation": "not-a-number"})
+    assert enriched.net_liquidation is None
+    assert enriched.available_funds is None
+
+
+def test_main_cli_reports_connection_failure_safely_no_order_placed(monkeypatch, capsys):
+    def boom(self):
+        raise ibkr_client.IBKRConnectionError("No response from TWS/Gateway at 127.0.0.1:7497 within 10s")
+
+    monkeypatch.setattr(ibkr_client.IBKRClient, "connect", boom)
+    exit_code = ibkr_client.main()
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "connected: no" in out
+    assert "live path available: no" in out
+
+
+def test_main_cli_reports_account_mode_block_safely(monkeypatch, capsys):
+    def boom(self):
+        raise ibkr_client.AccountModeError("LIVE_ACCOUNT_BLOCKED: account U123456 reports as LIVE.")
+
+    monkeypatch.setattr(ibkr_client.IBKRClient, "connect", boom)
+    exit_code = ibkr_client.main()
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "account type: BLOCKED" in out
+    assert "live path available: no" in out
+    assert "U123456" not in out.split("reason:")[0]  # never printed before the explicit reason line
+
+
+def test_main_cli_reports_paper_connection_success_never_places_order(monkeypatch, capsys):
+    def fake_connect(self):
+        self._verified_account = ibkr_client.AccountSummary(account_id="DU1234567", account_mode=ACCOUNT_MODE_PAPER, net_liquidation=100000.0, available_funds=100000.0, buying_power=200000.0)
+
+    monkeypatch.setattr(ibkr_client.IBKRClient, "connect", fake_connect)
+    monkeypatch.setattr(ibkr_client.IBKRClient, "disconnect", lambda self: None)
+    exit_code = ibkr_client.main()
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "connected: yes" in out
+    assert "account type: paper" in out
+    assert "live path available: no" in out
+    assert "DU1234567" not in out  # only a 2-char prefix is ever printed, never the full account id
