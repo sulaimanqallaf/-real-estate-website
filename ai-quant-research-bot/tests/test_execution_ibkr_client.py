@@ -111,10 +111,36 @@ def test_ibkr_config_from_env_defaults_to_paper_port_and_mode(monkeypatch):
 
 
 def test_ibkr_client_never_reaches_connected_without_verification(monkeypatch):
-    """connect() must raise before _state is ever set to CONNECTED if
-    _build_app() itself fails (as it always will here - see module
-    docstring: no real ibapi/TWS socket is reachable in this sandbox)."""
+    """connect() must raise and never set _state to CONNECTED when the
+    connection attempt itself fails. Mocks `_build_app()` directly rather
+    than relying on `ibapi` being unimportable or no TWS being reachable -
+    those are both true in the CI sandbox this suite was first written in,
+    but neither holds on a developer machine with `ibapi` installed and a
+    real TWS/Gateway listening (there, `_build_app()` succeeds and a real
+    socket connect is attempted, which can legitimately succeed or fail
+    depending on what's actually running - not something a unit test
+    should depend on either way)."""
     client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    monkeypatch.setattr(client, "_build_app", lambda: (_ for _ in ()).throw(RuntimeError("simulated: no TWS/Gateway reachable")))
+    with pytest.raises(ibkr_client.IBKRConnectionError):
+        client.connect()
+    assert client.connection_state() != "CONNECTED"
+
+
+def test_ibkr_client_connect_failure_after_build_app_also_fails_closed(monkeypatch):
+    """Same invariant, but the failure happens one step later - after
+    `_build_app()` succeeds and the socket `connect()` call itself raises
+    (e.g. TWS refuses the client id, or the port is simply closed)."""
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+
+    class _FakeApp:
+        def connect(self, host, port, client_id):
+            raise ConnectionRefusedError("simulated: TWS refused the connection")
+
+        def disconnect(self):
+            pass
+
+    monkeypatch.setattr(client, "_build_app", lambda: _FakeApp())
     with pytest.raises(ibkr_client.IBKRConnectionError):
         client.connect()
     assert client.connection_state() != "CONNECTED"
