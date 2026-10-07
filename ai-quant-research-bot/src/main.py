@@ -131,10 +131,14 @@ def _send_paper_trade_approvals(
     an approval button on something that shouldn't have one. High Risk Dip
     Watchlist entries never reach this function at all.
 
-    `skip_tickers` (Phase 7): symbols the execution layer already
-    AUTO_EXECUTEd this run - never send a redundant approval button for
-    something that already bypassed approval and placed a real PAPER
-    order (Part S).
+    `skip_tickers` (Phase 7): symbols the execution layer says should not
+    get a button this run - either already AUTO_EXECUTEd (Part S, so a
+    button would be redundant - the trade already happened), or, in
+    DRY_RUN, a candidate whose order review (`order_review.
+    review_order_intent`) said `would_submit` is False (so a button
+    would be misleading - the system itself has already determined this
+    is not currently a valid order). Buttons are therefore only ever
+    sent for a candidate with "Would submit: YES" in DRY_RUN.
     """
     from . import telegram_bot
 
@@ -331,13 +335,21 @@ def _attempt_auto_execution(
     return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id)
 
 
-def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger) -> None:
+def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger) -> set[str]:
     """DRY_RUN order review only - converts every Top Candidate into an
     `OrderIntent`, runs every pre-submission check this system has, and
     logs exactly what order WOULD be submitted (or why it wouldn't be).
     **Never contacts a broker, never calls `submit_order()` anywhere -
     there is no broker object constructed in this function at all.**
-    Only called when `execution.mode == "DRY_RUN"` - see call site."""
+    Only called when `execution.mode == "DRY_RUN"` - see call site.
+
+    Returns the set of ticker symbols whose review said `would_submit`
+    is False - a Telegram approval button is pointless (and misleading)
+    for a candidate the system itself has already determined is not
+    currently a valid order (outside trading hours, price moved,
+    duplicate, over the risk limit, ...); the caller uses this to skip
+    sending one, the exact same mechanism already used to skip a button
+    for an auto-executed candidate."""
     from .execution import order_manager, order_review
 
     journal_path = config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl")
@@ -345,6 +357,7 @@ def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_
     manager = order_manager.OrderManager(broker=None, config=config, journal=journal)
     manager.restore_from_journal_rows(journal.read_all())
 
+    blocked_tickers: set[str] = set()
     for entry in report_writer.select_top_candidates(ticker_results, config):
         final = report_writer.final_position(entry)
         if final is None:
@@ -360,8 +373,16 @@ def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_
             logger, f"{entry['symbol']} DRY_RUN order review",
             lambda r=record, tid=trade_id: order_review.review_order_intent(r, config, manager, current_market_price=r["entry"], trade_id=tid),
         )
-        if review is not None:
-            logger.info("\n%s", order_review.format_order_review(review))
+        if review is None:
+            # The review itself failed (unexpected) - fail closed: treat
+            # as not reviewable, never offer a button for something that
+            # was never actually validated.
+            blocked_tickers.add(entry["symbol"])
+            continue
+        logger.info("\n%s", order_review.format_order_review(review))
+        if not review.would_submit:
+            blocked_tickers.add(entry["symbol"])
+    return blocked_tickers
 
 
 def _process_execution_layer(
@@ -374,9 +395,11 @@ def _process_execution_layer(
     broker: Broker | None = None,
 ) -> set[str]:
     """Phase 7 execution layer entry point from the daily run. Returns the
-    set of ticker symbols that were auto-executed this run, so
-    `_send_paper_trade_approvals` can skip sending a redundant approval
-    button for something that already bypassed approval (Part S).
+    set of ticker symbols that should NOT get a Telegram approval button
+    this run - either because they were already AUTO_EXECUTEd (Part S), or
+    (DRY_RUN only) because their order review said `would_submit` is
+    False. `_send_paper_trade_approvals` uses this set to skip both cases
+    identically.
 
     `broker` is normally None in production - a real `IBKRClient` is only
     constructed here if `execution.mode == "IBKR_PAPER"` AND at least one
@@ -391,7 +414,7 @@ def _process_execution_layer(
 
     if execution_mode != "IBKR_PAPER" or not auto_candidates:
         if execution_mode == "DRY_RUN":
-            safe_run(logger, "DRY_RUN order review", lambda: _review_top_candidates_dry_run(ticker_results, report_date, config, logger))
+            return safe_run(logger, "DRY_RUN order review", lambda: _review_top_candidates_dry_run(ticker_results, report_date, config, logger)) or set()
         return set()
 
     owns_broker = broker is None

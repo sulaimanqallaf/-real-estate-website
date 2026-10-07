@@ -1705,6 +1705,40 @@ python -m src.execution.order_review \
 This CLI never contacts a broker either, and doesn't read `execution.mode`
 at all - it's a pure, local "would this be a valid order" check.
 
+### Telegram approval buttons in DRY_RUN - only for a reviewed, valid order
+
+In `DRY_RUN`, a Top Candidate only gets an Approve/Reject/Watch Only
+Telegram message if its order review (above) says **"Would submit:
+YES"**. A candidate the review already flagged as blocked - outside
+trading hours, price moved too far, over the risk-per-trade limit, a
+duplicate of an already-journaled trade - gets no button at all; offering
+one would be misleading, since the system itself has already determined
+the order isn't currently valid. This reuses the exact same mechanism
+Part S already uses to skip a button for an auto-executed candidate
+(`_process_execution_layer`'s return value -> `_send_paper_trade_approvals`'s
+`skip_tickers`).
+
+Tapping a button, in `DRY_RUN` or otherwise, behaves exactly as it always
+has (Phase 3, unchanged by any of this): **Approve Paper Trade** writes
+one row to `paper_trades.csv` via `paper_trades.process_decision()` -
+**never** creates an `OrderIntent`, never touches the execution journal,
+never constructs a broker client of any kind. **Reject** and **Watch
+Only** write nothing at all. None of the three ever import, reference, or
+can reach `ibkr_client.IBKRClient` - `src/paper_trades.py` has no
+execution-layer import whatsoever, and `src/approval_listener.py`'s only
+execution-layer import is `telegram_commands` (the `/status` etc. command
+center), not the order/broker machinery.
+
+No local command is needed to exercise this beyond the daily run itself:
+
+```bash
+python -m src.main                      # DRY_RUN: logs an order review per
+                                         # Top Candidate, sends a button only
+                                         # for "Would submit: YES" ones
+python -m src.approval_listener         # tap a button on your phone - writes
+                                         # to paper_trades.csv only, same as always
+```
+
 ### Order lifecycle and bracket protection
 
 An eligible candidate becomes an immutable `OrderIntent` (`order_state.py`)
@@ -2004,6 +2038,7 @@ ai-quant-research-bot/
     test_execution_synthetic_scenarios.py
     test_execution_order_review.py
     test_execution_dry_run_review_integration.py
+    test_execution_telegram_approval_dry_run.py
 ```
 
 ## Scoring (0-100)
