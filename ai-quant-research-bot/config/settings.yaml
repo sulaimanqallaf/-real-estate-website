@@ -367,6 +367,13 @@ quant_agent:
 # account. `mode: DRY_RUN` performs the full decision/order-intent pipeline
 # and stops before broker transmission - this is the required first step
 # before ever flipping to IBKR_PAPER.
+#
+# Do NOT hand-edit `mode` below for local testing - this file must stay
+# DRY_RUN for everyone who clones this repo. Instead, set EXECUTION_MODE
+# in your own local, gitignored .env (see README "IBKR Paper Manual
+# Execution"); utils.load_config() applies it at runtime, and only
+# "DRY_RUN"/"IBKR_PAPER" are ever accepted there - anything else
+# (including "IBKR_LIVE") raises immediately rather than falling back.
 execution:
   mode: DRY_RUN   # DRY_RUN | IBKR_PAPER - there is no IBKR_LIVE mode in this codebase
   journal_path: "data/journal/executions.jsonl"

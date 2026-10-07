@@ -1600,6 +1600,25 @@ IBKR_ACCOUNT_ID=            # your own Paper account id - never committed
 IBKR_EXPECTED_ACCOUNT_MODE=PAPER
 ```
 
+**For local manual IBKR Paper testing, do not edit `config/settings.yaml`.**
+That file is version-controlled and must stay at its safe default
+(`execution.mode: DRY_RUN`) for everyone who clones this repo. Instead,
+set in your own local, gitignored `.env`:
+
+```
+EXECUTION_MODE=IBKR_PAPER
+```
+
+`utils.load_config()` applies this override at runtime, every time -
+`EXECUTION_MODE` in the environment, if set, replaces `execution.mode`
+from the file. Only `DRY_RUN` and `IBKR_PAPER` are accepted; anything
+else - a typo, `IBKR_LIVE`, or any other value - raises immediately at
+startup rather than silently falling back to the file's value or
+guessing. **There is still no `IBKR_LIVE` mode**: this override can only
+choose between the same two modes the file itself supports, never add a
+third. Leave `EXECUTION_MODE` unset (or remove it from `.env`) to fall
+back to whatever `config/settings.yaml` says - `DRY_RUN`, unedited.
+
 `src/execution/ibkr_client.py` imports the official `ibapi` package
 **lazily** (only inside `connect()`, never at module import time) so
 every test, `DRY_RUN` mode, and the daily research run work with zero
@@ -2089,6 +2108,7 @@ ai-quant-research-bot/
     test_execution_dry_run_review_integration.py
     test_execution_telegram_approval_dry_run.py
     test_execution_manual_ibkr_approval.py
+    test_execution_mode_env_override.py
 ```
 
 ## Scoring (0-100)

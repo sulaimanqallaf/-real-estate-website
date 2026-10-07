@@ -105,9 +105,10 @@ def run_forever(
 
 
 def main() -> int:
-    from ..utils import load_config, setup_logging
+    from ..utils import load_config, load_env, setup_logging
     from .broker import FakeBroker
 
+    load_env()
     config = load_config(None)
     logger = setup_logging(config, log_filename="position_monitor.log")
 

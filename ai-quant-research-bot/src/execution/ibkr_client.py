@@ -587,6 +587,9 @@ def main() -> int:
     to show PAPER/LIVE/UNKNOWN), disconnects. **Never places an order and
     never reads `execution.mode` from config.yaml** - running this command
     itself has no side effect on the rest of the system either way."""
+    from ..utils import load_env
+
+    load_env()
     config = IBKRConfig.from_env()
     client = IBKRClient(config)
 

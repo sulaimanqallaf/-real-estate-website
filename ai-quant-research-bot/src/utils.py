@@ -14,12 +14,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 T = TypeVar("T")
 
+# The ONLY two execution modes this codebase supports, anywhere - see
+# _apply_execution_mode_override() below. There is no IBKR_LIVE mode, and
+# nothing (env var included) can introduce one.
+VALID_EXECUTION_MODES = ("DRY_RUN", "IBKR_PAPER")
+
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
-    """Load config/settings.yaml into a plain dict."""
+    """Load config/settings.yaml into a plain dict.
+
+    `EXECUTION_MODE` in the environment (.env), if set, overrides
+    `execution.mode` at runtime - see `_apply_execution_mode_override()`.
+    This is the intended way to switch into IBKR_PAPER for local manual
+    testing: a one-line `.env` change, never a hand-edit to
+    config/settings.yaml, which stays the version-controlled, always-safe
+    default (DRY_RUN) for everyone who clones this repo.
+    """
     path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "settings.yaml"
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    _apply_execution_mode_override(config)
+    return config
+
+
+def _apply_execution_mode_override(config: dict[str, Any]) -> None:
+    """Mutates `config["execution"]["mode"]` in place if `EXECUTION_MODE`
+    is set in the environment. Only `VALID_EXECUTION_MODES` are accepted -
+    anything else (a typo, "IBKR_LIVE", an old/unsupported value) raises
+    immediately rather than silently falling back to the config file's
+    own value or guessing: a misconfigured environment variable failing
+    loudly, at startup, is far safer than this system quietly running in
+    a mode nobody actually asked for."""
+    raw = os.environ.get("EXECUTION_MODE")
+    if not raw:
+        return
+    if raw not in VALID_EXECUTION_MODES:
+        raise ValueError(
+            f"Invalid EXECUTION_MODE={raw!r} in the environment - only {VALID_EXECUTION_MODES} "
+            "are supported. There is no IBKR_LIVE mode in this codebase, and none can be added "
+            "via this override."
+        )
+    config.setdefault("execution", {})["mode"] = raw
 
 
 def load_env() -> None:

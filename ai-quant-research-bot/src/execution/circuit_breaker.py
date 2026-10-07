@@ -228,7 +228,7 @@ def check_all(
 def main() -> int:
     import argparse
 
-    from ..utils import load_config
+    from ..utils import load_config, load_env
 
     parser = argparse.ArgumentParser(description="Manual kill switch for the Phase 7 execution layer.")
     parser.add_argument("action", choices=["halt", "resume", "status"])
@@ -236,6 +236,7 @@ def main() -> int:
     parser.add_argument("--config", default=None)
     args = parser.parse_args()
 
+    load_env()
     config = load_config(args.config)
     if args.action == "halt":
         halt(config, args.reason)

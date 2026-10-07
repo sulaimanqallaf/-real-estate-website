@@ -125,7 +125,7 @@ def main() -> int:
     places an order; does not read or care about `execution.mode`."""
     import argparse
 
-    from ..utils import load_config
+    from ..utils import load_config, load_env
 
     parser = argparse.ArgumentParser(description="Review (never submit) a hypothetical DRY_RUN order.")
     parser.add_argument("--ticker", required=True)
@@ -139,6 +139,7 @@ def main() -> int:
     parser.add_argument("--current-price", type=float, default=None, help="Defaults to --entry if omitted (no slippage to evaluate).")
     args = parser.parse_args()
 
+    load_env()
     config = load_config(None)
     record = {
         "symbol": args.ticker, "strategy": args.strategy, "score": args.score,
