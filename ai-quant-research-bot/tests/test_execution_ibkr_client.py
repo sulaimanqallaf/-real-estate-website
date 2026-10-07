@@ -7,6 +7,7 @@ of what the account reports, and there is no override flag anywhere in
 import inspect
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -295,6 +296,8 @@ def _connected_client_with_fake_app():
         def __init__(self, wrapper):
             self._wrapper = wrapper
             self.positions_to_report: list[tuple[str, float, float]] = []
+            self.placed_orders: list[tuple[int, Any, Any]] = []
+            self.cancelled_orders: list[tuple[int, Any]] = []
 
         def reqPositions(self):
             # Simulates the real EWrapper.position() callback having
@@ -308,10 +311,52 @@ def _connected_client_with_fake_app():
         def reqAllOpenOrders(self):
             pass
 
+        def placeOrder(self, order_id, contract, order):
+            self.placed_orders.append((order_id, contract, order))
+
+        def cancelOrder(self, order_id, order_cancel):
+            self.cancelled_orders.append((order_id, order_cancel))
+
     wrapper = _FakeWrapper()
     client._wrapper = wrapper
     client._app = _FakeApp(wrapper)
+    client._next_order_id = 1000
     return client
+
+
+def _install_fake_ibapi_order_types(monkeypatch):
+    """`ibapi` is not installed in this sandbox (see module docstring) -
+    `submit_order()`/`replace_order()`/`cancel_order()` do
+    `from ibapi.contract import Contract` / `from ibapi.order import
+    Order` / `from ibapi.order_cancel import OrderCancel` internally.
+    Installing minimal fake modules into sys.modules lets these tests
+    exercise the REAL field-mapping code (what gets set on a Contract/
+    Order) rather than mocking submit_order() itself into a no-op -
+    ibapi's own Contract/Order are themselves just plain attribute-bag
+    classes with no validation, so a bare class is a faithful stand-in."""
+    import types
+
+    class _FakeContract:
+        pass
+
+    class _FakeOrder:
+        pass
+
+    class _FakeOrderCancel:
+        pass
+
+    fake_ibapi = types.ModuleType("ibapi")
+    fake_contract_mod = types.ModuleType("ibapi.contract")
+    fake_contract_mod.Contract = _FakeContract
+    fake_order_mod = types.ModuleType("ibapi.order")
+    fake_order_mod.Order = _FakeOrder
+    fake_order_cancel_mod = types.ModuleType("ibapi.order_cancel")
+    fake_order_cancel_mod.OrderCancel = _FakeOrderCancel
+
+    monkeypatch.setitem(sys.modules, "ibapi", fake_ibapi)
+    monkeypatch.setitem(sys.modules, "ibapi.contract", fake_contract_mod)
+    monkeypatch.setitem(sys.modules, "ibapi.order", fake_order_mod)
+    monkeypatch.setitem(sys.modules, "ibapi.order_cancel", fake_order_cancel_mod)
 
 
 def test_positions_returns_empty_list_when_broker_reports_none():
@@ -401,3 +446,157 @@ def test_open_orders_raises_on_timeout():
     client._wrapper.open_orders_end_event = _NeverSetEvent()
     with pytest.raises(ibkr_client.IBKRConnectionError, match="Timed out"):
         client.open_orders()
+
+
+# --- order submission/modification/cancellation --------------------------------------
+
+
+def _make_intent(**overrides):
+    from datetime import datetime, timezone
+
+    from src.execution import order_state
+
+    base = dict(
+        intent_id=order_state.new_intent_id(), ticker="AMD", side=order_state.SIDE_BUY, quantity=10,
+        order_type=order_state.ORDER_TYPE_LIMIT, entry_price=100.0, stop_loss=95.0,
+        target_price=115.0, strategy="Trend Following", signal_score=90, quant_score=None,
+        risk_amount=50.0, created_at=datetime.now(timezone.utc), account_mode_at_creation="PAPER",
+    )
+    base.update(overrides)
+    return order_state.OrderIntent(**base)
+
+
+def test_submit_order_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_raises_without_a_reserved_order_id():
+    """connect() always sets _next_order_id from nextValidId before
+    reaching CONNECTED - this proves submit_order() itself still refuses
+    to guess an order id if that invariant were ever violated."""
+    from src.execution.broker import CONNECTION_CONNECTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_CONNECTED
+    client._app = object()  # never reached - _reserve_order_id() raises first
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="No order id available"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_places_a_limit_buy_with_correct_fields(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    intent = _make_intent(ticker="AMD", side="BUY", quantity=10, order_type="LIMIT", entry_price=100.0)
+    result = client.submit_order(intent)
+
+    assert len(client._app.placed_orders) == 1
+    order_id, contract, order = client._app.placed_orders[0]
+    assert order_id == 1000  # the reserved next_order_id
+    assert contract.symbol == "AMD"
+    assert contract.secType == "STK"
+    assert contract.exchange == "SMART"
+    assert contract.currency == "USD"
+    assert order.action == "BUY"
+    assert order.orderType == "LMT"
+    assert order.totalQuantity == 10
+    assert order.lmtPrice == 100.0
+    assert order.transmit is True
+    assert order.outsideRth is False
+
+    assert result.broker_order_id == "1000"
+    assert result.status == "Submitted"
+    assert result.ticker == "AMD"
+
+
+def test_submit_order_places_a_stop_sell_with_aux_price(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    intent = _make_intent(ticker="AMD", side="SELL", quantity=10, order_type="STOP", entry_price=95.0)
+    client.submit_order(intent)
+
+    _, _, order = client._app.placed_orders[0]
+    assert order.action == "SELL"
+    assert order.orderType == "STP"
+    assert order.auxPrice == 95.0
+    assert not hasattr(order, "lmtPrice") or order.lmtPrice is None
+
+
+def test_submit_order_never_uses_margin_or_options_fields(monkeypatch):
+    """There is no code path here that sets a margin/leverage multiplier
+    or an options-specific contract field (strike/right/expiry) - this
+    test documents that the Contract/Order built are always the plain
+    long-stock shape, nothing else."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client.submit_order(_make_intent())
+
+    _, contract, order = client._app.placed_orders[0]
+    for forbidden in ("strike", "right", "lastTradeDateOrContractMonth", "multiplier"):
+        assert not hasattr(contract, forbidden) or getattr(contract, forbidden) in (None, "", 0)
+    for forbidden in ("cashQty", "marginFlexible"):
+        assert not hasattr(order, forbidden)
+
+
+def test_order_ids_increment_sequentially_across_submissions(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    first = client.submit_order(_make_intent(ticker="AMD"))
+    second = client.submit_order(_make_intent(ticker="MSFT"))
+    assert first.broker_order_id == "1000"
+    assert second.broker_order_id == "1001"
+    assert len(client._app.placed_orders) == 2
+
+
+def test_cancel_order_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.cancel_order("1000")
+
+
+def test_cancel_order_calls_cancel_order_with_the_right_id(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    result = client.cancel_order("1000")
+    assert result is True
+    assert len(client._app.cancelled_orders) == 1
+    assert client._app.cancelled_orders[0][0] == 1000
+
+
+def test_replace_order_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.replace_order("1000", quantity=5)
+
+
+def test_replace_order_raises_for_an_unknown_order_id(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="unknown order"):
+        client.replace_order("9999", quantity=5)
+
+
+def test_replace_order_resubmits_with_the_same_order_id_and_new_quantity(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._wrapper.raw_orders["1000"] = {
+        "broker_order_id": "1000", "ticker": "AMD", "side": "SELL", "order_type": "STOP",
+        "quantity": 4.0, "limit_price": 95.0, "status": "Submitted",
+        "filled_quantity": 0.0, "remaining_quantity": 4.0, "avg_fill_price": None, "parent_id": None,
+    }
+
+    updated = client.replace_order("1000", quantity=10)
+
+    assert len(client._app.placed_orders) == 1
+    order_id, contract, order = client._app.placed_orders[0]
+    assert order_id == 1000  # same id - a replace, not a new order
+    assert contract.symbol == "AMD"
+    assert order.action == "SELL"
+    assert order.orderType == "STP"
+    assert order.totalQuantity == 10
+    assert order.auxPrice == 95.0
+    assert updated.quantity == 10

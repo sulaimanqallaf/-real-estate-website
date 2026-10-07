@@ -106,6 +106,97 @@ def execute_approved_trade(
     return {"executed": True, "managed": managed, "intent": intent}
 
 
+def handle_manual_approval(
+    action: str,
+    symbol: str,
+    report_date: str,
+    config: dict[str, Any],
+    logger: logging.Logger,
+    broker: Broker | None = None,
+) -> tuple[bool, str]:
+    """Routes one Telegram button press through the correct path for the
+    CURRENT `execution.mode` - the manual-approval continuation of Part R.
+
+    - `action != "approve"`, or `execution.mode != "IBKR_PAPER"`:
+      delegates straight to `paper_trades.process_decision()` - UNCHANGED
+      Phase 3 behavior, and (hard rule) never touches a broker of any
+      kind. This covers DRY_RUN entirely, and Reject/Watch Only always.
+    - `action == "approve"` AND `execution.mode == "IBKR_PAPER"`: peeks
+      at the pending record (`paper_trades.peek_pending_decision()` -
+      read-only, nothing marked decided yet), then re-runs the SAME
+      execution-time re-check chain `execute_approved_trade()` already
+      uses for the AUTO_EXECUTE path - account mode, circuit breakers,
+      trading hours, slippage against a freshly fetched quote, sizing,
+      duplicate - BEFORE the pending record is ever marked APPROVED. A
+      blocked re-check therefore leaves the record PENDING and
+      retryable, never stuck "approved" with nothing actually submitted.
+      Only once a broker order is confirmed submitted does this call
+      `paper_trades.process_decision()` to mark it decided and write the
+      SAME trade_id to `paper_trades.csv`.
+
+    `execution.mode: IBKR_PAPER` with `autonomous_paper.enabled: false`
+    (the default) IS this codebase's "manual paper execution" mode -
+    there is no separate `IBKR_PAPER_MANUAL` config value; manual vs.
+    autonomous is entirely decided by `autonomous_paper.enabled`/
+    `auto_execute.enabled`, which this function never reads or changes.
+    """
+    from .. import data_collector, paper_trades
+    from . import order_manager
+
+    execution_mode = config.get("execution", {}).get("mode", "DRY_RUN")
+    if action != "approve" or execution_mode != "IBKR_PAPER":
+        return paper_trades.process_decision(action, symbol, report_date, config, logger)
+
+    record, error = paper_trades.peek_pending_decision(action, symbol, report_date, config)
+    if record is None:
+        return False, error
+
+    owns_broker = broker is None
+    if owns_broker:
+        from .ibkr_client import IBKRClient
+
+        broker = IBKRClient()
+        try:
+            broker.connect()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Manual approval: could not connect to IBKR Paper for %s (%s).", symbol, exc)
+            return False, f"{symbol}: could not connect to IBKR Paper - NOT submitted. The pending approval is unaffected; try again."
+
+    try:
+        journal_path = config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl")
+        journal = order_manager.ExecutionJournal(journal_path)
+        manager = order_manager.OrderManager(broker, config, journal)
+        manager.restore_from_journal_rows(journal.read_all())
+
+        trade_id = paper_trades.generate_trade_id(symbol, report_date)
+        current_price = data_collector.fetch_current_price(symbol, logger)
+        result = execute_approved_trade(record, config, broker, manager, current_market_price=current_price, logger=logger, trade_id=trade_id)
+
+        if not result.get("executed"):
+            reasons = "; ".join(result.get("reasons", []))
+            logger.warning("Manual approval blocked for %s: %s", symbol, reasons)
+            return False, f"{symbol}: NOT submitted - {reasons}. The pending approval is unaffected; try again."
+
+        success, message = paper_trades.process_decision("approve", symbol, report_date, config, logger, trade_id=trade_id)
+        if not success:
+            # Extremely unlikely (the exact same record just passed peek_
+            # pending_decision()'s read-only checks moments ago) - but if
+            # the pending state somehow changed in between (a concurrent
+            # click), surface it rather than silently claiming success.
+            logger.error(
+                "Manual approval for %s: broker order %s was submitted but process_decision failed: %s",
+                symbol, result["managed"].entry_broker_order_id, message,
+            )
+            return False, f"{symbol}: PAPER order was submitted to IBKR (order id {result['managed'].entry_broker_order_id}) but recording it failed - check logs: {message}"
+
+        return True, f"{symbol}: PAPER order submitted to IBKR (order id {result['managed'].entry_broker_order_id})."
+    finally:
+        if owns_broker:
+            from ..utils import safe_run
+
+            safe_run(logger, "broker disconnect", broker.disconnect)
+
+
 def format_auto_execution_notice(record: dict[str, Any], managed: order_manager.ManagedOrder, account_risk_pct: float | None) -> str:
     """Part S: auto execution must never be silent - this is the standing
     Telegram notice sent every time an AUTO_EXECUTE candidate skips

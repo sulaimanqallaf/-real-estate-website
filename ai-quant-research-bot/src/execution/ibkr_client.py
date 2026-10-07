@@ -25,20 +25,29 @@ against their own local TWS Paper session, which they start and log into
 themselves (see README) - this module never needs, stores, or transmits an
 IBKR username or password.
 
-**Connection, account verification, and READ-ONLY portfolio state
-(`connect()`, `account_summary()`, `positions()`, `open_orders()`,
-`get_order()`) are wired for real and confirmed working against a real
-TWS Paper session (see README "IBKR Paper read-only portfolio
-readiness"). `submit_order()`, `cancel_order()`, `replace_order()`, and
-`executions()` remain `NotImplementedError`** - this is a deliberate
-scope cut, not an oversight: placing or modifying an order is
-categorically higher-risk than reading state, and is wired only after
-every read path has been exercised against a real account. `positions()`
+**Connection, account verification, READ-ONLY portfolio state, and order
+submission/modification/cancellation are all wired for real** (`connect()`,
+`account_summary()`, `positions()`, `open_orders()`, `get_order()`,
+`submit_order()`, `replace_order()`, `cancel_order()`) and confirmed
+working against a real TWS Paper session for everything through
+read-only state (see README "IBKR Paper read-only portfolio readiness").
+`submit_order()`/`replace_order()`/`cancel_order()` are new, carefully
+written against the documented `ibapi` contract, but - like every real
+network call in this module - exercised only against a real TWS from the
+user's own machine, never from this repository's test suite. `positions()`
 uses `reqPositions()`; `open_orders()`/`get_order()` use
 `reqAllOpenOrders()` (every open order TWS knows about for this login,
 not only ones placed through this API session - deliberately broad, so
 Part J's reconciliation can actually detect an "unknown" order the system
-didn't create).
+didn't create). `replace_order()`/`cancel_order()` reuse the SAME
+`placeOrder`/`cancelOrder` calls IBKR itself documents as the "modify an
+existing order" and "cancel" conventions - there is no separate "modify"
+endpoint. **`executions()` remains `NotImplementedError`** - fill
+quantity/price is already available through `get_order()`'s `orderStatus`
+data (the actual mechanism `order_manager.poll_entry_fill()` uses), so
+`executions()` is only needed for a commission figure in a journal note,
+not for anything safety-relevant; it's deferred rather than adding a
+fourth untested `ibapi` callback chain for a cosmetic detail.
 """
 
 from __future__ import annotations
@@ -48,6 +57,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from . import order_state
 from .broker import (
     ACCOUNT_MODE_LIVE,
     ACCOUNT_MODE_PAPER,
@@ -62,6 +72,20 @@ from .broker import (
     BrokerOrder,
     BrokerPosition,
 )
+
+# This codebase's internal order-type vocabulary (order_state.py) vs.
+# IBKR's own order-type strings - translated at the one point that
+# actually talks to ibapi, so nothing upstream needs to know IBKR's
+# conventions.
+_ORDER_TYPE_TO_IBKR = {order_state.ORDER_TYPE_LIMIT: "LMT", order_state.ORDER_TYPE_STOP: "STP"}
+
+# Long US stocks/ETFs only (Part A/E hard constraint) - every order this
+# client ever places uses exactly this contract shape; there is no
+# parameter anywhere that can change secType to an option/future/forex
+# contract or route anywhere other than SMART.
+_STOCK_EXCHANGE = "SMART"
+_STOCK_CURRENCY = "USD"
+_STOCK_SEC_TYPE = "STK"
 
 # IBKR's own documented default ports - never guessed, always explicit.
 DEFAULT_TWS_PAPER_PORT = 7497
@@ -231,6 +255,7 @@ class IBKRClient:
         self._wrapper = None
         self._network_thread: threading.Thread | None = None
         self._verified_account: AccountSummary | None = None
+        self._next_order_id: int | None = None
 
     def connection_state(self) -> str:
         return self._state
@@ -262,6 +287,7 @@ class IBKRClient:
             account_id, reported_mode = self._fetch_account_identity()
             verified = verify_paper_account(account_id, reported_mode, self.config.port, self.config.expected_account_mode)
             self._verified_account = _with_account_values(verified, self._wrapper.account_values)
+            self._next_order_id = self._wrapper.next_order_id
             self._state = CONNECTION_CONNECTED
         except AccountModeError:
             self._state = CONNECTION_HALTED
@@ -296,8 +322,10 @@ class IBKRClient:
                 # progress) since neither callback alone carries every field
                 # open_orders()/get_order() need - see module docstring.
                 self.raw_orders: dict[str, dict[str, Any]] = {}
+                self.next_order_id: int | None = None
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
+                self.next_order_id = orderId
                 self.connected_event.set()
 
             def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
@@ -451,15 +479,102 @@ class IBKRClient:
         entry = self._wrapper.raw_orders.get(broker_order_id)
         return _order_from_raw(entry) if entry is not None else None
 
+    def _reserve_order_id(self) -> int:
+        """IBKR requires a strictly increasing, never-reused order id per
+        client id for every NEW order - `nextValidId()`'s value is only
+        the first one; every order placed after that must use the next
+        integer, tracked locally (ibapi does not do this bookkeeping for
+        you)."""
+        if self._next_order_id is None:
+            raise IBKRConnectionError("No order id available - connect() must succeed (and report nextValidId) before any order can be submitted.")
+        order_id = self._next_order_id
+        self._next_order_id += 1
+        return order_id
+
+    def _build_stock_contract(self, ticker: str) -> Any:
+        from ibapi.contract import Contract
+
+        contract = Contract()
+        contract.symbol = ticker
+        contract.secType = _STOCK_SEC_TYPE
+        contract.exchange = _STOCK_EXCHANGE
+        contract.currency = _STOCK_CURRENCY
+        return contract
+
+    def _build_ibkr_order(self, side: str, order_type: str, quantity: float, price: float) -> Any:
+        from ibapi.order import Order
+
+        order = Order()
+        order.action = side  # "BUY" or "SELL" only - enforced upstream by order_state.validate_intent()
+        order.orderType = _ORDER_TYPE_TO_IBKR.get(order_type, order_type)
+        order.totalQuantity = quantity
+        order.tif = "DAY"
+        order.outsideRth = False  # Part N: regular trading hours only, never pre/after-market
+        order.transmit = True
+        order.eTradeOnly = False
+        order.firmQuoteOnly = False
+        if order.orderType == "LMT":
+            order.lmtPrice = price
+        elif order.orderType == "STP":
+            order.auxPrice = price
+        return order
+
     def submit_order(self, intent: Any) -> BrokerOrder:
+        """Places exactly one order - the entry, or (from `order_manager.
+        _sync_protection`) a protective STOP or target LIMIT exit leg.
+        `intent.entry_price` is, for every `OrderIntent` this codebase
+        constructs (including an exit leg - see `order_manager.
+        _exit_intent()`), simply "the price this specific order should
+        use"; `intent.order_type` says whether that's a limit or a stop
+        price. Returns an immediate, locally-built snapshot (status
+        "Submitted") - the real status/fill comes later from `get_order()`,
+        exactly like `FakeBroker.submit_order()` already behaves."""
         self._require_connected("submit an order")
-        raise NotImplementedError("Populated by the concrete EClient 'placeOrder' call + order-id sequencing.")
+
+        order_id = self._reserve_order_id()
+        contract = self._build_stock_contract(intent.ticker)
+        order = self._build_ibkr_order(intent.side, intent.order_type, intent.quantity, intent.entry_price)
+        self._app.placeOrder(order_id, contract, order)
+
+        return BrokerOrder(
+            broker_order_id=str(order_id), perm_id=None, ticker=intent.ticker, side=intent.side,
+            order_type=intent.order_type, quantity=intent.quantity,
+            limit_price=intent.entry_price if intent.order_type == order_state.ORDER_TYPE_LIMIT else None,
+            status="Submitted", filled_quantity=0.0, remaining_quantity=intent.quantity,
+        )
 
     def cancel_order(self, broker_order_id: str) -> bool:
-        raise NotImplementedError("Populated by the concrete EClient 'cancelOrder' call.")
+        self._require_connected("cancel an order")
+        order_id = int(broker_order_id)
+        try:
+            from ibapi.order_cancel import OrderCancel
+
+            self._app.cancelOrder(order_id, OrderCancel())
+        except ImportError:
+            # Older ibapi versions take a manual-cancel-reason string
+            # instead of an OrderCancel object - support both rather than
+            # pinning a minimum ibapi version.
+            self._app.cancelOrder(order_id, "")
+        return True
 
     def replace_order(self, broker_order_id: str, **changes: Any) -> BrokerOrder:
-        raise NotImplementedError("Populated by re-submitting 'placeOrder' with the same orderId (IBKR's documented modify semantics).")
+        """IBKR has no separate "modify" call - re-submitting `placeOrder`
+        with the SAME order id against an order TWS still has open is its
+        documented modify convention. Used by `order_manager._sync_
+        protection()` to resize an existing stop/target when a partial
+        fill's protected quantity grows."""
+        self._require_connected("replace an order")
+        entry = self._wrapper.raw_orders.get(broker_order_id)
+        if entry is None:
+            raise IBKRConnectionError(f"Cannot replace unknown order {broker_order_id} - no prior record of it from this session.")
+
+        quantity = changes.get("quantity", entry.get("quantity"))
+        price = changes.get("limit_price", entry.get("limit_price"))
+        contract = self._build_stock_contract(entry.get("ticker") or "")
+        order = self._build_ibkr_order(entry.get("side") or order_state.SIDE_BUY, entry.get("order_type") or order_state.ORDER_TYPE_LIMIT, quantity, price)
+
+        self._app.placeOrder(int(broker_order_id), contract, order)
+        return _order_from_raw({**entry, "quantity": quantity, "limit_price": price, "remaining_quantity": quantity})
 
     def executions(self) -> list[BrokerExecution]:
         raise NotImplementedError("Populated by the concrete EWrapper 'execDetails' callback.")

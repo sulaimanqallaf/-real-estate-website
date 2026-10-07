@@ -12,7 +12,11 @@ Modules:
   connection is ever exercised by an automated test).
 - `ibkr_client.py`: the real `Broker` implementation over the official
   `ibapi` TWS API, imported lazily so nothing else in this codebase ever
-  requires it to be installed.
+  requires it to be installed. Connection, account verification,
+  read-only portfolio state, and order submission/modification/
+  cancellation are all wired for real; `executions()` remains
+  `NotImplementedError` (not needed for fill detection - see module
+  docstring).
 - `order_state.py`: the immutable `OrderIntent` + its validation, and the
   order lifecycle state constants.
 - `order_manager.py`: submission, fill-aware bracket protection (entry
@@ -32,6 +36,10 @@ Modules:
   gone stale between a Telegram approval and execution time, then routes
   into `order_manager.py`; also the AUTO_EXECUTE path used when both
   `autonomous_paper.enabled` and `auto_execute.enabled` are true.
+  `handle_manual_approval()` is the manual-approval entry point wired
+  into `approval_listener.py` - submits a real order only for Approve in
+  `execution.mode: IBKR_PAPER`; everything else (DRY_RUN, Reject, Watch
+  Only) never touches a broker.
 - `telegram_commands.py`: the `/status`, `/positions`, `/orders`,
   `/performance`, `/halt`, `/resume` command center, wired into
   `approval_listener.py`.

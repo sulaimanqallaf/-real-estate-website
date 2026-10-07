@@ -74,6 +74,24 @@ def fetch_all_price_history(
     return results
 
 
+def fetch_current_price(symbol: str, logger: logging.Logger) -> float | None:
+    """Best-effort near-real-time last price for one symbol via yfinance's
+    `fast_info` - used only for the Phase 7 execution layer's pre-
+    submission slippage check (`pretrade_checks.check_slippage`), never
+    for sizing or any other decision. Returns None (never raises) on any
+    failure - callers must treat None as "price unavailable," which
+    `check_slippage()` already treats as a hard block rather than
+    submitting blind."""
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.fast_info
+        price = info.get("lastPrice") if hasattr(info, "get") else getattr(info, "last_price", None)
+        return float(price) if price is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not fetch a current price for %s: %s", symbol, exc)
+        return None
+
+
 def fetch_raw_option_chain(symbol: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (calls, puts) DataFrames for one expiration. Raises on any failure."""
     ticker = yf.Ticker(symbol)

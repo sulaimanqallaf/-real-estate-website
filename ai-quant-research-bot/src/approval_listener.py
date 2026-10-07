@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paper_trades, telegram_bot
-from .execution import telegram_commands
+from .execution import approval_bridge, telegram_commands
 from .utils import get_env_var, load_config, load_env, resolve_path, setup_logging
 
 
@@ -95,7 +95,12 @@ def handle_update(update: dict[str, Any], token: str, chat_id: str, config: dict
         return
 
     action, symbol, report_date = decoded
-    _, result_text = paper_trades.process_decision(action, symbol, report_date, config, logger)
+    # Phase 7: routes "approve" through a real IBKR Paper submission when
+    # execution.mode == "IBKR_PAPER" (manual execution, re-checking every
+    # gate first); everything else - DRY_RUN entirely, and reject/watch
+    # always - is unchanged Phase 3 behavior with zero broker contact.
+    # See execution.approval_bridge.handle_manual_approval's docstring.
+    _, result_text = approval_bridge.handle_manual_approval(action, symbol, report_date, config, logger)
 
     telegram_bot.answer_callback_query(token, callback_query["id"], result_text, logger)
 

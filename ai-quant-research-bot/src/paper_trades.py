@@ -196,8 +196,41 @@ def save_pending_approval(record: dict[str, Any], config: dict[str, Any]) -> Non
 # --- decision processing (called by approval_listener.py on each button press) ---
 
 
+def peek_pending_decision(action: str, symbol: str, report_date: str, config: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Read-only: returns `(record, None)` if `action` could legitimately
+    be processed right now (a matching PENDING record exists, and - for
+    an Aggressive approve - aggressive_mode is still enabled), or
+    `(None, error_message)` otherwise. Mutates nothing - `process_
+    decision()` re-runs these exact checks itself right before actually
+    deciding, so this is purely a way for a caller (the Phase 7 manual
+    IBKR Paper execution path) to know whether it's even worth
+    attempting a broker submission before any pending state changes."""
+    if action not in VALID_ACTIONS:
+        return None, f"Unrecognized action: {action}"
+
+    key = _key(symbol, report_date)
+    records = load_pending_approvals(config)
+    record = records.get(key)
+
+    if record is None:
+        return None, f"No pending approval found for {symbol} on {report_date} (expired or unknown)."
+
+    if record["status"] != "PENDING":
+        return None, f"{symbol} was already marked {record['status']}."
+
+    if action == "approve" and record["is_aggressive"]:
+        currently_enabled = config["strategies"]["mean_reversion"]["aggressive_mode"]["enabled"]
+        if not currently_enabled:
+            return None, (
+                f"{symbol} is an Aggressive mean-reversion candidate and aggressive_mode.enabled "
+                f"is currently false - it cannot be approved as a paper trade."
+            )
+
+    return record, None
+
+
 def process_decision(
-    action: str, symbol: str, report_date: str, config: dict[str, Any], logger: logging.Logger
+    action: str, symbol: str, report_date: str, config: dict[str, Any], logger: logging.Logger, trade_id: str | None = None,
 ) -> tuple[bool, str]:
     """Resolve one button press. Returns (success, message_to_show_the_user).
 
@@ -205,6 +238,13 @@ def process_decision(
     it does NOT by itself mean a paper trade was written - only "approve" ever
     writes to paper_trades.csv, and even then only after the aggressive-mode
     re-check below passes.
+
+    `trade_id`: normally omitted. The Phase 7 manual IBKR Paper execution
+    path (`execution.approval_bridge.handle_manual_approval`) passes one
+    explicitly, AFTER a real broker submission has already succeeded, so
+    the SAME trade_id lands on both the `OrderIntent` and this CSV row -
+    see `record_paper_trade()`'s docstring for why they'd otherwise drift
+    apart. Passed straight through to `record_paper_trade()`.
     """
     if action not in VALID_ACTIONS:
         return False, f"Unrecognized action: {action}"
@@ -241,7 +281,7 @@ def process_decision(
     _save_all(records, config)
 
     if action == "approve":
-        record_paper_trade(record, config)
+        record_paper_trade(record, config, trade_id=trade_id)
         logger.info("Approved paper trade: %s (%s)", symbol, record["strategy"])
         return True, f"{symbol} approved and recorded in paper_trades.csv."
 

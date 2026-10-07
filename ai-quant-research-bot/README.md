@@ -1739,6 +1739,55 @@ python -m src.approval_listener         # tap a button on your phone - writes
                                          # to paper_trades.csv only, same as always
 ```
 
+### IBKR Paper Manual Execution - the first mode that places a real (paper) order
+
+Set `execution.mode: IBKR_PAPER` (with `autonomous_paper.enabled: false`,
+the default) and tapping **Approve Paper Trade** now submits a real
+order to your IBKR Paper account - manually, one tap at a time, never
+autonomously. **There is no separate `IBKR_PAPER_MANUAL` config value** -
+manual vs. autonomous execution is entirely decided by `autonomous_paper.
+enabled`/`auto_execute.enabled`, exactly as it already was for the
+AUTO_EXECUTE path; `execution.mode: IBKR_PAPER` with both of those false
+*is* manual-only paper execution.
+
+`approval_listener.py`'s button handler now calls `execution.
+approval_bridge.handle_manual_approval()` instead of going straight to
+`paper_trades.process_decision()`. That function's own routing is the
+safety boundary:
+
+- Any action other than Approve, or `execution.mode` anything other than
+  `IBKR_PAPER` (i.e. all of DRY_RUN): delegates straight to the original,
+  unchanged `process_decision()` - **zero broker contact**, by
+  construction (`src/paper_trades.py` has no execution-layer import at
+  all).
+- **Approve** in `IBKR_PAPER` mode: peeks at the pending record
+  (read-only - nothing is marked decided yet), then re-runs the exact
+  same execution-time re-check chain the AUTO_EXECUTE path already uses -
+  account verified PAPER (hard block on LIVE/UNKNOWN, no override),
+  circuit breakers (including the manual kill switch), trading hours,
+  slippage against a freshly fetched quote (`data_collector.
+  fetch_current_price()` - a `None` quote blocks rather than submitting
+  blind), broker-constrained sizing (shrinks, never grows), and
+  `OrderManager.is_duplicate()`. **Only if every one of those passes**
+  does it submit the order and then mark the pending record APPROVED and
+  write `paper_trades.csv` - with the SAME `trade_id` on both the
+  `OrderIntent` and the CSV row. A blocked re-check leaves the pending
+  record `PENDING` and the button retryable, never stuck "approved" with
+  nothing actually submitted.
+
+`IBKRClient.submit_order()`/`replace_order()`/`cancel_order()` are wired
+for real (`placeOrder`/`cancelOrder` over `ibapi`) - long US stocks/ETFs
+only (`contract.secType = "STK"`, `exchange = "SMART"`), no margin field
+ever set, no options contract ever constructed. `executions()` remains
+`NotImplementedError` (fill data already comes from `get_order()`'s
+`orderStatus`, which is what fill-detection actually uses; `executions()`
+would only add a commission figure to a journal note).
+
+```bash
+python -m src.approval_listener         # Approve now submits to IBKR Paper
+                                         # when execution.mode: IBKR_PAPER
+```
+
 ### Order lifecycle and bracket protection
 
 An eligible candidate becomes an immutable `OrderIntent` (`order_state.py`)
@@ -2039,6 +2088,7 @@ ai-quant-research-bot/
     test_execution_order_review.py
     test_execution_dry_run_review_integration.py
     test_execution_telegram_approval_dry_run.py
+    test_execution_manual_ibkr_approval.py
 ```
 
 ## Scoring (0-100)
