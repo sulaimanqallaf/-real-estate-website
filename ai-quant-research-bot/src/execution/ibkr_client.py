@@ -25,20 +25,20 @@ against their own local TWS Paper session, which they start and log into
 themselves (see README) - this module never needs, stores, or transmits an
 IBKR username or password.
 
-**Connection + account verification are wired for real (`connect()`,
-`account_summary()`); order placement/position/execution tracking are
-NOT YET wired** (`positions()`, `open_orders()`, `get_order()`,
-`submit_order()`, `cancel_order()`, `replace_order()`, `executions()` all
-still raise `NotImplementedError`). This is a deliberate scope cut, not an
-oversight: the connection/account-verification code below has never been
-run against a real TWS socket from this environment (no IBKR is reachable
-from this sandbox), so it is written carefully against the documented
-`ibapi` callback contract but UNVERIFIED until exercised on a real machine
-- expanding scope to order placement before that first real-world check
-would mean writing untestable, safety-critical code two layers deep. Wire
-the rest only after `python -m src.execution.ibkr_client` (see `main()`
-below) has been confirmed working against your own local TWS Paper
-session.
+**Connection, account verification, and READ-ONLY portfolio state
+(`connect()`, `account_summary()`, `positions()`, `open_orders()`,
+`get_order()`) are wired for real and confirmed working against a real
+TWS Paper session (see README "IBKR Paper read-only portfolio
+readiness"). `submit_order()`, `cancel_order()`, `replace_order()`, and
+`executions()` remain `NotImplementedError`** - this is a deliberate
+scope cut, not an oversight: placing or modifying an order is
+categorically higher-risk than reading state, and is wired only after
+every read path has been exercised against a real account. `positions()`
+uses `reqPositions()`; `open_orders()`/`get_order()` use
+`reqAllOpenOrders()` (every open order TWS knows about for this login,
+not only ones placed through this API session - deliberately broad, so
+Part J's reconciliation can actually detect an "unknown" order the system
+didn't create).
 """
 
 from __future__ import annotations
@@ -152,6 +152,34 @@ def _with_account_values(summary: AccountSummary, account_values: dict[str, str]
     )
 
 
+def _order_from_raw(entry: dict[str, Any] | None) -> BrokerOrder:
+    """Builds a `BrokerOrder` from the wrapper's accumulated openOrder/
+    orderStatus fields. Pure dict -> dataclass mapping - no `ibapi` types
+    involved - so it's directly unit-testable without `ibapi` installed.
+
+    Note on "Rejected": IBKR reports an order rejection through the
+    `error()` callback (a specific error code), not through orderStatus's
+    `status` field becoming the literal string "Rejected" - so a rejected
+    order read back through this path will show whatever terminal status
+    TWS actually reported (commonly "Cancelled" or "Inactive"), not
+    "Rejected" specifically. True rejection detection for an order THIS
+    client submitted is handled when `submit_order()` is wired, not here."""
+    return BrokerOrder(
+        broker_order_id=entry["broker_order_id"],
+        perm_id=entry.get("perm_id"),
+        ticker=entry.get("ticker") or "",
+        side=entry.get("side") or "",
+        order_type=entry.get("order_type") or "",
+        quantity=float(entry.get("quantity") or 0.0),
+        limit_price=entry.get("limit_price"),
+        status=entry.get("status") or "Unknown",
+        filled_quantity=float(entry.get("filled_quantity") or 0.0),
+        remaining_quantity=float(entry.get("remaining_quantity") or 0.0),
+        avg_fill_price=entry.get("avg_fill_price"),
+        parent_id=entry.get("parent_id"),
+    )
+
+
 @dataclass
 class IBKRConfig:
     host: str
@@ -193,6 +221,8 @@ class IBKRClient:
     # detecting a dead/unreachable TWS, never help a real one connect.
     _HANDSHAKE_TIMEOUT_SECONDS = 10
     _ACCOUNT_SUMMARY_TIMEOUT_SECONDS = 10
+    _POSITIONS_TIMEOUT_SECONDS = 10
+    _OPEN_ORDERS_TIMEOUT_SECONDS = 10
 
     def __init__(self, config: IBKRConfig | None = None):
         self.config = config or IBKRConfig.from_env()
@@ -255,9 +285,17 @@ class IBKRClient:
                 EWrapper.__init__(self)
                 self.connected_event = threading.Event()
                 self.account_summary_event = threading.Event()
+                self.positions_end_event = threading.Event()
+                self.open_orders_end_event = threading.Event()
                 self.managed_accounts: list[str] = []
                 self.account_values: dict[str, str] = {}
                 self.error_messages: list[tuple[int, str]] = []
+                self.raw_positions: list[tuple[str, float, float]] = []
+                # Keyed by str(orderId); accumulated from BOTH openOrder (ticker/
+                # side/type/quantity/limit price) and orderStatus (live fill
+                # progress) since neither callback alone carries every field
+                # open_orders()/get_order() need - see module docstring.
+                self.raw_orders: dict[str, dict[str, Any]] = {}
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
                 self.connected_event.set()
@@ -270,6 +308,56 @@ class IBKRClient:
 
             def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
                 self.account_summary_event.set()
+
+            def position(self, account: str, contract: Any, position: float, avgCost: float) -> None:  # noqa: N802
+                self.raw_positions.append((contract.symbol, float(position), float(avgCost)))
+
+            def positionEnd(self) -> None:  # noqa: N802
+                self.positions_end_event.set()
+
+            def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+                key = str(orderId)
+                entry = self.raw_orders.setdefault(key, {})
+                entry.update(
+                    {
+                        "broker_order_id": key,
+                        "perm_id": str(order.permId) if getattr(order, "permId", None) else entry.get("perm_id"),
+                        "ticker": contract.symbol,
+                        "side": order.action,
+                        "order_type": order.orderType,
+                        "quantity": float(order.totalQuantity),
+                        "limit_price": float(order.lmtPrice) if getattr(order, "lmtPrice", None) else None,
+                        "parent_id": str(order.parentId) if getattr(order, "parentId", None) else entry.get("parent_id"),
+                        # openOrder's own orderState carries a status too, but
+                        # orderStatus is the live-update channel - never let an
+                        # older openOrder snapshot overwrite a status orderStatus
+                        # already reported more recently.
+                        "status": entry.get("status") or getattr(orderState, "status", None) or "Unknown",
+                        "filled_quantity": entry.get("filled_quantity", 0.0),
+                        "remaining_quantity": entry.get("remaining_quantity", float(order.totalQuantity)),
+                        "avg_fill_price": entry.get("avg_fill_price"),
+                    }
+                )
+
+            def orderStatus(  # noqa: N802
+                self, orderId: int, status: str, filled: float, remaining: float, avgFillPrice: float,
+                permId: int, parentId: int, lastFillPrice: float, clientId: int, whyHeld: str, mktCapPrice: float,
+            ) -> None:
+                key = str(orderId)
+                entry = self.raw_orders.setdefault(key, {"broker_order_id": key, "ticker": None, "side": None, "order_type": None, "quantity": float(filled) + float(remaining), "limit_price": None, "parent_id": None})
+                entry.update(
+                    {
+                        "status": status,
+                        "filled_quantity": float(filled),
+                        "remaining_quantity": float(remaining),
+                        "avg_fill_price": float(avgFillPrice) if avgFillPrice else entry.get("avg_fill_price"),
+                        "perm_id": str(permId) if permId else entry.get("perm_id"),
+                        "parent_id": str(parentId) if parentId else entry.get("parent_id"),
+                    }
+                )
+
+            def openOrderEnd(self) -> None:  # noqa: N802
+                self.open_orders_end_event.set()
 
             def error(self, reqId, errorCode: int, errorString: str, advancedOrderRejectJson: str = "") -> None:  # noqa: N802
                 # ibapi reports plenty of benign informational "errors" (e.g.
@@ -323,18 +411,48 @@ class IBKRClient:
             raise AccountModeError("ACCOUNT_MODE_UNVERIFIED: no verified account - connect() must succeed first.")
         return self._verified_account
 
+    def _require_connected(self, action: str) -> None:
+        if self._state != CONNECTION_CONNECTED:
+            raise IBKRConnectionError(f"Cannot {action} while connection_state() is '{self._state}', not CONNECTED.")
+
     def positions(self) -> list[BrokerPosition]:
-        raise NotImplementedError("Populated by the concrete EWrapper 'position' callback.")
+        self._require_connected("read positions")
+        self._wrapper.raw_positions = []
+        self._wrapper.positions_end_event.clear()
+        self._app.reqPositions()
+        if not self._wrapper.positions_end_event.wait(self._POSITIONS_TIMEOUT_SECONDS):
+            raise IBKRConnectionError(f"Timed out waiting for TWS to finish reporting positions (positionEnd never received within {self._POSITIONS_TIMEOUT_SECONDS}s).")
+        try:
+            self._app.cancelPositions()
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+        return [BrokerPosition(ticker=ticker, quantity=qty, avg_cost=avg_cost) for ticker, qty, avg_cost in self._wrapper.raw_positions]
+
+    def _refresh_open_orders(self) -> None:
+        """Re-queries TWS for every currently open order (`reqAllOpenOrders`
+        - scoped to this login, not just this API session's own client id)
+        and waits for `openOrderEnd` before returning. `open_orders()` and
+        `get_order()` both call this: correctness over polling efficiency
+        is the right tradeoff for this phase's read-only scope, since
+        nothing yet submits orders through this client to poll repeatedly
+        at volume (see module docstring)."""
+        self._require_connected("read open orders")
+        self._wrapper.open_orders_end_event.clear()
+        self._app.reqAllOpenOrders()
+        if not self._wrapper.open_orders_end_event.wait(self._OPEN_ORDERS_TIMEOUT_SECONDS):
+            raise IBKRConnectionError(f"Timed out waiting for TWS to finish reporting open orders (openOrderEnd never received within {self._OPEN_ORDERS_TIMEOUT_SECONDS}s).")
 
     def open_orders(self) -> list[BrokerOrder]:
-        raise NotImplementedError("Populated by the concrete EWrapper 'openOrder'/'orderStatus' callbacks.")
+        self._refresh_open_orders()
+        return [_order_from_raw(entry) for entry in self._wrapper.raw_orders.values() if entry.get("status") not in ("Filled", "Cancelled", "Rejected")]
 
     def get_order(self, broker_order_id: str) -> BrokerOrder | None:
-        raise NotImplementedError("Populated by tracking every EWrapper 'orderStatus' callback by order id, regardless of terminal state.")
+        self._refresh_open_orders()
+        entry = self._wrapper.raw_orders.get(broker_order_id)
+        return _order_from_raw(entry) if entry is not None else None
 
     def submit_order(self, intent: Any) -> BrokerOrder:
-        if self._state != CONNECTION_CONNECTED:
-            raise IBKRConnectionError(f"Refusing to submit an order while connection_state() is '{self._state}', not CONNECTED.")
+        self._require_connected("submit an order")
         raise NotImplementedError("Populated by the concrete EClient 'placeOrder' call + order-id sequencing.")
 
     def cancel_order(self, broker_order_id: str) -> bool:
@@ -380,8 +498,24 @@ def main() -> int:
         print("connected: yes")
         print(f"account type: {account.account_mode.lower()}")
         print(f"account id prefix: {account.account_id[:2]}**" if account.account_id else "account id prefix: n/a")
+        print(f"net liquidation: {account.net_liquidation}")
+        print(f"available funds: {account.available_funds}")
         print("execution mode: DRY_RUN (unaffected by this check - this command never places an order)")
         print("live path available: no")
+
+        print("\npositions (read-only):")
+        positions = client.positions()
+        if not positions:
+            print("  none")
+        for p in positions:
+            print(f"  {p.ticker}: {p.quantity} shares @ avg cost {p.avg_cost}")
+
+        print("\nopen orders (read-only):")
+        orders = client.open_orders()
+        if not orders:
+            print("  none")
+        for o in orders:
+            print(f"  {o.ticker} {o.side} {o.quantity} {o.order_type} - status {o.status} (filled {o.filled_quantity}/{o.quantity})")
     finally:
         client.disconnect()
 

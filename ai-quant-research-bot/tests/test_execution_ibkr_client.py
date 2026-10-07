@@ -201,11 +201,16 @@ def test_main_cli_reports_account_mode_block_safely(monkeypatch, capsys):
 
 
 def test_main_cli_reports_paper_connection_success_never_places_order(monkeypatch, capsys):
+    from src.execution.broker import CONNECTION_CONNECTED
+
     def fake_connect(self):
         self._verified_account = ibkr_client.AccountSummary(account_id="DU1234567", account_mode=ACCOUNT_MODE_PAPER, net_liquidation=100000.0, available_funds=100000.0, buying_power=200000.0)
+        self._state = CONNECTION_CONNECTED
 
     monkeypatch.setattr(ibkr_client.IBKRClient, "connect", fake_connect)
     monkeypatch.setattr(ibkr_client.IBKRClient, "disconnect", lambda self: None)
+    monkeypatch.setattr(ibkr_client.IBKRClient, "positions", lambda self: [])
+    monkeypatch.setattr(ibkr_client.IBKRClient, "open_orders", lambda self: [])
     exit_code = ibkr_client.main()
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -213,3 +218,186 @@ def test_main_cli_reports_paper_connection_success_never_places_order(monkeypatc
     assert "account type: paper" in out
     assert "live path available: no" in out
     assert "DU1234567" not in out  # only a 2-char prefix is ever printed, never the full account id
+
+
+def test_main_cli_prints_positions_and_open_orders_read_only(monkeypatch, capsys):
+    from src.execution.broker import CONNECTION_CONNECTED, BrokerOrder, BrokerPosition
+
+    def fake_connect(self):
+        self._verified_account = ibkr_client.AccountSummary(account_id="DU1234567", account_mode=ACCOUNT_MODE_PAPER, net_liquidation=100000.0, available_funds=100000.0, buying_power=200000.0)
+        self._state = CONNECTION_CONNECTED
+
+    monkeypatch.setattr(ibkr_client.IBKRClient, "connect", fake_connect)
+    monkeypatch.setattr(ibkr_client.IBKRClient, "disconnect", lambda self: None)
+    monkeypatch.setattr(ibkr_client.IBKRClient, "positions", lambda self: [BrokerPosition(ticker="AMD", quantity=10.0, avg_cost=100.0)])
+    monkeypatch.setattr(
+        ibkr_client.IBKRClient, "open_orders",
+        lambda self: [BrokerOrder(broker_order_id="1", perm_id="1", ticker="MSFT", side="BUY", order_type="LIMIT", quantity=5.0, limit_price=300.0, status="Submitted", filled_quantity=0.0, remaining_quantity=5.0)],
+    )
+    exit_code = ibkr_client.main()
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "AMD" in out
+    assert "MSFT" in out
+    assert "Submitted" in out
+
+
+# --- read-only portfolio state: positions/open_orders/get_order --------------------
+
+
+def test_order_from_raw_maps_every_field():
+    order = ibkr_client._order_from_raw(
+        {
+            "broker_order_id": "7", "perm_id": "123", "ticker": "AMD", "side": "BUY", "order_type": "LMT",
+            "quantity": 10.0, "limit_price": 100.0, "status": "Submitted", "filled_quantity": 3.0,
+            "remaining_quantity": 7.0, "avg_fill_price": 99.5, "parent_id": None,
+        }
+    )
+    assert order.broker_order_id == "7"
+    assert order.ticker == "AMD"
+    assert order.side == "BUY"
+    assert order.quantity == 10.0
+    assert order.filled_quantity == 3.0
+    assert order.remaining_quantity == 7.0
+    assert order.status == "Submitted"
+
+
+def test_order_from_raw_tolerates_missing_optional_fields():
+    order = ibkr_client._order_from_raw({"broker_order_id": "7"})
+    assert order.ticker == ""
+    assert order.side == ""
+    assert order.quantity == 0.0
+    assert order.status == "Unknown"
+    assert order.avg_fill_price is None
+
+
+def _connected_client_with_fake_app():
+    from src.execution.broker import CONNECTION_CONNECTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_CONNECTED
+
+    class _FakeWrapper:
+        def __init__(self):
+            self.raw_positions = []
+            self.raw_orders = {}
+            self.positions_end_event = _ImmediatelySetEvent()
+            self.open_orders_end_event = _ImmediatelySetEvent()
+
+    class _ImmediatelySetEvent:
+        def clear(self):
+            pass
+
+        def wait(self, timeout):
+            return True
+
+    class _FakeApp:
+        def __init__(self, wrapper):
+            self._wrapper = wrapper
+            self.positions_to_report: list[tuple[str, float, float]] = []
+
+        def reqPositions(self):
+            # Simulates the real EWrapper.position() callback having
+            # already fired (synchronously, for test purposes) by the time
+            # positionEnd()'s wait() returns.
+            self._wrapper.raw_positions = list(self.positions_to_report)
+
+        def cancelPositions(self):
+            pass
+
+        def reqAllOpenOrders(self):
+            pass
+
+    wrapper = _FakeWrapper()
+    client._wrapper = wrapper
+    client._app = _FakeApp(wrapper)
+    return client
+
+
+def test_positions_returns_empty_list_when_broker_reports_none():
+    client = _connected_client_with_fake_app()
+    assert client.positions() == []
+
+
+def test_positions_maps_broker_reported_positions():
+    client = _connected_client_with_fake_app()
+    client._app.positions_to_report = [("AMD", 10.0, 100.0), ("MSFT", -5.0, 300.0)]
+    positions = client.positions()
+    assert len(positions) == 2
+    assert positions[0].ticker == "AMD"
+    assert positions[0].quantity == 10.0
+    assert positions[0].avg_cost == 100.0
+
+
+def test_positions_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.positions()
+
+
+def test_open_orders_excludes_terminal_statuses():
+    client = _connected_client_with_fake_app()
+    client._wrapper.raw_orders = {
+        "1": {"broker_order_id": "1", "ticker": "AMD", "side": "BUY", "order_type": "LMT", "quantity": 10.0, "limit_price": 100.0, "status": "Submitted", "filled_quantity": 0.0, "remaining_quantity": 10.0, "avg_fill_price": None, "parent_id": None},
+        "2": {"broker_order_id": "2", "ticker": "MSFT", "side": "BUY", "order_type": "LMT", "quantity": 5.0, "limit_price": 300.0, "status": "Filled", "filled_quantity": 5.0, "remaining_quantity": 0.0, "avg_fill_price": 300.0, "parent_id": None},
+    }
+    orders = client.open_orders()
+    assert len(orders) == 1
+    assert orders[0].ticker == "AMD"
+
+
+def test_open_orders_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.open_orders()
+
+
+def test_get_order_returns_matching_order_regardless_of_terminal_state():
+    client = _connected_client_with_fake_app()
+    client._wrapper.raw_orders = {
+        "2": {"broker_order_id": "2", "ticker": "MSFT", "side": "BUY", "order_type": "LMT", "quantity": 5.0, "limit_price": 300.0, "status": "Filled", "filled_quantity": 5.0, "remaining_quantity": 0.0, "avg_fill_price": 300.0, "parent_id": None},
+    }
+    order = client.get_order("2")
+    assert order is not None
+    assert order.status == "Filled"
+
+
+def test_get_order_returns_none_for_unknown_id():
+    client = _connected_client_with_fake_app()
+    assert client.get_order("does-not-exist") is None
+
+
+def test_get_order_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.get_order("1")
+
+
+def test_positions_raises_on_timeout():
+    client = _connected_client_with_fake_app()
+
+    class _NeverSetEvent:
+        def clear(self):
+            pass
+
+        def wait(self, timeout):
+            return False
+
+    client._wrapper.positions_end_event = _NeverSetEvent()
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="Timed out"):
+        client.positions()
+
+
+def test_open_orders_raises_on_timeout():
+    client = _connected_client_with_fake_app()
+
+    class _NeverSetEvent:
+        def clear(self):
+            pass
+
+        def wait(self, timeout):
+            return False
+
+    client._wrapper.open_orders_end_event = _NeverSetEvent()
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="Timed out"):
+        client.open_orders()

@@ -1612,6 +1612,54 @@ position_monitor` for real. Every automated test in this repo talks to
 `broker.FakeBroker` instead - no test anywhere depends on a real socket
 or on `ibapi` being importable.
 
+### Local verification commands (run these on your own machine, against your own TWS)
+
+```bash
+pip install -r requirements.txt
+pip install ibapi
+pytest -q                               # confirm the full suite passes locally too
+
+python -m src.execution.ibkr_client     # connect, verify PAPER, read positions/open
+                                         # orders, disconnect - NEVER places an order
+```
+
+`python -m src.execution.ibkr_client` is the safest possible end-to-end
+check and the one to run after any change to the connection code:
+connects, verifies the account is PAPER (hard-fails closed otherwise),
+prints a safe summary (never the full account id or any secret), reads
+and prints your current positions and open orders **read-only**, then
+disconnects. It never calls `submit_order()` and never reads
+`execution.mode` from `config/settings.yaml` - running it has no side
+effect on the rest of the system either way. Example output against an
+empty paper account:
+
+```
+connected: yes
+account type: paper
+account id prefix: DU**
+net liquidation: 100000.0
+available funds: 100000.0
+execution mode: DRY_RUN (unaffected by this check - this command never places an order)
+live path available: no
+
+positions (read-only):
+  none
+
+open orders (read-only):
+  none
+```
+
+`positions()` uses `reqPositions()`; `open_orders()`/`get_order()` use
+`reqAllOpenOrders()` - scoped to everything TWS reports for your login,
+not only orders placed through this API session, so a human-placed TWS
+order or a stale order from a previous run is visible too (this is
+deliberate: Part J's reconciliation needs to be able to detect an
+"unknown" order the system didn't create). `submit_order()`,
+`cancel_order()`, `replace_order()`, and `executions()` remain
+`NotImplementedError` - placing or modifying an order is a separate,
+higher-risk step, wired only after every read path has been verified
+against a real account.
+
 ### Order lifecycle and bracket protection
 
 An eligible candidate becomes an immutable `OrderIntent` (`order_state.py`)
