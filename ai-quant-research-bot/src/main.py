@@ -331,6 +331,39 @@ def _attempt_auto_execution(
     return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id)
 
 
+def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger) -> None:
+    """DRY_RUN order review only - converts every Top Candidate into an
+    `OrderIntent`, runs every pre-submission check this system has, and
+    logs exactly what order WOULD be submitted (or why it wouldn't be).
+    **Never contacts a broker, never calls `submit_order()` anywhere -
+    there is no broker object constructed in this function at all.**
+    Only called when `execution.mode == "DRY_RUN"` - see call site."""
+    from .execution import order_manager, order_review
+
+    journal_path = config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl")
+    journal = order_manager.ExecutionJournal(journal_path)
+    manager = order_manager.OrderManager(broker=None, config=config, journal=journal)
+    manager.restore_from_journal_rows(journal.read_all())
+
+    for entry in report_writer.select_top_candidates(ticker_results, config):
+        final = report_writer.final_position(entry)
+        if final is None:
+            continue
+        record = {
+            "symbol": entry["symbol"], "strategy": final["strategy"], "score": entry["score"],
+            "entry": final["entry"], "stop_loss": final["stop_loss"], "target": final["target"],
+            "shares": final["shares"], "dollar_risk": final["dollar_risk"],
+            "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
+        }
+        trade_id = paper_trades.generate_trade_id(entry["symbol"], report_date)
+        review = safe_run(
+            logger, f"{entry['symbol']} DRY_RUN order review",
+            lambda r=record, tid=trade_id: order_review.review_order_intent(r, config, manager, current_market_price=r["entry"], trade_id=tid),
+        )
+        if review is not None:
+            logger.info("\n%s", order_review.format_order_review(review))
+
+
 def _process_execution_layer(
     ticker_results: list[dict[str, Any]],
     report_date: str,
@@ -357,9 +390,8 @@ def _process_execution_layer(
     auto_candidates = [e for e in ticker_results if e["execution_decision"].decision == execution_policy.DECISION_AUTO_EXECUTE]
 
     if execution_mode != "IBKR_PAPER" or not auto_candidates:
-        if execution_mode == "DRY_RUN" and auto_candidates:
-            for entry in auto_candidates:
-                logger.info("DRY_RUN: %s would AUTO_EXECUTE if execution.mode were IBKR_PAPER - no broker contacted.", entry["symbol"])
+        if execution_mode == "DRY_RUN":
+            safe_run(logger, "DRY_RUN order review", lambda: _review_top_candidates_dry_run(ticker_results, report_date, config, logger))
         return set()
 
     owns_broker = broker is None

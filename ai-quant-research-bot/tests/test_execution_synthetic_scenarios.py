@@ -29,7 +29,7 @@ def make_entry(symbol="AMD", **overrides):
         "symbol": symbol,
         "label": "Top Candidate",
         "score": 90,
-        "best_risk_result": {"tradeable": True},
+        "best_risk_result": {"tradeable": True, "strategy": "Trend Following"},
         "regime_evaluation": {"blocked": False, "regime": "TRENDING_UP"},
         "portfolio_evaluation": {
             "decision": "ACCEPT",
@@ -67,6 +67,7 @@ def config(tmp_path):
         "risk": {"account_equity": 10_000},
         "data": {"journal_dir": str(journal_dir)},
         "paper_trading": {"paper_trades_file": "paper_trades.csv", "pending_approvals_file": "pending_approvals.json"},
+        "telegram": {"top_candidates_limit": 10},
     }
 
 

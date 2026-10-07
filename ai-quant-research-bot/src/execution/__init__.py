@@ -38,6 +38,9 @@ Modules:
 - `learning_feedback.py`: feeds a broker-paper trade's ACTUAL fill/exit/
   commission into `paper_trades.csv` the moment its stop or target leg
   fills - never a bar-simulation guess, and never triggers ML retraining.
+- `order_review.py`: DRY_RUN order review - builds and validates an
+  `OrderIntent` for a Top Candidate and reports exactly what WOULD be
+  submitted; never calls `submit_order()`, never contacts a broker at all.
 - `position_monitor.py`: the separate, long-running monitoring process
   (`python -m src.execution.position_monitor`) - `src.main` stays a
   once-a-day batch job and never loops forever.

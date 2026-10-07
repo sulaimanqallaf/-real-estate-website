@@ -1660,6 +1660,51 @@ deliberate: Part J's reconciliation needs to be able to detect an
 higher-risk step, wired only after every read path has been verified
 against a real account.
 
+### DRY_RUN order review - the next step before any real order is ever placed
+
+With `execution.mode: DRY_RUN` (the default), every daily `python -m
+src.main` run now converts each Top Candidate into an immutable
+`OrderIntent` and logs **exactly what order would be submitted** -
+without ever calling `submit_order()` (still `NotImplementedError`) and
+without constructing or contacting a broker at all. This is
+`src/execution/order_review.py`'s `review_order_intent()`, run from
+`main._review_top_candidates_dry_run()`.
+
+It runs the same checks the real execution paths use: `order_state.
+validate_intent()` (quantity, long-only, ticker shape, order type,
+entry/stop/target consistency, risk-per-trade limit, PAPER account only),
+`pretrade_checks.check_trading_hours()`, `pretrade_checks.check_
+slippage()`, and `OrderManager.is_duplicate()` (against the persisted
+execution journal, so a repeat review of the same already-submitted
+trade correctly reports a duplicate). Example log output:
+
+```
+DRY_RUN ORDER REVIEW - AMD
+  Would submit: YES
+  Side: BUY
+  Quantity: 10
+  Order type: LIMIT
+  Entry (limit): 100.0
+  Stop loss: 95.0
+  Target: 115.0
+  Strategy: Trend Following
+  Risk amount: $50.00
+  Account mode at creation: PAPER
+  NOTE: DRY_RUN review only - no broker was contacted, no order was placed.
+```
+
+To review one hypothetical order manually, without running the full
+daily pipeline:
+
+```bash
+python -m src.execution.order_review \
+  --ticker AMD --entry 100.0 --stop-loss 95.0 --target 115.0 \
+  --shares 10 --dollar-risk 50.0
+```
+
+This CLI never contacts a broker either, and doesn't read `execution.mode`
+at all - it's a pure, local "would this be a valid order" check.
+
 ### Order lifecycle and bracket protection
 
 An eligible candidate becomes an immutable `OrderIntent` (`order_state.py`)
@@ -1914,6 +1959,10 @@ ai-quant-research-bot/
                                                                   /performance /halt /resume
       learning_feedback.py                                     actual broker fill -> paper_trades.csv
                                                                   on a broker-paper trade's real close
+      order_review.py                                          DRY_RUN order review - builds + validates
+                                                                  an OrderIntent and logs exactly what
+                                                                  WOULD be submitted; never calls
+                                                                  submit_order(), never contacts a broker
       position_monitor.py                                      separate long-running process
                                                                   (`python -m src.execution.
                                                                   position_monitor`)
@@ -1953,6 +2002,8 @@ ai-quant-research-bot/
     test_execution_telegram_commands.py
     test_execution_learning_feedback.py
     test_execution_synthetic_scenarios.py
+    test_execution_order_review.py
+    test_execution_dry_run_review_integration.py
 ```
 
 ## Scoring (0-100)
