@@ -70,6 +70,53 @@ def test_broker_rejection_is_reflected_via_poll_entry_fill(manager, broker):
     assert updated.rejection_reason
 
 
+def test_submit_entry_maps_broker_order_rejected_to_state_rejected(manager, broker, monkeypatch):
+    """The bug fix: a broker-side rejection raised from submit_order()
+    (e.g. IBKR's percentage-constraint rejection) must become
+    STATE_REJECTED with the real reason persisted - never a silent
+    STATE_ACKNOWLEDGED."""
+    from src.execution.broker import BrokerOrderRejected
+
+    def boom(intent):
+        raise BrokerOrderRejected("TWS rejected order 1000 (AMD): [201] percentage constraint")
+
+    monkeypatch.setattr(broker, "submit_order", boom)
+    managed = manager.submit_entry(make_intent())
+    assert managed.state == order_state.STATE_REJECTED
+    assert "percentage constraint" in managed.rejection_reason
+    assert managed.entry_broker_order_id is None
+
+
+def test_submit_entry_maps_other_broker_exceptions_to_state_error(manager, broker, monkeypatch):
+    """A connection failure/timeout (anything that is NOT an explicit
+    broker rejection) must become STATE_ERROR, not STATE_REJECTED and
+    never STATE_ACKNOWLEDGED."""
+
+    def boom(intent):
+        raise ConnectionError("simulated: TWS connection lost mid-submit")
+
+    monkeypatch.setattr(broker, "submit_order", boom)
+    managed = manager.submit_entry(make_intent())
+    assert managed.state == order_state.STATE_ERROR
+    assert "connection lost" in managed.rejection_reason
+    assert managed.entry_broker_order_id is None
+
+
+def test_submit_entry_never_reaches_acknowledged_without_a_broker_order(manager, broker, monkeypatch):
+    """No false ACKNOWLEDGED (requirement #10): submit_entry() must never
+    report ACKNOWLEDGED unless broker.submit_order() actually returned a
+    BrokerOrder - this proves it for both failure classes at once."""
+    from src.execution.broker import BrokerOrderRejected
+
+    for exc in (BrokerOrderRejected("rejected"), RuntimeError("error")):
+        def boom(intent, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(broker, "submit_order", boom)
+        managed = manager.submit_entry(make_intent())
+        assert managed.state != order_state.STATE_ACKNOWLEDGED
+
+
 def test_cancel_entry_moves_to_cancelled(manager, broker):
     managed = manager.submit_entry(make_intent())
     ok = manager.cancel_entry(managed.intent.intent_id)

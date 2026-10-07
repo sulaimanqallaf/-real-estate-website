@@ -19,6 +19,19 @@ ACCOUNT_MODE_PAPER = "PAPER"
 ACCOUNT_MODE_LIVE = "LIVE"
 ACCOUNT_MODE_UNKNOWN = "UNKNOWN"
 
+
+class BrokerOrderRejected(Exception):
+    """Raised by `Broker.submit_order()` when the broker explicitly
+    rejected the order (an order-specific error callback, or a terminal
+    non-accepted status such as IBKR's "Inactive"/"Cancelled"/
+    "ApiCancelled") - as opposed to a connection failure, timeout, or
+    other internal error, which `submit_order()` should raise as a plain
+    `Exception` (or broker-specific subclass) instead. `order_manager.
+    OrderManager.submit_entry()` maps this specifically to `STATE_
+    REJECTED`; anything else `submit_order()` raises maps to `STATE_
+    ERROR` - a real broker rejection and "we don't actually know what
+    happened" must never collapse into the same outcome."""
+
 CONNECTION_CONNECTING = "CONNECTING"
 CONNECTION_CONNECTED = "CONNECTED"
 CONNECTION_DEGRADED = "DEGRADED"

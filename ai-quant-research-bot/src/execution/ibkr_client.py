@@ -34,7 +34,12 @@ read-only state (see README "IBKR Paper read-only portfolio readiness").
 `submit_order()`/`replace_order()`/`cancel_order()` are new, carefully
 written against the documented `ibapi` contract, but - like every real
 network call in this module - exercised only against a real TWS from the
-user's own machine, never from this repository's test suite. `positions()`
+user's own machine, never from this repository's test suite.
+`submit_order()` WAITS for TWS to actually acknowledge the order
+(`openOrder`/`orderStatus`, or an order-specific `error()`) before
+returning - it never reports success merely because `placeOrder()` was
+called; see its docstring for the full accept/reject/timeout contract.
+`positions()`
 uses `reqPositions()`; `open_orders()`/`get_order()` use
 `reqAllOpenOrders()` (every open order TWS knows about for this login,
 not only ones placed through this API session - deliberately broad, so
@@ -70,8 +75,19 @@ from .broker import (
     AccountSummary,
     BrokerExecution,
     BrokerOrder,
+    BrokerOrderRejected,
     BrokerPosition,
 )
+
+# Statuses that mean TWS genuinely accepted the order (it may still be
+# rejected/cancelled later - that's a SEPARATE later event, not this
+# initial acknowledgement). Anything else - including an unrecognized
+# status - fails closed rather than being assumed safe.
+_ACCEPTED_ORDER_STATUSES = {"PreSubmitted", "Submitted", "Filled", "PartiallyFilled"}
+
+# Terminal statuses that mean TWS did NOT accept (or stopped working) the
+# order - treated the same as an explicit error() rejection.
+_REJECTED_ORDER_STATUSES = {"Inactive", "Cancelled", "ApiCancelled"}
 
 # This codebase's internal order-type vocabulary (order_state.py) vs.
 # IBKR's own order-type strings - translated at the one point that
@@ -247,6 +263,10 @@ class IBKRClient:
     _ACCOUNT_SUMMARY_TIMEOUT_SECONDS = 10
     _POSITIONS_TIMEOUT_SECONDS = 10
     _OPEN_ORDERS_TIMEOUT_SECONDS = 10
+    # How long submit_order() waits for TWS to actually acknowledge an order
+    # (via openOrder/orderStatus/error) before failing closed - see
+    # submit_order()'s docstring for why this can never be skipped.
+    _ORDER_ACK_TIMEOUT_SECONDS = 10
 
     def __init__(self, config: IBKRConfig | None = None):
         self.config = config or IBKRConfig.from_env()
@@ -323,6 +343,14 @@ class IBKRClient:
                 # open_orders()/get_order() need - see module docstring.
                 self.raw_orders: dict[str, dict[str, Any]] = {}
                 self.next_order_id: int | None = None
+                # Per-order acknowledgement tracking (submit_order()): the
+                # event for a given order id is registered BEFORE
+                # placeOrder() is called, so a fast synchronous callback can
+                # never fire before anything is waiting on it. Signaled by
+                # openOrder()/orderStatus() (acceptance) or error() (an
+                # order-specific rejection, recorded in order_errors).
+                self.order_ack_events: dict[str, threading.Event] = {}
+                self.order_errors: dict[str, tuple[int, str]] = {}
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
                 self.next_order_id = orderId
@@ -366,6 +394,9 @@ class IBKRClient:
                         "avg_fill_price": entry.get("avg_fill_price"),
                     }
                 )
+                ack_event = self.order_ack_events.get(key)
+                if ack_event is not None:
+                    ack_event.set()
 
             def orderStatus(  # noqa: N802
                 self, orderId: int, status: str, filled: float, remaining: float, avgFillPrice: float,
@@ -383,6 +414,9 @@ class IBKRClient:
                         "parent_id": str(parentId) if parentId else entry.get("parent_id"),
                     }
                 )
+                ack_event = self.order_ack_events.get(key)
+                if ack_event is not None:
+                    ack_event.set()
 
             def openOrderEnd(self) -> None:  # noqa: N802
                 self.open_orders_end_event.set()
@@ -394,6 +428,19 @@ class IBKRClient:
                 # errors worth surfacing to connect()'s caller.
                 if errorCode < 1000:
                     self.error_messages.append((errorCode, errorString))
+
+                # ibapi's error() reports an order-specific problem (e.g. a
+                # percentage-constraint rejection) with reqId == the order's
+                # own orderId - regardless of errorCode, since IBKR does not
+                # reserve a specific numeric range for order rejections. Only
+                # relevant for an order id submit_order() is actively
+                # waiting on; untracked reqIds (general/system errors) are
+                # left alone.
+                order_key = str(reqId)
+                ack_event = self.order_ack_events.get(order_key)
+                if ack_event is not None:
+                    self.order_errors[order_key] = (errorCode, errorString)
+                    ack_event.set()
 
         class _IBApp(EClient):
             def __init__(self, wrapper: "_IBWrapper") -> None:
@@ -526,22 +573,58 @@ class IBKRClient:
         constructs (including an exit leg - see `order_manager.
         _exit_intent()`), simply "the price this specific order should
         use"; `intent.order_type` says whether that's a limit or a stop
-        price. Returns an immediate, locally-built snapshot (status
-        "Submitted") - the real status/fill comes later from `get_order()`,
-        exactly like `FakeBroker.submit_order()` already behaves."""
+        price.
+
+        This method WAITS for TWS to actually acknowledge the order (via
+        `openOrder`/`orderStatus`, or an order-specific `error()` callback)
+        before returning - placeOrder() itself is fire-and-forget over the
+        socket, so returning right after calling it would report success
+        even when TWS goes on to reject the order (e.g. a percentage-
+        constraint precaution). Raises `BrokerOrderRejected` for an
+        explicit broker rejection, or `IBKRConnectionError` if no
+        acknowledgement arrives within `_ORDER_ACK_TIMEOUT_SECONDS` or the
+        reported status is anything other than a known-accepted one - both
+        are failures `order_manager.submit_entry()` must never mistake for
+        success."""
         self._require_connected("submit an order")
 
         order_id = self._reserve_order_id()
-        contract = self._build_stock_contract(intent.ticker)
-        order = self._build_ibkr_order(intent.side, intent.order_type, intent.quantity, intent.entry_price)
-        self._app.placeOrder(order_id, contract, order)
+        key = str(order_id)
+        ack_event = threading.Event()
+        # Registered BEFORE placeOrder() so a fast synchronous callback can
+        # never fire before anything is waiting on it.
+        self._wrapper.order_ack_events[key] = ack_event
 
-        return BrokerOrder(
-            broker_order_id=str(order_id), perm_id=None, ticker=intent.ticker, side=intent.side,
-            order_type=intent.order_type, quantity=intent.quantity,
-            limit_price=intent.entry_price if intent.order_type == order_state.ORDER_TYPE_LIMIT else None,
-            status="Submitted", filled_quantity=0.0, remaining_quantity=intent.quantity,
-        )
+        try:
+            contract = self._build_stock_contract(intent.ticker)
+            order = self._build_ibkr_order(intent.side, intent.order_type, intent.quantity, intent.entry_price)
+            self._app.placeOrder(order_id, contract, order)
+
+            if not ack_event.wait(self._ORDER_ACK_TIMEOUT_SECONDS):
+                raise IBKRConnectionError(
+                    f"Timed out waiting for TWS to acknowledge order {order_id} ({intent.ticker}) within "
+                    f"{self._ORDER_ACK_TIMEOUT_SECONDS}s - failing closed rather than assuming it was accepted."
+                )
+
+            order_error = self._wrapper.order_errors.get(key)
+            if order_error is not None:
+                code, text = order_error
+                raise BrokerOrderRejected(f"TWS rejected order {order_id} ({intent.ticker}): [{code}] {text}")
+
+            entry = self._wrapper.raw_orders.get(key)
+            status = entry.get("status") if entry else None
+            if status in _REJECTED_ORDER_STATUSES:
+                raise BrokerOrderRejected(f"TWS reported order {order_id} ({intent.ticker}) as '{status}' - not accepted.")
+            if status not in _ACCEPTED_ORDER_STATUSES:
+                raise IBKRConnectionError(
+                    f"Order {order_id} ({intent.ticker}) acknowledgement had an unrecognized status "
+                    f"{status!r} - failing closed rather than assuming it was accepted."
+                )
+
+            return _order_from_raw(entry)
+        finally:
+            self._wrapper.order_ack_events.pop(key, None)
+            self._wrapper.order_errors.pop(key, None)
 
     def cancel_order(self, broker_order_id: str) -> bool:
         self._require_connected("cancel an order")

@@ -282,6 +282,8 @@ def _connected_client_with_fake_app():
         def __init__(self):
             self.raw_positions = []
             self.raw_orders = {}
+            self.order_ack_events: dict[str, Any] = {}
+            self.order_errors: dict[str, tuple[int, str]] = {}
             self.positions_end_event = _ImmediatelySetEvent()
             self.open_orders_end_event = _ImmediatelySetEvent()
 
@@ -298,6 +300,14 @@ def _connected_client_with_fake_app():
             self.positions_to_report: list[tuple[str, float, float]] = []
             self.placed_orders: list[tuple[int, Any, Any]] = []
             self.cancelled_orders: list[tuple[int, Any]] = []
+            # Test-configurable simulated broker response to the NEXT
+            # placeOrder() call - mirrors the real openOrder/orderStatus/
+            # error() callbacks that submit_order() now waits on. Default
+            # mimics an immediate, ordinary acceptance so every pre-existing
+            # test here (written before the ack-wait fix) keeps passing
+            # unmodified.
+            self.order_status_to_simulate: str | None = "Submitted"  # None = simulate no callback at all (acknowledgement timeout)
+            self.order_error_to_simulate: tuple[int, str] | None = None  # (code, text) = simulate an order-specific error() callback instead
 
         def reqPositions(self):
             # Simulates the real EWrapper.position() callback having
@@ -313,6 +323,35 @@ def _connected_client_with_fake_app():
 
         def placeOrder(self, order_id, contract, order):
             self.placed_orders.append((order_id, contract, order))
+            key = str(order_id)
+
+            if self.order_error_to_simulate is not None:
+                self._wrapper.order_errors[key] = self.order_error_to_simulate
+                ack_event = self._wrapper.order_ack_events.get(key)
+                if ack_event is not None:
+                    ack_event.set()
+                return
+
+            if self.order_status_to_simulate is None:
+                return  # no callback fires at all - submit_order() must time out
+
+            entry = self._wrapper.raw_orders.setdefault(key, {"broker_order_id": key, "parent_id": None})
+            entry.update(
+                {
+                    "ticker": contract.symbol,
+                    "side": order.action,
+                    "order_type": order.orderType,
+                    "quantity": float(order.totalQuantity),
+                    "limit_price": getattr(order, "lmtPrice", None),
+                    "status": self.order_status_to_simulate,
+                    "filled_quantity": 0.0,
+                    "remaining_quantity": float(order.totalQuantity),
+                    "avg_fill_price": None,
+                }
+            )
+            ack_event = self._wrapper.order_ack_events.get(key)
+            if ack_event is not None:
+                ack_event.set()
 
         def cancelOrder(self, order_id, order_cancel):
             self.cancelled_orders.append((order_id, order_cancel))
@@ -550,6 +589,116 @@ def test_order_ids_increment_sequentially_across_submissions(monkeypatch):
     assert first.broker_order_id == "1000"
     assert second.broker_order_id == "1001"
     assert len(client._app.placed_orders) == 2
+
+
+# --- submit_order() waits for real broker acknowledgement (bug fix) -----------------
+
+
+def test_submit_order_accepts_preSubmitted_status(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_status_to_simulate = "PreSubmitted"
+
+    result = client.submit_order(_make_intent())
+    assert result.status == "PreSubmitted"
+    assert result.broker_order_id == "1000"
+
+
+def test_submit_order_accepts_immediate_filled_status(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_status_to_simulate = "Filled"
+
+    result = client.submit_order(_make_intent())
+    assert result.status == "Filled"
+
+
+def test_submit_order_raises_broker_order_rejected_on_explicit_error(monkeypatch):
+    """An IBKR order-specific error() callback (e.g. the percentage-
+    constraint warning from the user's real bug report) must raise
+    BrokerOrderRejected, never return a fabricated 'Submitted' order."""
+    from src.execution.broker import BrokerOrderRejected
+
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_error_to_simulate = (201, "Order rejected - would exceed percentage constraint")
+
+    with pytest.raises(BrokerOrderRejected, match="percentage constraint"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_raises_broker_order_rejected_on_inactive_status(monkeypatch):
+    from src.execution.broker import BrokerOrderRejected
+
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_status_to_simulate = "Inactive"
+
+    with pytest.raises(BrokerOrderRejected, match="Inactive"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_raises_broker_order_rejected_on_cancelled_status(monkeypatch):
+    from src.execution.broker import BrokerOrderRejected
+
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_status_to_simulate = "Cancelled"
+
+    with pytest.raises(BrokerOrderRejected, match="Cancelled"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_times_out_when_no_acknowledgement_arrives(monkeypatch):
+    """Fail closed (requirement #9): if TWS never calls back at all,
+    submit_order() must raise rather than silently reporting success."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._ORDER_ACK_TIMEOUT_SECONDS = 0.05
+    client._app.order_status_to_simulate = None  # simulate no callback firing at all
+
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="Timed out waiting for TWS to acknowledge"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_fails_closed_on_unrecognized_status(monkeypatch):
+    """An ambiguous status that is neither a known-accepted nor a known-
+    rejected one must never be treated as success."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_status_to_simulate = "PendingSubmit"  # not in either accepted or rejected set
+
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="unrecognized status"):
+        client.submit_order(_make_intent())
+
+
+def test_submit_order_never_returns_a_fabricated_order_on_rejection(monkeypatch):
+    """The core bug: submit_order() must never report ACKNOWLEDGED/
+    Submitted just because placeOrder() was called - this proves no
+    BrokerOrder is returned at all on a rejection path (an exception, not
+    a return value, is the only way OrderManager can observe a rejection)."""
+    from src.execution.broker import BrokerOrderRejected
+
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.order_error_to_simulate = (202, "Order rejected")
+
+    try:
+        client.submit_order(_make_intent())
+        assert False, "expected BrokerOrderRejected to be raised"
+    except BrokerOrderRejected:
+        pass
+
+
+def test_submit_order_cleans_up_ack_tracking_after_success(monkeypatch):
+    """order_ack_events/order_errors must not accumulate forever - each
+    order's tracking entry is removed once submit_order() returns."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    client.submit_order(_make_intent())
+    assert client._wrapper.order_ack_events == {}
+    assert client._wrapper.order_errors == {}
 
 
 def test_cancel_order_refuses_when_not_connected():

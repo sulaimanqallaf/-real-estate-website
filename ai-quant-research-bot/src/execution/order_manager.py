@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import order_state
-from .broker import Broker, BrokerOrder
+from .broker import Broker, BrokerOrder, BrokerOrderRejected
 from .order_state import (
     STATE_ACKNOWLEDGED,
     STATE_CANCELLED,
@@ -137,7 +137,23 @@ class OrderManager:
             self._trade_id_index[intent.trade_id] = intent.intent_id
         self._record(managed, event="submitting")
 
-        broker_order = self.broker.submit_order(intent)
+        try:
+            broker_order = self.broker.submit_order(intent)
+        except BrokerOrderRejected as exc:
+            # The broker explicitly said no (e.g. a TWS percentage-
+            # constraint rejection) - distinct from STATE_ERROR below so
+            # callers/journal readers can tell "broker refused" apart from
+            # "we don't actually know what happened".
+            managed.state = STATE_REJECTED
+            managed.rejection_reason = str(exc)
+            self._record(managed, event="rejected")
+            return managed
+        except Exception as exc:  # noqa: BLE001 - connection failure, timeout, or any other submission error
+            managed.state = STATE_ERROR
+            managed.rejection_reason = str(exc)
+            self._record(managed, event="submission_error")
+            return managed
+
         managed.entry_broker_order_id = broker_order.broker_order_id
         managed.state = STATE_ACKNOWLEDGED
         self._record(managed, event="acknowledged")
