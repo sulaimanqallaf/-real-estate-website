@@ -18,9 +18,15 @@ from src.utils import load_config
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 
-def fresh_config(**overrides):
+def fresh_config(tmp_path, **overrides):
+    """Isolated from the real repo's data/journal/paper_trades.csv - every
+    caller that reads via paper_trades.load_paper_trades_df(config) must
+    see an empty ledger regardless of what real OPEN trades exist from
+    manual local testing (Phase 7's IBKR Paper manual execution can create
+    real rows there)."""
     config = load_config(CONFIG_PATH)
     config["risk"]["account_equity"] = 10_000.0
+    config["data"] = {**config["data"], "journal_dir": str(tmp_path)}
     for key, value in overrides.items():
         config["portfolio_risk"][key] = value
     return config
@@ -75,16 +81,16 @@ def make_correlated_price_dfs(n=90):
 # --- compute_portfolio_state -------------------------------------------------------
 
 
-def test_empty_portfolio_state_has_zero_everything():
-    config = fresh_config()
+def test_empty_portfolio_state_has_zero_everything(tmp_path):
+    config = fresh_config(tmp_path)
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
     assert state["num_open_positions"] == 0
     assert state["total_open_risk_fraction"] == 0.0
     assert state["gross_exposure_fraction"] == 0.0
 
 
-def test_closed_trades_do_not_count_toward_exposure():
-    config = fresh_config()
+def test_closed_trades_do_not_count_toward_exposure(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([
         make_open_trade(ticker="NVDA", status="OPEN"),
         make_open_trade(ticker="AMD", status="TARGET_HIT"),   # closed - must not count
@@ -97,8 +103,8 @@ def test_closed_trades_do_not_count_toward_exposure():
     assert "SMH" not in state["exposure_by_ticker"]
 
 
-def test_portfolio_state_computes_risk_to_stop_not_notional():
-    config = fresh_config()
+def test_portfolio_state_computes_risk_to_stop_not_notional(tmp_path):
+    config = fresh_config(tmp_path)
     # entry 100, stop 90, size 10 -> risk-to-stop = 10*10=100 ($), notional = 100*10=1000 ($)
     df = make_open_trades_df([make_open_trade(entry_price=100.0, stop_loss=90.0, position_size=10)])
     state = portfolio_risk.compute_portfolio_state(df, config)
@@ -108,8 +114,8 @@ def test_portfolio_state_computes_risk_to_stop_not_notional():
     assert state["gross_exposure_fraction"] == pytest.approx(1000.0 / 10_000.0)
 
 
-def test_sector_exposure_groups_multiple_tickers_by_sector_map():
-    config = fresh_config()
+def test_sector_exposure_groups_multiple_tickers_by_sector_map(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([
         make_open_trade(ticker="NVDA", entry_price=100.0, position_size=5),
         make_open_trade(ticker="AMD", entry_price=50.0, position_size=10),
@@ -123,8 +129,8 @@ def test_sector_exposure_groups_multiple_tickers_by_sector_map():
 # --- evaluate_portfolio_candidate: basic accept / reject ---------------------------
 
 
-def test_zero_open_positions_accepts_a_valid_candidate():
-    config = fresh_config()
+def test_zero_open_positions_accepts_a_valid_candidate(tmp_path):
+    config = fresh_config(tmp_path)
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
     result = portfolio_risk.evaluate_portfolio_candidate(make_proposal(), state, {}, config)
     assert result["decision"] == "ACCEPT"
@@ -132,8 +138,8 @@ def test_zero_open_positions_accepts_a_valid_candidate():
     assert result["rejection_reasons"] == []
 
 
-def test_max_open_positions_blocks_a_new_candidate():
-    config = fresh_config(max_open_positions=2)
+def test_max_open_positions_blocks_a_new_candidate(tmp_path):
+    config = fresh_config(tmp_path, max_open_positions=2)
     df = make_open_trades_df([make_open_trade(ticker="NVDA"), make_open_trade(ticker="SPY", strategy="Trend Following")])
     state = portfolio_risk.compute_portfolio_state(df, config)
     result = portfolio_risk.evaluate_portfolio_candidate(make_proposal(ticker="AMD"), state, {}, config)
@@ -142,17 +148,17 @@ def test_max_open_positions_blocks_a_new_candidate():
     assert result["position"] is None
 
 
-def test_candidate_position_is_never_increased():
-    config = fresh_config()
+def test_candidate_position_is_never_increased(tmp_path):
+    config = fresh_config(tmp_path)
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
     proposal = make_proposal(shares=5)
     result = portfolio_risk.evaluate_portfolio_candidate(proposal, state, {}, config)
     assert result["position"]["shares"] <= proposal["shares"]
 
 
-def test_total_risk_limit_reduces_when_a_smaller_size_is_still_viable():
+def test_total_risk_limit_reduces_when_a_smaller_size_is_still_viable(tmp_path):
     # max_total_open_risk_pct default 0.03 -> $300 budget on $10k equity.
-    config = fresh_config(max_total_open_risk_pct=0.03)
+    config = fresh_config(tmp_path, max_total_open_risk_pct=0.03)
     df = make_open_trades_df([make_open_trade(entry_price=100.0, stop_loss=90.0, position_size=25)])  # risk = 250
     state = portfolio_risk.compute_portfolio_state(df, config)
     # Candidate risk-per-share = 10 (entry 100, stop 90); 20 shares would need $200 more risk,
@@ -164,8 +170,8 @@ def test_total_risk_limit_reduces_when_a_smaller_size_is_still_viable():
     assert any("total open-risk budget" in w for w in result["warnings"])
 
 
-def test_total_risk_limit_rejects_when_no_budget_remains():
-    config = fresh_config(max_total_open_risk_pct=0.03, min_viable_shares=1)
+def test_total_risk_limit_rejects_when_no_budget_remains(tmp_path):
+    config = fresh_config(tmp_path, max_total_open_risk_pct=0.03, min_viable_shares=1)
     df = make_open_trades_df([make_open_trade(entry_price=100.0, stop_loss=90.0, position_size=30)])  # risk = 300 = full budget
     state = portfolio_risk.compute_portfolio_state(df, config)
     proposal = make_proposal(ticker="AMD", entry=100.0, stop_loss=90.0, shares=20)
@@ -174,9 +180,9 @@ def test_total_risk_limit_rejects_when_no_budget_remains():
     assert "total open risk" in result["rejection_reasons"][0]
 
 
-def test_single_position_cap_reduces_an_oversized_candidate():
+def test_single_position_cap_reduces_an_oversized_candidate(tmp_path):
     # max_single_position_pct default 0.20 -> $2000 cap on $10k equity.
-    config = fresh_config(max_single_position_pct=0.20)
+    config = fresh_config(tmp_path, max_single_position_pct=0.20)
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
     proposal = make_proposal(ticker="AMD", entry=100.0, stop_loss=90.0, shares=50)  # notional 5000, way over cap
     result = portfolio_risk.evaluate_portfolio_candidate(proposal, state, {}, config)
@@ -187,11 +193,11 @@ def test_single_position_cap_reduces_an_oversized_candidate():
 # --- sector concentration -----------------------------------------------------------
 
 
-def test_sector_concentration_reduces_a_candidate_that_would_overshoot():
+def test_sector_concentration_reduces_a_candidate_that_would_overshoot(tmp_path):
     # max_sector_exposure_pct default 0.35 -> $3500 cap. Existing NVDA+AMD already at $3000.
     # Tight stops (entry 100/stop 99) keep total open risk-to-stop negligible so
     # this isolates the sector check, not the separate total-risk-budget gate.
-    config = fresh_config(max_sector_exposure_pct=0.35)
+    config = fresh_config(tmp_path, max_sector_exposure_pct=0.35)
     df = make_open_trades_df([
         make_open_trade(ticker="NVDA", entry_price=100.0, stop_loss=99.0, position_size=15),  # 1500
         make_open_trade(ticker="AMD", entry_price=100.0, stop_loss=99.0, position_size=15),     # 1500
@@ -206,8 +212,8 @@ def test_sector_concentration_reduces_a_candidate_that_would_overshoot():
         assert "semiconductors" in result["rejection_reasons"][0]
 
 
-def test_sector_concentration_rejects_when_already_at_the_cap():
-    config = fresh_config(max_sector_exposure_pct=0.35, min_viable_shares=1)
+def test_sector_concentration_rejects_when_already_at_the_cap(tmp_path):
+    config = fresh_config(tmp_path, max_sector_exposure_pct=0.35, min_viable_shares=1)
     df = make_open_trades_df([make_open_trade(ticker="NVDA", entry_price=100.0, stop_loss=99.0, position_size=35)])  # 3500 = full cap
     state = portfolio_risk.compute_portfolio_state(df, config)
     proposal = make_proposal(ticker="AMD", entry=100.0, stop_loss=99.0, shares=10)
@@ -219,8 +225,8 @@ def test_sector_concentration_rejects_when_already_at_the_cap():
 # --- overlap groups ------------------------------------------------------------------
 
 
-def test_spy_voo_overlap_is_detected():
-    config = fresh_config()
+def test_spy_voo_overlap_is_detected(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([make_open_trade(ticker="SPY", strategy="Trend Following")])
     state = portfolio_risk.compute_portfolio_state(df, config)
     result = portfolio_risk.evaluate_portfolio_candidate(make_proposal(ticker="VOO"), state, {}, config)
@@ -228,8 +234,8 @@ def test_spy_voo_overlap_is_detected():
     assert any("SPY" in w for w in result["warnings"])
 
 
-def test_qqq_vgt_overlap_is_detected():
-    config = fresh_config()
+def test_qqq_vgt_overlap_is_detected(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([make_open_trade(ticker="QQQ", strategy="Trend Following")])
     state = portfolio_risk.compute_portfolio_state(df, config)
     result = portfolio_risk.evaluate_portfolio_candidate(make_proposal(ticker="VGT"), state, {}, config)
@@ -237,8 +243,8 @@ def test_qqq_vgt_overlap_is_detected():
     assert any("QQQ" in w for w in result["warnings"])
 
 
-def test_smh_nvda_amd_cluster_is_detected():
-    config = fresh_config()
+def test_smh_nvda_amd_cluster_is_detected(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([
         make_open_trade(ticker="NVDA"),
         make_open_trade(ticker="AMD"),
@@ -252,8 +258,8 @@ def test_smh_nvda_amd_cluster_is_detected():
 # --- correlation ---------------------------------------------------------------------
 
 
-def test_high_correlation_is_detected_and_reduces_size():
-    config = fresh_config(max_correlated_positions=1, high_correlation_threshold=0.80)
+def test_high_correlation_is_detected_and_reduces_size(tmp_path):
+    config = fresh_config(tmp_path, max_correlated_positions=1, high_correlation_threshold=0.80)
     price_a, price_b = make_correlated_price_dfs()
     df = make_open_trades_df([make_open_trade(ticker="TICKX", entry_price=50.0, position_size=10)])
     state = portfolio_risk.compute_portfolio_state(df, config)
@@ -264,8 +270,8 @@ def test_high_correlation_is_detected_and_reduces_size():
     assert result["decision"] in ("ACCEPT_WITH_REDUCED_SIZE", "REJECT")
 
 
-def test_missing_correlation_data_reports_unavailable_not_a_fabricated_number():
-    config = fresh_config()
+def test_missing_correlation_data_reports_unavailable_not_a_fabricated_number(tmp_path):
+    config = fresh_config(tmp_path)
     df = make_open_trades_df([make_open_trade(ticker="TICKX")])
     state = portfolio_risk.compute_portfolio_state(df, config)
     # No price data at all for either ticker.
@@ -273,15 +279,15 @@ def test_missing_correlation_data_reports_unavailable_not_a_fabricated_number():
     assert any("Data Unavailable" in n for n in result["correlation_notes"])
 
 
-def test_compute_daily_return_correlation_returns_none_with_insufficient_overlap():
-    config = fresh_config()
+def test_compute_daily_return_correlation_returns_none_with_insufficient_overlap(tmp_path):
+    config = fresh_config(tmp_path)
     short_df = make_price_df(1, n=5)
     other_df = make_price_df(2, n=90)
     assert portfolio_risk.compute_daily_return_correlation(short_df, other_df, config) is None
 
 
-def test_compute_daily_return_correlation_detects_a_near_perfect_relationship():
-    config = fresh_config()
+def test_compute_daily_return_correlation_detects_a_near_perfect_relationship(tmp_path):
+    config = fresh_config(tmp_path)
     price_a, price_b = make_correlated_price_dfs()
     corr = portfolio_risk.compute_daily_return_correlation(price_a, price_b, config)
     assert corr is not None
@@ -291,8 +297,8 @@ def test_compute_daily_return_correlation_detects_a_near_perfect_relationship():
 # --- apply_acceptance_to_state (sequential same-batch processing) ------------------
 
 
-def test_apply_acceptance_to_state_updates_counts_and_exposure_without_mutating_input():
-    config = fresh_config()
+def test_apply_acceptance_to_state_updates_counts_and_exposure_without_mutating_input(tmp_path):
+    config = fresh_config(tmp_path)
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
     position = {**make_proposal(ticker="NVDA", entry=100.0, stop_loss=90.0, shares=10)}
     new_state = portfolio_risk.apply_acceptance_to_state(state, position, config)
@@ -303,11 +309,11 @@ def test_apply_acceptance_to_state_updates_counts_and_exposure_without_mutating_
     assert new_state["total_open_risk_fraction"] == pytest.approx(100.0 / 10_000.0)
 
 
-def test_sequential_batch_processing_lets_a_second_candidate_see_the_first():
+def test_sequential_batch_processing_lets_a_second_candidate_see_the_first(tmp_path):
     """Two candidates in the same sector, both proposed 'today': the second one
     must see the first's exposure via apply_acceptance_to_state, even though
     neither is in paper_trades.csv yet."""
-    config = fresh_config(max_sector_exposure_pct=0.20)  # $2000 cap on $10k equity
+    config = fresh_config(tmp_path, max_sector_exposure_pct=0.20)  # $2000 cap on $10k equity
     state = portfolio_risk.compute_portfolio_state(paper_trades.load_paper_trades_df(config), config)
 
     first = make_proposal(ticker="NVDA", entry=100.0, stop_loss=90.0, shares=15)  # 1500 notional
