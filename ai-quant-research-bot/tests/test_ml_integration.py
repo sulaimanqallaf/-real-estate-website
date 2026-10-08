@@ -123,7 +123,8 @@ def test_daily_run_with_registered_champion_produces_ml_context(tmp_path):
 
     dataset = db.build_dataset_rows("AMD", price_df, config, min_history_bars=200)
     for model_type in models.ALL_MODEL_TYPES:
-        trainer.train_challenger_and_maybe_promote(dataset, config["ml"]["primary_horizon"], models.TASK_CLASSIFICATION, model_type, registry)
+        result = trainer.train_challenger_and_maybe_promote(dataset, config["ml"]["primary_horizon"], models.TASK_CLASSIFICATION, model_type, registry)
+        registry.promote_to_champion(result["metadata"].model_id)
 
     entry = main.analyze_symbol("AMD", bullish_snapshot(), None, bullish_snapshot(), config)
     results = run_full_pipeline(entry, config)

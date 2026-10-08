@@ -63,7 +63,11 @@ def test_new_model_always_gets_a_fresh_model_id(registry, separable_dataset):
 
 def test_champion_not_overwritten_silently_by_a_worse_challenger(registry, separable_dataset, noise_dataset):
     good = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_LOGISTIC_REGRESSION, registry, feature_names=FEATURE_NAMES)
-    assert good["promoted"] is True
+    # Setup needs a champion to exist - an explicit promotion (e.g. a human
+    # curator reviewing this first baseline) is always valid regardless of
+    # decide_promotion()'s own stricter no-champion bar (GitHub Issue #1 P1),
+    # which is tested separately in test_decide_promotion_* below.
+    registry.promote_to_champion(good["metadata"].model_id)
     champion_before = registry.get_champion(models.TASK_CLASSIFICATION, models.TASK_CLASSIFICATION, 5, models.MODEL_LOGISTIC_REGRESSION)
 
     # A worse challenger trained on pure noise should not dislodge the champion.
@@ -77,23 +81,35 @@ def test_champion_not_overwritten_silently_by_a_worse_challenger(registry, separ
         assert failed_challenger_meta.status == model_registry.STATUS_CHALLENGER  # remains, never silently discarded
 
 
-def test_first_model_is_promoted_by_default(registry, separable_dataset):
+def test_first_model_still_requires_a_validated_baseline_to_auto_promote(registry, separable_dataset):
+    """GitHub Issue #1 P1: a first-ever model for a slot is no longer
+    promoted merely because there's nothing to compare it against -
+    train_challenger_and_maybe_promote()'s result must faithfully reflect
+    whatever model_registry.decide_promotion() actually decided, not
+    assume True."""
     result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_GRADIENT_BOOSTING, registry, feature_names=FEATURE_NAMES)
-    assert result["promoted"] is True
-    assert result["promotion_decision"]["promote"] is True
+    assert result["promoted"] == result["promotion_decision"]["promote"]
+    champion = registry.get_champion(models.TASK_CLASSIFICATION, models.TASK_CLASSIFICATION, 5, models.MODEL_GRADIENT_BOOSTING)
+    assert (champion is not None) == result["promoted"]
 
 
 def test_champion_slot_is_per_model_family(registry, separable_dataset):
     for model_type in models.ALL_MODEL_TYPES:
-        trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, model_type, registry, feature_names=FEATURE_NAMES)
+        result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, model_type, registry, feature_names=FEATURE_NAMES)
+        # Setup needs a champion in every family's slot - explicit
+        # promotion (see test_champion_not_overwritten_... above for why
+        # this is always valid regardless of decide_promotion()'s own bar).
+        registry.promote_to_champion(result["metadata"].model_id)
     champions = registry.get_all_champions(models.TASK_CLASSIFICATION, models.TASK_CLASSIFICATION, 5)
     assert set(champions) == set(models.ALL_MODEL_TYPES)
     assert len({m.model_id for m in champions.values()}) == 3  # three distinct models, three distinct champions
 
 
 def test_promoting_one_family_never_retires_another_familys_champion(registry, separable_dataset):
-    trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_LOGISTIC_REGRESSION, registry, feature_names=FEATURE_NAMES)
-    rf_champion_1 = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_RANDOM_FOREST, registry, feature_names=FEATURE_NAMES)
+    lr_result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_LOGISTIC_REGRESSION, registry, feature_names=FEATURE_NAMES)
+    registry.promote_to_champion(lr_result["metadata"].model_id)
+    rf_result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_RANDOM_FOREST, registry, feature_names=FEATURE_NAMES)
+    registry.promote_to_champion(rf_result["metadata"].model_id)
     lr_champion = registry.get_champion(models.TASK_CLASSIFICATION, models.TASK_CLASSIFICATION, 5, models.MODEL_LOGISTIC_REGRESSION)
     assert lr_champion.status == model_registry.STATUS_CHAMPION  # untouched by the RF promotion
 
@@ -124,8 +140,53 @@ def _fake_metadata(**overrides):
     return model_registry.ModelMetadata(**base)
 
 
-def test_decide_promotion_no_champion_promotes_by_default():
+def test_decide_promotion_no_champion_does_not_promote_blindly():
+    """GitHub Issue #1 P1: 'with no champion do not auto-promote blindly;
+    permit a validated baseline.' An empty-metrics challenger has nothing
+    to validate a baseline from - must stay CHALLENGER, not become
+    CHAMPION merely because nothing exists to compare it against."""
     challenger = _fake_metadata()
+    decision = model_registry.decide_promotion(challenger, None)
+    assert decision["promote"] is False
+
+
+def test_decide_promotion_no_champion_blocks_on_too_few_test_samples():
+    challenger = _fake_metadata(metrics={
+        "test": {"pr_auc": 0.9, "sample_size": model_registry.MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION - 1},
+        "baseline_comparison": {"adds_incremental_value": True},
+    })
+    decision = model_registry.decide_promotion(challenger, None)
+    assert decision["promote"] is False
+    assert "sample" in decision["reasons"][0].lower() or "test set" in decision["reasons"][0].lower()
+
+
+def test_decide_promotion_no_champion_blocks_on_overfit_warning():
+    challenger = _fake_metadata(metrics={
+        "test": {"pr_auc": 0.9, "sample_size": model_registry.MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION},
+        "baseline_comparison": {"adds_incremental_value": True},
+        "overfit_warning": "OVERFIT_WARNING",
+    })
+    decision = model_registry.decide_promotion(challenger, None)
+    assert decision["promote"] is False
+    assert "overfit" in decision["reasons"][0].lower()
+
+
+def test_decide_promotion_no_champion_blocks_when_it_does_not_beat_baselines():
+    challenger = _fake_metadata(metrics={
+        "test": {"pr_auc": 0.5, "sample_size": model_registry.MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION},
+        "baseline_comparison": {"adds_incremental_value": False},
+    })
+    decision = model_registry.decide_promotion(challenger, None)
+    assert decision["promote"] is False
+    assert "baseline" in decision["reasons"][0].lower()
+
+
+def test_decide_promotion_no_champion_promotes_a_genuinely_validated_baseline():
+    challenger = _fake_metadata(metrics={
+        "test": {"pr_auc": 0.7, "sample_size": model_registry.MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION + 50},
+        "baseline_comparison": {"adds_incremental_value": True},
+        "overfit_warning": None,
+    })
     decision = model_registry.decide_promotion(challenger, None)
     assert decision["promote"] is True
 

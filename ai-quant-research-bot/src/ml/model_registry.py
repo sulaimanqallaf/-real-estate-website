@@ -224,16 +224,45 @@ class ModelRegistry:
 # --- champion/challenger promotion RULES (Part K) -----------------------------------
 
 
+#  GitHub Issue #1 P1: "With no champion do not auto-promote blindly;
+#  permit a validated baseline." A first-ever model for a slot still must
+#  clear a real bar, not merely "nothing to compare against" - see the
+#  no-champion branch below.
+MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION = 30
+
+
 def decide_promotion(challenger: ModelMetadata, champion: ModelMetadata | None) -> dict[str, Any]:
     """Transparent, multi-criterion promotion rule - "No autonomous promotion
-    based solely on one metric" (Part K). With no existing champion, the
-    challenger is promoted by default (there's nothing to compare against).
-    Otherwise the challenger must win on AT LEAST TWO of three criteria
-    (better PR-AUC, better Brier score, stronger top-decile/top-bucket
-    expected return) AND show no NEW overfit warning the champion didn't
-    already have. A tie or a single-criterion win keeps the current champion."""
+    based solely on one metric" (Part K). Otherwise the challenger must win
+    on AT LEAST TWO of three criteria (better PR-AUC, better Brier score,
+    stronger top-decile/top-bucket expected return) AND show no NEW overfit
+    warning the champion didn't already have. A tie or a single-criterion
+    win keeps the current champion.
+
+    With no existing champion, there is nothing to beat on those three
+    criteria - but "nothing to compare against" must never mean "promote
+    unconditionally" (GitHub Issue #1 P1). A validated baseline still
+    requires: a test set large enough to mean anything
+    (`MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION`), no overfit warning at all,
+    and a result that actually beats the recorded non-ML baselines
+    (`validator.compare_to_baselines()`'s `adds_incremental_value`) - a
+    model that can't even beat a majority-class/momentum/rule-score
+    baseline is not "a validated baseline," it's noise, and promoting it
+    would make it the active model ranking/reducing exposure for real
+    PAPER trades."""
     if champion is None:
-        return {"promote": True, "reasons": ["No existing champion for this (task, target, horizon) - challenger becomes champion."]}
+        sample_size = (challenger.metrics.get("test") or {}).get("sample_size")
+        if sample_size is None or sample_size < MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION:
+            return {
+                "promote": False,
+                "reasons": [f"No existing champion, but the test set ({sample_size} rows) is below the minimum ({MIN_TEST_SAMPLES_FOR_BASELINE_PROMOTION}) required to validate a baseline - staying CHALLENGER."],
+            }
+        if challenger.metrics.get("overfit_warning") is not None:
+            return {"promote": False, "reasons": ["No existing champion, but the challenger already shows an overfit warning - staying CHALLENGER."]}
+        adds_value = (challenger.metrics.get("baseline_comparison") or {}).get("adds_incremental_value")
+        if not adds_value:
+            return {"promote": False, "reasons": ["No existing champion, but the challenger does not beat the recorded non-ML baselines - staying CHALLENGER."]}
+        return {"promote": True, "reasons": ["No existing champion for this (task, target, horizon); challenger clears the minimum validated-baseline bar (sample size, no overfit, beats non-ML baselines)."]}
 
     c_metrics = challenger.metrics.get("test") or challenger.metrics.get("walk_forward") or {}
     champ_metrics = champion.metrics.get("test") or champion.metrics.get("walk_forward") or {}

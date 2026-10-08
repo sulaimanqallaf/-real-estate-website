@@ -126,7 +126,8 @@ def test_predict_for_ticker_unavailable_with_missing_feature_columns(registry):
 
 def test_predict_for_ticker_bullish_signal_produces_high_confidence(registry, separable_dataset):
     for model_type in models.ALL_MODEL_TYPES:
-        trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, model_type, registry, feature_names=FEATURE_NAMES)
+        result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, model_type, registry, feature_names=FEATURE_NAMES)
+        registry.promote_to_champion(result["metadata"].model_id)
 
     row = _feature_row(momentum_20d=9.0, rsi_14=68.0)
     pred = predictor.predict_for_ticker("TEST", row, registry, 5)
@@ -137,7 +138,8 @@ def test_predict_for_ticker_bullish_signal_produces_high_confidence(registry, se
 
 
 def test_predict_for_ticker_partial_data_quality_with_only_some_families_registered(registry, separable_dataset):
-    trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_LOGISTIC_REGRESSION, registry, feature_names=FEATURE_NAMES)
+    result = trainer.train_challenger_and_maybe_promote(separable_dataset, 5, models.TASK_CLASSIFICATION, models.MODEL_LOGISTIC_REGRESSION, registry, feature_names=FEATURE_NAMES)
+    registry.promote_to_champion(result["metadata"].model_id)
     row = _feature_row(momentum_20d=5.0, rsi_14=55.0)
     pred = predictor.predict_for_ticker("TEST", row, registry, 5)
     assert pred.data_quality == predictor.DATA_QUALITY_PARTIAL
