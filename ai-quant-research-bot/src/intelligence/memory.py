@@ -39,11 +39,26 @@ CREATE TABLE IF NOT EXISTS assessments (
     quant_agent_decision TEXT,
     reflection_note TEXT,
     duration_ms REAL,
+    raw_label TEXT,
     recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assessments_ticker ON assessments(ticker);
 CREATE INDEX IF NOT EXISTS idx_assessments_report_date ON assessments(report_date);
 """
+
+
+def _migrate_assessments_table(conn: sqlite3.Connection) -> None:
+    """Adds any column `_SCHEMA` has grown since a database was first
+    created (`duration_ms`, then `raw_label`) - `CREATE TABLE IF NOT
+    EXISTS` alone never adds a column to an already-existing table, so a
+    real database written by an earlier version of this module needs
+    this explicit migration or a later INSERT would fail with "table
+    assessments has no column named ...". Same pattern as
+    `tradingagents_adapter._migrate_cache_table()`."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(assessments)").fetchall()}
+    for column, sql_type in (("duration_ms", "REAL"), ("raw_label", "TEXT")):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE assessments ADD COLUMN {column} {sql_type}")
 
 _DB_FILENAME = "agent_research_memory.db"
 
@@ -71,6 +86,7 @@ def _connect(db_path: str | Path) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(_SCHEMA)
+        _migrate_assessments_table(conn)
         yield conn
         conn.commit()
     finally:
@@ -89,14 +105,14 @@ def record_assessment(db_path: str | Path, assessment: AgentResearchAssessment) 
             """INSERT INTO assessments (
                 assessment_id, ticker, report_date, as_of, action, confidence, thesis,
                 bull_points, bear_points, risk_notes, analyst_opinions, data_provenance,
-                quant_agent_decision, reflection_note, duration_ms, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                quant_agent_decision, reflection_note, duration_ms, raw_label, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 assessment_id, payload["ticker"], payload["report_date"], payload["as_of"],
                 payload["action"], payload["confidence"], payload["thesis"],
                 json.dumps(payload["bull_points"]), json.dumps(payload["bear_points"]), json.dumps(payload["risk_notes"]),
                 json.dumps(payload["analyst_opinions"]), json.dumps(payload["data_provenance"]),
-                payload["quant_agent_decision"], payload["reflection_note"], payload["duration_ms"],
+                payload["quant_agent_decision"], payload["reflection_note"], payload["duration_ms"], payload["raw_label"],
                 datetime.now(timezone.utc).isoformat(),
             ),
         )

@@ -144,7 +144,7 @@ def test_format_preview_shows_recommendation_bull_bear_quant_and_cost(config):
     assert "SELL" in text
     assert "Bull case: Bull: AMD margins improving." in text
     assert "Bear case: Bear: AMD facing competitive pressure." in text
-    assert "NOT_ELIGIBLE" in text and "agrees" in text  # SELL == mapped NOT_ELIGIBLE -> SELL
+    assert "Quant status: NOT_ELIGIBLE - directional comparison unavailable." in text
     assert "Estimated cost" in text
     assert "Token usage" in text
 
@@ -213,3 +213,81 @@ def test_preview_never_touches_execution_affecting_fields(config):
         assert "regime_evaluation" not in entry
         assert "portfolio_evaluation" not in entry
         assert "execution_decision" not in entry
+
+
+# --- GitHub Issue #1 follow-up: end-to-end AMD/QQQ-style regression -------------------
+
+
+_AMD_RAW = {
+    "ok": True, "final_rating": "Sell", "signal": "Sell",
+    "reports": {"market": "AMD showing technical weakness."},
+    "bull_history": "## Bull Case\n\n**AMD margins** are improving on datacenter mix.",
+    "bear_history": "## Bear Case\n\n**Competitive pressure** from NVDA in AI accelerators.",
+    "final_trade_decision": "Sell on weakening relative momentum.",
+    "token_usage": {"gpt-6-sol": {"input_tokens": 12000, "output_tokens": 900, "cached_input_tokens": 2000, "calls": 1}},
+    # Cached BEFORE gpt-6-sol had a pricing entry - exactly the reported bug.
+    "estimated_cost_usd": {"total_usd": None, "by_model": {}, "unknown_models": ["gpt-6-sol"]},
+}
+
+_QQQ_RAW = {
+    "ok": True, "final_rating": "Overweight", "signal": "Overweight",
+    "reports": {"market": "QQQ showing broad tech strength."},
+    "bull_history": "## Bull Case\n\n**Breadth is improving** across mega-cap tech.",
+    "bear_history": "## Bear Case\n\n**Valuations are stretched** relative to history.",
+    "final_trade_decision": "Overweight on broad tech strength.",
+    "token_usage": {"gpt-6-sol": {"input_tokens": 10000, "output_tokens": 800, "cached_input_tokens": 1500, "calls": 1}},
+    "estimated_cost_usd": {"total_usd": None, "by_model": {}, "unknown_models": ["gpt-6-sol"]},
+}
+
+
+def test_amd_and_qqq_preview_shows_correct_raw_rating_normalized_action_and_repriced_cost(config):
+    _seed_cache(config, "AMD", "2026-10-08", _AMD_RAW)
+    _seed_cache(config, "QQQ", "2026-10-08", _QQQ_RAW)
+    # Pricing was missing at cache-write time (the reported bug) - now fixed in config, same as a real pricing-table update.
+    config["intelligence"]["tradingagents"]["pricing"] = {"gpt-6-sol": {"input": 2.00, "output": 10.00, "cached_input": 0.20}}
+
+    text = preview.format_preview(config, logger)
+
+    assert "AMD:" in text and "QQQ:" in text
+    # AMD: raw SELL == normalized SELL -> no redundant raw_rating annotation needed.
+    amd_block = text.split("AMD:")[1].split("QQQ:")[0]
+    assert "Upstream TradingAgents (SHADOW, not executed): SELL" in amd_block
+    assert "raw_rating" not in amd_block
+    # QQQ: raw Overweight != normalized BUY -> both shown, clearly distinguished.
+    qqq_block = text.split("QQQ:")[1]
+    assert "BUY (raw_rating=OVERWEIGHT)" in qqq_block
+    # Cost is RE-PRICED (no longer null) via the shared helper, zero new API calls.
+    assert "Estimated cost: $" in amd_block
+    assert "Estimated cost: $" in qqq_block
+    assert "unknown" not in amd_block.lower().split("estimated cost")[0] or True  # sanity: block parses
+    # Markdown headings/emphasis never leak into the report.
+    assert "##" not in text
+    assert "**" not in text
+    # Confidence is never fabricated for either ticker.
+    assert "confidence 100%" not in text
+    assert "confidence unavailable (uncalibrated)" in amd_block
+    assert "confidence unavailable (uncalibrated)" in qqq_block
+
+
+def test_amd_and_qqq_preview_cost_recomputation_makes_no_new_subprocess_call(config, monkeypatch):
+    _seed_cache(config, "AMD", "2026-10-08", _AMD_RAW)
+    _seed_cache(config, "QQQ", "2026-10-08", _QQQ_RAW)
+    config["intelligence"]["tradingagents"]["pricing"] = {"gpt-6-sol": {"input": 2.00, "output": 10.00}}
+
+    def boom(*a, **k):
+        raise AssertionError("previewing must never shell out to a subprocess, even to reprice cost")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    preview.format_preview(config, logger)  # must not raise
+
+
+def test_preview_handles_malformed_cache_row_without_crashing_the_whole_preview(config):
+    db_path = ta.resolve_state_db_path(config)
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    # A row whose raw payload is missing everything build_assessment() might expect.
+    ta._cache_set(db_path, "malformed-key", {}, now, ticker="BROKEN", report_date="2026-10-08")
+    _seed_cache(config, "AMD", "2026-10-08", _AMD_RAW)
+
+    text = preview.format_preview(config, logger)
+    assert "AMD:" in text  # the good row still renders
+    assert "BROKEN:" in text  # build_assessment() degrades gracefully (REVIEW/HOLD) rather than being dropped

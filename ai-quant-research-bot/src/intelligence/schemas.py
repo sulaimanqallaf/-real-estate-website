@@ -26,16 +26,25 @@ class AgentOpinion:
     """One analyst's structured opinion on one ticker. `confidence` is
     0.0-1.0 and is a SELF-REPORTED heuristic strength, not a calibrated
     probability (see `research_manager.py`'s docstring on why this is
-    never represented as calibrated unless empirically validated).
+    never represented as calibrated unless empirically validated) - it
+    is `None` ("unavailable") whenever the underlying source gives no
+    usable strength signal at all (e.g. a plain categorical rating with
+    no numeric confidence attached, as from the real upstream
+    TradingAgents package - see `tradingagents_adapter.build_assessment()`).
     `data_available=False` means the opinion was built entirely from
-    "Data Unavailable" degradation - never fabricated analysis."""
+    "Data Unavailable" degradation - never fabricated analysis.
+    `raw_label`, when set, is the ORIGINAL label a source actually gave
+    (e.g. a 5-tier "Overweight"), kept distinct from `action` (this
+    project's own normalized BUY/SELL/HOLD) rather than silently
+    collapsed into it."""
 
     analyst: str
     action: str
-    confidence: float
+    confidence: float | None
     thesis: str
     evidence: list[str] = field(default_factory=list)
     data_available: bool = True
+    raw_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +71,7 @@ class AgentResearchAssessment:
     report_date: str
     as_of: str
     action: str
-    confidence: float
+    confidence: float | None
     thesis: str
     bull_points: list[str]
     bear_points: list[str]
@@ -72,6 +81,12 @@ class AgentResearchAssessment:
     quant_agent_decision: str | None = None
     reflection_note: str | None = None
     duration_ms: float | None = None
+    # The ORIGINAL label a source gave (e.g. upstream TradingAgents' own
+    # 5-tier "Overweight"/"Underweight"), kept distinct from `action`
+    # (this project's normalized BUY/SELL/HOLD) - `None` for the
+    # deterministic engine, which never has a separate raw label to begin
+    # with (its own action already IS the primary output).
+    raw_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,7 +97,7 @@ class AgentResearchAssessment:
             "analyst_opinions": {
                 name: {
                     "action": op.action, "confidence": op.confidence, "thesis": op.thesis,
-                    "evidence": list(op.evidence), "data_available": op.data_available,
+                    "evidence": list(op.evidence), "data_available": op.data_available, "raw_label": op.raw_label,
                 }
                 for name, op in self.analyst_opinions.items()
             },
@@ -90,4 +105,5 @@ class AgentResearchAssessment:
             "quant_agent_decision": self.quant_agent_decision,
             "reflection_note": self.reflection_note,
             "duration_ms": self.duration_ms,
+            "raw_label": self.raw_label,
         }

@@ -577,7 +577,7 @@ def test_cache_hit_never_fabricates_a_cost_for_an_entry_cached_before_token_trac
         conn.execute("UPDATE cache SET result_json = ? WHERE cache_key = ?", (json.dumps({"ok": True, "final_rating": "Buy"}), key))
 
     result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now + timedelta(minutes=1))
-    assert "estimated_cost_usd" not in result  # never fabricated - left exactly as cached
+    assert result.get("estimated_cost_usd") is None  # never fabricated - stays unknown, not a guessed number
 
 
 def test_inspect_cached_results_rereads_without_any_subprocess_call(config, fake_runner_unpriced, monkeypatch):
@@ -759,3 +759,109 @@ def test_inspect_cached_results_recovers_legacy_null_metadata_automatically(conf
     by_key = {r["ticker"]: r for r in inspected}
     assert set(by_key.keys()) == {"AMD", "QQQ"}
     assert all(r["report_date"] == "2026-09-09" for r in inspected)
+
+
+# --- GitHub Issue #1 follow-up: raw_label, confidence, and debate-text summarization ----
+
+
+def test_build_assessment_preserves_raw_label_distinct_from_normalized_action():
+    """The exact bug reported: QQQ's raw upstream rating was Overweight,
+    but build_assessment() must keep that verbatim alongside (never
+    instead of) the normalized BUY action."""
+    raw = {"final_rating": "Overweight"}
+    assessment = ta.build_assessment("QQQ", "2026-10-08", "2026-10-08T00:00:00+00:00", raw)
+    assert assessment.action == "BUY"
+    assert assessment.raw_label == "Overweight"
+    assert assessment.analyst_opinions["tradingagents_upstream"].raw_label == "Overweight"
+
+
+def test_build_assessment_preserves_a_raw_sell_rating_too():
+    raw = {"final_rating": "Sell"}
+    assessment = ta.build_assessment("AMD", "2026-10-08", "2026-10-08T00:00:00+00:00", raw)
+    assert assessment.action == "SELL"
+    assert assessment.raw_label == "Sell"
+
+
+def test_build_assessment_never_fabricates_a_confidence_number():
+    for rating in ("Buy", "Sell", "Hold", "Overweight", "Underweight", None):
+        assessment = ta.build_assessment("AMD", "2026-10-08", "2026-10-08T00:00:00+00:00", {"final_rating": rating} if rating else {})
+        assert assessment.confidence is None
+        assert assessment.analyst_opinions["tradingagents_upstream"].confidence is None
+
+
+# --- _summarize_debate_text: pure text processing, no LLM ------------------------------
+
+
+def test_summarize_debate_text_strips_markdown_headings_and_emphasis():
+    text = "## Bull Case\n\n**Strong margins** and __healthy demand__."
+    result = ta._summarize_debate_text(text)
+    assert "#" not in result
+    assert "**" not in result
+    assert "__" not in result
+    assert "Strong margins" in result
+    assert "healthy demand" in result
+
+
+def test_summarize_debate_text_leaves_short_text_untouched_with_no_truncation_label():
+    text = "AMD margins are improving quarter over quarter."
+    result = ta._summarize_debate_text(text)
+    assert result == text
+    assert "excerpt" not in result
+
+
+def test_summarize_debate_text_truncates_at_a_word_boundary_with_an_explicit_label():
+    text = "word " * 200  # much longer than the excerpt limit
+    result = ta._summarize_debate_text(text, max_chars=50)
+    assert result.endswith(")")
+    assert "excerpt" in result
+    assert "see cached transcript for the full debate" in result
+    # never cuts mid-word: the text before the "…" must end on a word boundary
+    before_ellipsis = result.split("…")[0]
+    assert not before_ellipsis.endswith("wor")
+
+
+def test_summarize_debate_text_returns_none_for_empty_or_missing_input():
+    assert ta._summarize_debate_text(None) is None
+    assert ta._summarize_debate_text("") is None
+    assert ta._summarize_debate_text("   \n\n  ") is None
+
+
+def test_summarize_debate_text_never_invokes_a_subprocess(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("summarizing debate text must never shell out - it is pure text processing")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    ta._summarize_debate_text("## Some heading\n\nSome **bold** text " * 50)
+
+
+def test_build_assessment_bull_bear_points_are_markdown_cleaned_and_labeled_when_long():
+    raw = {
+        "final_rating": "Buy",
+        "bull_history": "## Bull Case\n\n" + ("Strong fundamentals. " * 40),
+        "bear_history": "Short bear note.",
+    }
+    assessment = ta.build_assessment("AMD", "2026-10-08", "2026-10-08T00:00:00+00:00", raw)
+    assert "#" not in assessment.bull_points[0]
+    assert "excerpt" in assessment.bull_points[0]
+    assert assessment.bear_points[0] == "Short bear note."
+
+
+# --- GitHub Issue #1 follow-up: shared repriced_cost_info() helper ---------------------
+
+
+def test_repriced_cost_info_recomputes_from_token_usage_with_a_given_table():
+    raw = {"token_usage": {"gpt-6-luna": {"input_tokens": 1_000_000, "output_tokens": 0, "cached_input_tokens": 0}}}
+    cost = ta.repriced_cost_info(raw, {"gpt-6-luna": {"input": 0.10, "output": 0.50}})
+    assert cost["total_usd"] == pytest.approx(0.10)
+
+
+def test_repriced_cost_info_returns_whatever_was_stored_when_no_token_usage_key_exists():
+    raw = {"estimated_cost_usd": {"total_usd": None, "by_model": {}, "unknown_models": []}}
+    assert ta.repriced_cost_info(raw) == raw["estimated_cost_usd"]
+
+
+def test_repriced_cost_info_never_mutates_the_input_dict():
+    raw = {"token_usage": {"gpt-6-luna": {"input_tokens": 1000, "output_tokens": 0}}}
+    before = dict(raw)
+    ta.repriced_cost_info(raw, {"gpt-6-luna": {"input": 1.0, "output": 1.0}})
+    assert raw == before

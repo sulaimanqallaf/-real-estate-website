@@ -355,6 +355,26 @@ def list_cached_raw_results(config: dict[str, Any]) -> list[dict[str, Any]]:
     return results
 
 
+def repriced_cost_info(raw: dict[str, Any], pricing_table: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """ONE shared helper for recomputing a result's dollar cost from its
+    own real `token_usage` against a pricing table - used by `run_one()`'s
+    cache-hit path, `inspect_cached_results()`, and `tradingagents_
+    preview.py`, so the three can never drift from each other or
+    double-count a cost (GitHub Issue #1 follow-up: "recompute pricing
+    in-memory through one shared helper for both preview and cache
+    inspection. No new OpenAI calls, no double counting.").
+
+    Never calls the API, never mutates `raw` - returns a fresh cost-info
+    dict (or whatever `raw` already had, untouched) for the CALLER to
+    attach wherever it needs to. Recomputes only when `token_usage` was
+    actually recorded; an entry from before token tracking existed keeps
+    whatever (possibly absent/unknown) cost it already had, never a
+    fabricated `$0.00`."""
+    if "token_usage" not in raw:
+        return raw.get("estimated_cost_usd")
+    return pricing.estimate_cost_usd(raw.get("token_usage"), pricing_table)
+
+
 def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """GitHub Issue #1 follow-up requirement 6: inspect every cached
     TradingAgents result WITHOUT making a new API call (no subprocess,
@@ -383,7 +403,7 @@ def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any]
         # Only re-price when usage was actually recorded - an entry from
         # before token tracking existed keeps whatever (possibly absent/
         # unknown) cost it already had, never a fabricated $0.00.
-        cost_info = pricing.estimate_cost_usd(token_usage, table) if "token_usage" in result else result.get("estimated_cost_usd")
+        cost_info = repriced_cost_info(result, table)
         inspected.append({
             "ticker": cached["ticker"], "report_date": cached["report_date"], "cached_at": cached["cached_at"],
             "final_rating": result.get("final_rating") or result.get("signal"),
@@ -514,12 +534,7 @@ def run_one(
         # follow-up requirement 6) - no new API call, so a pricing-table
         # fix (e.g. adding a previously-missing model) is reflected on
         # the very next cache hit, not just on a fresh (billed) call.
-        # Only when `token_usage` was actually recorded - an entry cached
-        # before that field existed at all must keep whatever cost it
-        # already had (possibly None/unknown), never get a fabricated
-        # "$0.00" from re-pricing an absent usage dict as if it were zero.
-        if "token_usage" in cached:
-            cached["estimated_cost_usd"] = pricing.estimate_cost_usd(cached["token_usage"], ta_config.get("pricing"))
+        cached["estimated_cost_usd"] = repriced_cost_info(cached, ta_config.get("pricing"))
         return cached
 
     max_calls_per_day = ta_config.get("max_calls_per_day", DEFAULT_MAX_CALLS_PER_DAY)
@@ -679,13 +694,71 @@ def _map_rating_to_action(rating: str | None) -> str:
     return _RATING_TO_ACTION.get(rating.strip().lower(), ACTION_HOLD)
 
 
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+_MARKDOWN_EMPHASIS_RE = re.compile(r"(\*\*|__|\*|_)")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+# How much of a debate transcript to surface as a readable excerpt in the
+# report - a Telegram-sized snippet, not the whole thing. The full
+# transcript is never lost: it stays in the cache's raw payload (and, for
+# the full on-disk record, the TradingAgents work directory) - this is
+# only ever a DISPLAY excerpt.
+_DEBATE_EXCERPT_CHARS = 280
+
+
+def _summarize_debate_text(text: str | None, max_chars: int = _DEBATE_EXCERPT_CHARS) -> str | None:
+    """Turns a raw Bull/Bear debate transcript into a readable excerpt,
+    pure text processing - no LLM call, no summarization model (GitHub
+    Issue #1 follow-up: "do not invoke an LLM just to preview cached
+    results").
+
+    Strips markdown heading markers (`#`/`##`/...) and emphasis markers
+    (`**`/`__`/`*`/`_`) so a heading like "## Bull Case\\n\\n**Strong
+    margins**" reads as "Bull Case Strong margins" instead of leaking
+    raw markdown syntax into the report. Collapses to a single excerpt
+    truncated at a WORD boundary (never mid-word) and, when the source
+    was longer than the excerpt, appends an explicit
+    "(excerpt, N of M chars - see cached transcript for the full
+    debate)" label - the report must never present a truncated snippet
+    as if it were the complete analysis. Returns `None` for empty/
+    missing input, never an empty string standing in for "no content"."""
+    if not text:
+        return None
+    cleaned = _MARKDOWN_HEADING_RE.sub("", text)
+    cleaned = _MARKDOWN_EMPHASIS_RE.sub("", cleaned)
+    cleaned = _WHITESPACE_RE.sub(" ", cleaned).strip()
+    if not cleaned:
+        return None
+
+    total_chars = len(cleaned)
+    if total_chars <= max_chars:
+        return cleaned
+
+    excerpt = cleaned[:max_chars].rsplit(" ", 1)[0].rstrip(".,;:- ")
+    return f"{excerpt}… (excerpt, {len(excerpt)} of {total_chars} chars - see cached transcript for the full debate)"
+
+
 def build_assessment(
     ticker: str, report_date: str, as_of: str, raw: dict[str, Any],
     quant_agent_decision: str | None = None, duration_ms: float | None = None,
 ) -> AgentResearchAssessment:
     """Pure mapping from the runner's raw JSON to this project's own
     `AgentResearchAssessment` - no subprocess, no I/O, fully unit
-    testable without the TradingAgents package installed anywhere."""
+    testable without the TradingAgents package installed anywhere.
+
+    **`action` vs. `raw_label` (GitHub Issue #1 follow-up):** upstream's
+    own 5-tier rating (e.g. "Overweight") is preserved VERBATIM as
+    `raw_label` - it is never silently collapsed into this project's
+    normalized 3-tier `action` (BUY/SELL/HOLD). Both are always present
+    on the returned assessment, clearly distinguished.
+
+    **`confidence` is `None` ("unavailable"), never a fabricated
+    number.** Upstream gives a categorical rating, not a calibrated
+    success probability - showing "confidence 100%" for every non-Hold
+    call would misrepresent a label as a statistic. A real numerical
+    probability belongs here only once backed by a separately evaluated,
+    calibrated model (the same discipline `ml/calibration.py` already
+    requires for this project's own ML predictions)."""
     rating = raw.get("final_rating") or raw.get("signal")
     action = _map_rating_to_action(rating)
     reports = raw.get("reports") or {}
@@ -696,18 +769,21 @@ def build_assessment(
         if text:
             evidence.append(f"[{label} analyst, upstream TradingAgents] {text[:400]}")
 
-    bull_points = [raw["bull_history"][:800]] if raw.get("bull_history") else []
-    bear_points = [raw["bear_history"][:800]] if raw.get("bear_history") else []
+    bull_excerpt = _summarize_debate_text(raw.get("bull_history"))
+    bear_excerpt = _summarize_debate_text(raw.get("bear_history"))
+    bull_points = [bull_excerpt] if bull_excerpt else []
+    bear_points = [bear_excerpt] if bear_excerpt else []
 
     thesis = (
         raw.get("final_trade_decision") or raw.get("investment_plan") or raw.get("trader_investment_plan")
         or f"Upstream TradingAgents rating: {rating or 'REVIEW (no parseable rating)'}."
     )
-    confidence = 1.0 if action != ACTION_HOLD else 0.0
+    confidence = None  # uncalibrated - see docstring
 
     opinion = AgentOpinion(
         analyst="tradingagents_upstream", action=action, confidence=confidence, thesis=thesis[:2000],
         evidence=evidence, data_available=bool(reports) or bool(raw.get("final_trade_decision")),
+        raw_label=rating,
     )
 
     risk_notes = [f"Raw upstream rating: {rating}"] if rating else ["Upstream produced no parseable rating (REVIEW)."]
@@ -735,6 +811,7 @@ def build_assessment(
         data_provenance=["source: upstream TauricResearch/TradingAgents package (real LangGraph run)"],
         quant_agent_decision=quant_agent_decision,
         duration_ms=duration_ms,
+        raw_label=rating,
     )
 
 

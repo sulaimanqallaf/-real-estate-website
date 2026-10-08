@@ -245,10 +245,26 @@ def format_tradingagents_context_line(entry: dict[str, Any]) -> str:
     if assessment is None:
         return ""
 
-    lines = [f"Upstream TradingAgents (SHADOW, not executed): {assessment.action} (confidence {assessment.confidence * 100:.0f}%)"]
+    # raw_label is upstream's own 5-tier word (e.g. "Overweight") - kept
+    # distinct from `action` (this project's normalized BUY/SELL/HOLD),
+    # never silently collapsed into it (GitHub Issue #1 follow-up).
+    if assessment.raw_label and assessment.raw_label.strip().upper() != assessment.action:
+        recommendation = f"{assessment.action} (raw_rating={assessment.raw_label.strip().upper()})"
+    else:
+        recommendation = assessment.action
+    # confidence is None whenever the source gives no calibrated success
+    # probability (upstream TradingAgents never does) - never shown as a
+    # fabricated percentage.
+    confidence_text = f"{assessment.confidence * 100:.0f}%" if assessment.confidence is not None else "unavailable (uncalibrated)"
+    lines = [f"Upstream TradingAgents (SHADOW, not executed): {recommendation} (confidence {confidence_text})"]
 
-    bull = _truncate(assessment.bull_points[0], 200) if assessment.bull_points else None
-    bear = _truncate(assessment.bear_points[0], 200) if assessment.bear_points else None
+    # bull_points/bear_points already arrive as readable, markdown-stripped
+    # excerpts (see tradingagents_adapter._summarize_debate_text()) with
+    # their own truncation label when the source transcript was longer -
+    # never re-truncated here, which would risk cutting mid-word or
+    # re-introducing a misleading "this is the whole analysis" impression.
+    bull = assessment.bull_points[0] if assessment.bull_points else None
+    bear = assessment.bear_points[0] if assessment.bear_points else None
     if bull:
         lines.append(f"  Bull case: {bull}")
     if bear:
@@ -256,14 +272,17 @@ def format_tradingagents_context_line(entry: dict[str, Any]) -> str:
     if not bull and not bear:
         lines.append("  Bull/Bear: no debate content returned.")
 
+    # Quant comparison: quant_agent.py's ELIGIBLE/WEAK/NOT_ELIGIBLE
+    # vocabulary describes whether a candidate passed this system's own
+    # (long-only, no-shorting) eligibility gate - it is NOT a directional
+    # BUY/SELL call, so it is never claimed to "agree" or "disagree" with
+    # an upstream BUY/SELL/HOLD recommendation (GitHub Issue #1 follow-up:
+    # "ELIGIBLE means a candidate passed the Quant gate, not necessarily
+    # BUY... say Quant status: ELIGIBLE - directional comparison
+    # unavailable").
     quant_decision = assessment.quant_agent_decision
     if quant_decision:
-        mapped = _QUANT_DECISION_TO_ACTION.get(quant_decision)
-        if mapped is None:
-            comparison = "n/a"
-        else:
-            comparison = "agrees" if mapped == assessment.action else "disagrees"
-        lines.append(f"  Quant comparison: existing quant_agent said {quant_decision} ({comparison} with {assessment.action}).")
+        lines.append(f"  Quant status: {quant_decision} - directional comparison unavailable.")
     else:
         lines.append("  Quant comparison: no quant_agent assessment available for this ticker.")
 

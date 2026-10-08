@@ -53,15 +53,30 @@ def build_preview_entries(config: dict[str, Any], logger: logging.Logger) -> lis
     recovers any legacy `NULL` ticker/report_date - see
     `tradingagents_adapter.recover_cache_metadata_from_request_files()`).
     A row whose ticker/report_date could not be recovered is still
-    included, clearly labeled `UNKNOWN`, rather than silently dropped."""
+    included, clearly labeled `UNKNOWN`, rather than silently dropped.
+
+    **Cost is re-priced through the SAME shared helper
+    `tradingagents_adapter.repriced_cost_info()` that `inspect_cached_
+    results()` uses** (GitHub Issue #1 follow-up: "recompute pricing
+    in-memory through one shared helper for both preview and cache
+    inspection") - never the stale cost that may have been baked in at
+    cache-write time. Only an in-memory COPY of the cached raw payload is
+    re-priced for rendering; the cache row itself (its key, timestamp,
+    and the original `token_usage`/transcripts) is never written back
+    to or mutated."""
+    ta_config = config.get("intelligence", {}).get("tradingagents", {})
+    pricing_table = ta_config.get("pricing")
+
     entries = []
     for cached in tradingagents_adapter.list_cached_raw_results(config):
         ticker = cached["ticker"] or "UNKNOWN"
         report_date = cached["report_date"] or "UNKNOWN"
         as_of = cached["cached_at"] or ""
         quant_decision = _quant_decision_for(config, ticker, report_date) if ticker != "UNKNOWN" and report_date != "UNKNOWN" else None
+        raw_for_display = dict(cached["raw"])
+        raw_for_display["estimated_cost_usd"] = tradingagents_adapter.repriced_cost_info(cached["raw"], pricing_table)
         try:
-            assessment = tradingagents_adapter.build_assessment(ticker, report_date, as_of, cached["raw"], quant_agent_decision=quant_decision)
+            assessment = tradingagents_adapter.build_assessment(ticker, report_date, as_of, raw_for_display, quant_agent_decision=quant_decision)
         except Exception as exc:  # noqa: BLE001 - one malformed cache row must never break the whole preview
             logger.warning("TradingAgents preview: could not build assessment for %s/%s: %s", ticker, report_date, exc)
             continue
