@@ -74,6 +74,7 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
         plan_str += format_sizing_context(entry, individual, final)
         plan_str += format_big_money_context_line(entry)
         plan_str += format_quant_agent_context_line(entry)
+        plan_str += format_agent_research_context_line(entry)
 
     return (
         f"{entry['symbol']}\n"
@@ -163,6 +164,58 @@ def format_quant_agent_context_line(entry: dict[str, Any]) -> str:
         lines.append("Strategy edge: insufficient sample size.")
 
     return "\n".join(lines) + "\n"
+
+
+def format_agent_research_context_line(entry: dict[str, Any]) -> str:
+    """GitHub Issue #1 comment ("Proposal: selectively integrate
+    TauricResearch/TradingAgents..."): a short, per-candidate line
+    surfacing the multi-agent research layer's structured recommendation
+    - clearly labeled SHADOW MODE, since `src/intelligence/pipeline.py`
+    never influences `best_risk_result`/`regime_evaluation`/
+    `portfolio_evaluation`/`execution_decision` and runs strictly AFTER
+    this run's execution layer already decided. Empty string when no
+    assessment was attached (module disabled, or it ran before the
+    research layer in some other caller)."""
+    assessment = entry.get("agent_assessment")
+    if assessment is None:
+        return ""
+    return (
+        f"Multi-agent research (SHADOW, not executed): {assessment.action} "
+        f"(confidence {assessment.confidence * 100:.0f}%) - {len(assessment.bull_points)} bull / "
+        f"{len(assessment.bear_points)} bear point(s)\n"
+    )
+
+
+def format_agent_research_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """A concise multi-agent-vs-existing-system summary, mirroring
+    `format_quant_agent_section()`'s shape. Skipped entirely if
+    `intelligence.enabled` is false."""
+    if not config.get("intelligence", {}).get("enabled", True):
+        return ""
+
+    header = "Multi-Agent Research Layer (SHADOW MODE - not executed):"
+    assessed = [r for r in ticker_results if r.get("agent_assessment") is not None]
+    if not assessed:
+        return f"{header}\n\nData Unavailable - no agent research assessment was computed this run."
+
+    buy = sum(1 for r in assessed if r["agent_assessment"].action == "BUY")
+    sell = sum(1 for r in assessed if r["agent_assessment"].action == "SELL")
+    hold = len(assessed) - buy - sell
+    agreeing = sum(
+        1 for r in assessed
+        if r.get("quant_assessment") is not None
+        and {"ELIGIBLE": "BUY", "WEAK": "HOLD", "NOT_ELIGIBLE": "SELL"}.get(r["quant_assessment"].decision) == r["agent_assessment"].action
+    )
+    comparable = sum(1 for r in assessed if r.get("quant_assessment") is not None)
+
+    lines = [f"BUY {buy} / HOLD {hold} / SELL {sell} across {len(assessed)} assessed ticker(s)."]
+    if comparable:
+        lines.append(f"Agreement with existing quant_agent decision: {agreeing}/{comparable} ({agreeing / comparable * 100:.0f}%).")
+    lines.append(
+        "These are research opinions only - they have NOT influenced any PAPER trade this run. "
+        "See src/intelligence/evaluation.py for the ongoing accuracy comparison."
+    )
+    return f"{header}\n\n" + "\n".join(lines)
 
 
 def format_quant_agent_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
@@ -546,6 +599,9 @@ def format_report_text(
     quant_agent_section = format_quant_agent_section(ticker_results, config)
     if quant_agent_section:
         sections.append(quant_agent_section)
+    agent_research_section = format_agent_research_section(ticker_results, config)
+    if agent_research_section:
+        sections.append(agent_research_section)
     if config.get("portfolio_risk", {}).get("enabled", True):
         sections.append(format_portfolio_risk_summary(config))
     if config.get("paper_trading", {}).get("enabled", True):

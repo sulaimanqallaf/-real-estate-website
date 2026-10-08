@@ -702,6 +702,20 @@ def run(config_path: str | None = None) -> int:
         ),
     ) or set()
 
+    # Multi-agent research layer (GitHub Issue #1 comment: "Proposal:
+    # selectively integrate TauricResearch/TradingAgents...") - called
+    # strictly AFTER the execution layer above has already decided (and,
+    # if applicable, submitted) every order for this run, so it is
+    # structurally impossible for this SHADOW-MODE-ONLY layer to have
+    # influenced that decision. See src/intelligence/pipeline.py's module
+    # docstring for the full invariant list.
+    from .intelligence import pipeline as agent_research_pipeline
+
+    safe_run(
+        logger, "multi-agent research layer (shadow mode)",
+        lambda: agent_research_pipeline.run_shadow_research(ticker_results, report_date, config, logger),
+    )
+
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)
     logger.info("Saved report: %s | %s", csv_path, json_path)
 

@@ -2354,6 +2354,111 @@ moment you tap Approve rather than just once at send time is `aggressive_mode.
 enabled` for Aggressive candidates (see "Read this before you trust the output"
 above).
 
+## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
+
+GitHub Issue #1 includes a comment proposing selective integration of
+[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents) -
+a research framework built around parallel LLM analysts, a bull/bear debate,
+a research manager, and a risk team. `src/intelligence/` is an **independent,
+from-scratch implementation inspired by that architecture, not a port or
+vendored copy of its code.**
+
+### Licensing and dependency posture
+
+Before writing anything, the upstream repository, its dependency footprint
+(LangGraph/LangChain, a different Python package surface than this project
+uses), and its Apache-2.0 license were reviewed, per the Issue #1 comment's
+own instruction to "inspect dependencies, architecture and licensing before
+reusing upstream code." The conclusion: build a lighter, dependency-free,
+deterministic equivalent against data this codebase already computes,
+rather than add that dependency surface or copy licensed code. **No upstream
+code is vendored anywhere in this repository.** If any ever is in the
+future, its Apache-2.0 `LICENSE`/`NOTICE` must ship alongside it.
+
+### Architecture
+
+```
+entry (already fully decided for this run - see "Hard invariants" below)
+  -> analysts.run_all_analysts()      technical / fundamentals / sentiment / news
+  -> debate.run_debate()              bull vs. bear tally across analyst opinions
+  -> research_manager.synthesize_recommendation()   action + confidence + thesis
+  -> risk_reviewer.review()           veto-only: can only move the action toward HOLD
+  -> entry["agent_assessment"]        attached for reporting
+  -> memory.record_assessment()       persisted to a dedicated SQLite database
+```
+
+- **No LLM, no network call, no API key anywhere in this package.** Each
+  analyst is a deterministic, rule-based synthesis of data this codebase
+  already computes per ticker: the rule-based signal score and market regime
+  (`technical`), the institutional-13F/insider-Form4 components `big_money.py`
+  already derives (`fundamentals` - explicitly labeled ownership/insider
+  context, not full financials), the options-flow/sector-rotation components
+  (`sentiment`), and a structurally-present-but-unconfigured placeholder
+  (`news` - always reports "Data Unavailable" until a real provider is
+  configured via `intelligence.news_provider`). This keeps the whole layer
+  reproducible and testable offline, while staying pluggable for a future
+  real LLM/news/fundamentals provider behind the same `AgentOpinion` contract.
+- **Persistent memory + reflection**: every assessment is recorded to
+  `data/journal/agent_research_memory.db` (colocated with `data.journal_dir`,
+  same convention as `ml/decision_ledger.py`). `reflection.py` later joins a
+  resolved real outcome from `ml/decision_ledger.py` (by ticker + report date)
+  and writes a short reflection noting whether the recommendation agreed with
+  what actually happened - surfaced as extra context the next time that
+  ticker is assessed.
+- **Evaluation against the existing AI Quant strategies**:
+  `evaluation.compare_against_quant_agent()` reports agreement between this
+  layer's action and `quant_agent.py`'s decision, plus, once outcomes
+  resolve, which side's call actually matched the realized trade.
+- **Scheduled, unattended runs**: there is no separate process to schedule -
+  `run_shadow_research()` is called once per `python -m src.main` run (the
+  daily research run, already scheduled via launchd/cron - see "Schedule the
+  daily report on Mac" above), so it runs automatically every time the
+  research pipeline runs, with no manual trigger.
+
+### Hard invariants (SHADOW MODE)
+
+1. `intelligence.pipeline.run_shadow_research()` is called in `main.py`
+   **strictly AFTER** `_process_execution_layer()` has already decided and
+   (if applicable) submitted every order for the run - it is structurally
+   impossible for this layer to have influenced that decision, not just
+   policy-disabled.
+2. It is read-only with respect to `best_risk_result`, `regime_evaluation`,
+   `portfolio_evaluation`, and `execution_decision`. It only ever adds
+   `entry["agent_assessment"]`.
+3. `risk_reviewer.py` mirrors `quant_agent.py`'s own hard invariant: it can
+   only move a recommendation *toward* HOLD (veto), never upgrade one.
+4. Untrusted external text (a future news provider's headlines) is only ever
+   treated as evidence to display, never as instructions.
+5. Two learning loops are kept structurally separate: this layer's own
+   hypothetical-recommendation memory (`agent_research_memory.db`) never
+   merges with `ml/decision_ledger.py`'s real broker-paper/simulated P&L data
+   model - `evaluation.py`/`reflection.py` only ever join them read-only.
+6. There is **no config path today** that lets this layer influence
+   `execution_policy.py`, `circuit_breaker.py`, or `portfolio_risk.py` - that
+   gate does not exist yet, deliberately, pending the forward-shadow
+   validation period the Issue #1 comment's integration plan calls for.
+
+### Reading the output
+
+- Per-candidate: a `Multi-agent research (SHADOW, not executed): BUY/SELL/HOLD`
+  line in the Telegram/report text, alongside the existing Big Money and
+  Quant/ML context lines.
+- Report-wide: a "Multi-Agent Research Layer (SHADOW MODE)" section with a
+  BUY/HOLD/SELL tally and agreement rate vs. `quant_agent.py`.
+- `python -c "from src.intelligence import evaluation; ..."` (or a future
+  scheduled report, not yet wired to Telegram) calls
+  `evaluation.compare_against_quant_agent(config)` /
+  `evaluation.format_comparison_report(summary)` for the full go/no-go
+  comparison the Issue #1 comment's deliverable asks for.
+
+### Config
+
+```yaml
+intelligence:
+  enabled: true
+  news_provider: null   # no provider ships today; the news analyst reports Data Unavailable until one is configured
+```
+
 ## Disclaimer
 
 Research and educational tool only. Not financial advice. No trades are placed -

@@ -425,6 +425,23 @@ execution_risk:
   max_open_positions: 6
   max_new_trades_per_day: 3
 
+# Multi-Agent Research Layer (GitHub Issue #1 comment: "Proposal: selectively
+# integrate TauricResearch/TradingAgents as a research-only multi-agent layer").
+# SHADOW MODE ONLY - see src/intelligence/pipeline.py's module docstring for the
+# full invariant list. Runs strictly AFTER the execution layer has already
+# decided/submitted every order this run; it only ever attaches
+# entry["agent_assessment"] for reporting and comparison. There is NO config
+# key anywhere that lets this layer influence execution_policy, circuit_breaker,
+# or portfolio_risk - that gate does not exist yet, deliberately, pending the
+# forward-shadow validation period the Issue #1 comment's integration plan
+# requires before any veto/reduce-only influence is even considered.
+intelligence:
+  enabled: true
+  # No LLM/API key is used by any analyst shipped today (see analysts.py) -
+  # this key exists for a FUTURE pluggable news provider only; leaving it
+  # unset (the default) keeps the news analyst reporting Data Unavailable.
+  news_provider: null
+
 logging:
   level: "INFO"
   log_dir: "data/reports"
