@@ -123,6 +123,24 @@ def test_query_decisions_only_with_outcome_filters_unresolved_rows(tmp_path):
     assert resolved_rows[0]["ticker"] == "AMD"
 
 
+def test_record_decision_persists_model_id_for_rollback_attribution(tmp_path):
+    """GitHub Issue #1 P1: a later outcome must be attributable to the
+    SPECIFIC model version that produced the decision, not just
+    'whichever model is champion today' - this is what makes per-model
+    rollback detection possible at all."""
+    db_path = tmp_path / "ledger.db"
+    decision_ledger.record_decision(db_path, ticker="AMD", decision="AUTO_EXECUTE", model_id="model_abc,model_def")
+    row = decision_ledger.query_decisions(db_path)[0]
+    assert row["model_id"] == "model_abc,model_def"
+
+
+def test_query_decisions_filters_by_model_id(tmp_path):
+    db_path = tmp_path / "ledger.db"
+    decision_ledger.record_decision(db_path, ticker="AMD", decision="AUTO_EXECUTE", model_id="model_v1")
+    decision_ledger.record_decision(db_path, ticker="MSFT", decision="AUTO_EXECUTE", model_id="model_v2")
+    assert len(decision_ledger.query_decisions(db_path, model_id="model_v1")) == 1
+
+
 def test_resolve_db_path_is_always_colocated_with_journal_dir(tmp_path):
     """No separate `ml.decision_ledger_path`-style override - deliberately,
     so redirecting config.data.journal_dir (the established, universal

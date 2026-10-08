@@ -61,6 +61,13 @@ class QuantAssessment:
     calibrated_probability: float | None = None
     model_agreement: float | None = None
     horizon: str | None = None
+    # GitHub Issue #1 P1: which registered model actually produced this
+    # assessment's ML component - carried through to the decision ledger
+    # (main._record_decision_snapshot) so a later real-world outcome can
+    # be attributed to the SPECIFIC model version that made the call, not
+    # just "whichever one is champion today." None whenever no ML
+    # prediction was available at all.
+    model_id: str | None = None
 
 
 def _is_rejected_upstream(entry: dict[str, Any]) -> bool:
@@ -134,6 +141,7 @@ def assess_candidate(
     calibrated_probability = ml_prediction.calibrated_probability if ml_prediction is not None else None
     model_agreement = ml_prediction.model_agreement if ml_prediction is not None else None
     horizon = ml_prediction.horizon if ml_prediction is not None else None
+    model_id = ml_prediction.model_id if ml_prediction is not None else None
 
     if _is_rejected_upstream(entry):
         return QuantAssessment(
@@ -142,6 +150,7 @@ def assess_candidate(
             strategy_edge=strategy_edge_label, decision=DECISION_NOT_ELIGIBLE,
             reasons=["Upstream deterministic gate already rejected this candidate (label/individual risk/regime/portfolio risk) - the Quant Agent cannot override this."] + reasons,
             warnings=warnings, calibrated_probability=calibrated_probability, model_agreement=model_agreement, horizon=horizon,
+            model_id=model_id,
         )
 
     reasons.append(f"Rule-based signal score: {rule_score}/100.")
@@ -171,6 +180,7 @@ def assess_candidate(
         expected_return=expected_return, big_money_score=big_money_display, regime_fit=regime_fit,
         strategy_edge=strategy_edge_label, decision=decision, reasons=reasons, warnings=warnings,
         calibrated_probability=calibrated_probability, model_agreement=model_agreement, horizon=horizon,
+        model_id=model_id,
     )
 
 

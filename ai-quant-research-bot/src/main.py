@@ -339,6 +339,7 @@ def _record_decision_snapshot(entry: dict[str, Any], report_date: str, config: d
             ml_confidence=getattr(quant, "ml_confidence", None),
             calibrated_probability=getattr(quant, "calibrated_probability", None),
             model_horizon=getattr(quant, "horizon", None),
+            model_id=getattr(quant, "model_id", None),
             reasons=decision.reasons if decision is not None else None,
             signal_entry_price=final.get("entry") if final else None,
             stop_loss=final.get("stop_loss") if final else None,

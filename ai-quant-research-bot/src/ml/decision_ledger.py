@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     ml_confidence TEXT,
     calibrated_probability REAL,
     model_horizon TEXT,
+    model_id TEXT,
     decision TEXT NOT NULL,
     decision_reasons TEXT,
     signal_entry_price REAL,
@@ -72,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_decisions_strategy ON decisions(strategy);
 CREATE INDEX IF NOT EXISTS idx_decisions_trade_id ON decisions(trade_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_as_of ON decisions(as_of);
 CREATE INDEX IF NOT EXISTS idx_decisions_regime ON decisions(regime);
+CREATE INDEX IF NOT EXISTS idx_decisions_model_id ON decisions(model_id);
 """
 
 OUTCOME_NOT_TRADED = "NOT_TRADED"
@@ -133,6 +135,7 @@ def record_decision(
     ml_confidence: str | None = None,
     calibrated_probability: float | None = None,
     model_horizon: str | None = None,
+    model_id: str | None = None,
     reasons: list[str] | None = None,
     signal_entry_price: float | None = None,
     stop_loss: float | None = None,
@@ -150,13 +153,13 @@ def record_decision(
         conn.execute(
             """INSERT INTO decisions (
                 decision_id, trade_id, as_of, report_date, ticker, strategy, regime,
-                signal_score, quant_score, ml_confidence, calibrated_probability, model_horizon,
+                signal_score, quant_score, ml_confidence, calibrated_probability, model_horizon, model_id,
                 decision, decision_reasons, signal_entry_price, stop_loss, target_price,
                 planned_shares, dollar_risk
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 decision_id, trade_id, as_of or _now_iso(), report_date, ticker, strategy, regime,
-                signal_score, quant_score, ml_confidence, calibrated_probability, model_horizon,
+                signal_score, quant_score, ml_confidence, calibrated_probability, model_horizon, model_id,
                 decision, "; ".join(reasons) if reasons else None, signal_entry_price, stop_loss, target_price,
                 planned_shares, dollar_risk,
             ),
@@ -222,6 +225,7 @@ def query_decisions(
     strategy: str | None = None,
     ticker: str | None = None,
     regime: str | None = None,
+    model_id: str | None = None,
     only_with_outcome: bool = False,
 ) -> list[dict[str, Any]]:
     """Returns matching rows, oldest first, as plain dicts - never raises
@@ -246,6 +250,9 @@ def query_decisions(
     if regime is not None:
         clauses.append("regime = ?")
         params.append(regime)
+    if model_id is not None:
+        clauses.append("model_id = ?")
+        params.append(model_id)
     if only_with_outcome:
         clauses.append("outcome_status IS NOT NULL")
 
