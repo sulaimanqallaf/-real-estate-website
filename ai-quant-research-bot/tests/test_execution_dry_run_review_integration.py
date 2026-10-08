@@ -6,13 +6,22 @@ every Top Candidate.
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
 from src.main import _process_execution_layer
+
+# A fixed Wednesday, mid-session NY time - every test here injects this
+# instead of relying on real wall-clock time, so results never depend on
+# what day/hour the suite happens to run (previously these tests failed
+# outside 9:30-16:00 ET on a weekday, and would ALSO have failed on any
+# weekend even within that window).
+TRADING_HOURS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 def qa(confidence="VERY_HIGH", edge="POSITIVE"):
@@ -110,7 +119,7 @@ def test_dry_run_never_touches_any_broker_method_even_for_an_auto_execute_grade_
     poisoned = _PoisonedBroker()
 
     with caplog.at_level(logging.INFO):
-        executed = _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=poisoned)
+        executed = _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=poisoned, now=TRADING_HOURS_NOW)
 
     assert executed == set()
     assert entry["execution_decision"].decision == "AUTO_EXECUTE"  # correctly classified - just never acted on
@@ -120,7 +129,7 @@ def test_dry_run_never_touches_any_broker_method_even_for_an_auto_execute_grade_
 def test_dry_run_review_logs_every_top_candidate_not_only_auto_execute_grade_ones(dry_run_config, caplog):
     weak_entry = make_entry("MSFT", score=50)  # fails AUTO_EXECUTE's minimum_signal_score, still a Top Candidate
     with caplog.at_level(logging.INFO):
-        executed = _process_execution_layer([weak_entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None)
+        executed = _process_execution_layer([weak_entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None, now=TRADING_HOURS_NOW)
 
     assert executed == set()
     assert weak_entry["execution_decision"].decision == "REQUIRE_APPROVAL"
@@ -131,7 +140,7 @@ def test_dry_run_review_logs_every_top_candidate_not_only_auto_execute_grade_one
 def test_dry_run_review_reports_would_submit_no_for_a_blocked_candidate(dry_run_config, caplog):
     entry = make_entry("TSLA", portfolio_evaluation={"decision": "ACCEPT", "position": {"strategy": "Trend Following", "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "shares": 10, "dollar_risk": 5000.0, "risk_reward": 3.0}})
     with caplog.at_level(logging.INFO):
-        _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None)
+        _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None, now=TRADING_HOURS_NOW)
 
     review_logs = [r.message for r in caplog.records if "DRY_RUN ORDER REVIEW" in r.message and "TSLA" in r.message]
     assert review_logs
@@ -144,7 +153,7 @@ def test_avoid_candidate_never_reviewed_at_all_in_dry_run(dry_run_config, caplog
     other execution-layer path in this codebase."""
     entry = make_entry("GME", label="Avoid")
     with caplog.at_level(logging.INFO):
-        _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None)
+        _process_execution_layer([entry], "2026-09-09", dry_run_config, logging.getLogger("test"), None, None, broker=None, now=TRADING_HOURS_NOW)
 
     review_logs = [r.message for r in caplog.records if "DRY_RUN ORDER REVIEW" in r.message and "GME" in r.message]
     assert review_logs == []

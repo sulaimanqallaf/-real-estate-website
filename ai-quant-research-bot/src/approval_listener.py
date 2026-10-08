@@ -15,8 +15,6 @@ button presses.
 
 from __future__ import annotations
 
-import fcntl
-import os
 import sys
 import time
 from pathlib import Path
@@ -24,18 +22,15 @@ from typing import Any
 
 from . import paper_trades, telegram_bot
 from .execution import approval_bridge, telegram_commands
+from .execution.process_lock import ProcessAlreadyRunningError, acquire_singleton_lock
 from .utils import get_env_var, load_config, load_env, resolve_path, setup_logging
 
 _LOCK_FILENAME = "approval_listener.lock"
 
-
-class ApprovalListenerAlreadyRunningError(Exception):
-    """Raised by `_acquire_singleton_lock()` when another approval_listener
-    process already holds the lock. Telegram's `getUpdates` long-poll
-    allows only ONE active poller per bot token - a second one causes
-    HTTP 409 Conflict and can silently race/duplicate button handling, so
-    a second local instance must fail loudly and immediately rather than
-    start polling anyway."""
+# Kept as the historical name this module has always raised/exported (and
+# what existing tests import) - a plain alias onto the shared
+# process_lock.py implementation also used by position_monitor.py.
+ApprovalListenerAlreadyRunningError = ProcessAlreadyRunningError
 
 
 def _lock_path(config: dict[str, Any]) -> Path:
@@ -43,33 +38,18 @@ def _lock_path(config: dict[str, Any]) -> Path:
 
 
 def _acquire_singleton_lock(config: dict[str, Any]) -> Any:
-    """Takes an exclusive, non-blocking `flock` on a lock file in the
-    journal dir. Returns the open file object - the CALLER must keep a
-    reference to it alive for the life of the process (closing it, or the
-    process exiting/crashing for any reason, releases the lock
-    automatically; the OS owns this, unlike a hand-rolled PID file that
-    can go stale after an unclean exit). Raises
-    `ApprovalListenerAlreadyRunningError` if another process already
-    holds it."""
-    path = _lock_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(path, "w")
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        lock_file.close()
-        raise ApprovalListenerAlreadyRunningError(
-            f"Another approval_listener is already running (lock held on {path}). Telegram "
-            "allows only ONE getUpdates poller per bot token - running two causes HTTP 409 "
-            "Conflict and can race/duplicate button handling. If you don't know which one: "
-            "`launchctl list | grep aiquantresearchbot` (a KeepAlive LaunchAgent will relaunch "
-            "a listener you kill from a terminal - unload it first with `launchctl unload "
-            "~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist` if you want to run "
-            "one manually instead), and `ps aux | grep approval_listener`."
-        ) from exc
-    lock_file.write(str(os.getpid()))
-    lock_file.flush()
-    return lock_file
+    return acquire_singleton_lock(
+        _lock_path(config),
+        process_label="approval_listener",
+        extra_hint=(
+            "Telegram allows only ONE getUpdates poller per bot token - running two causes "
+            "HTTP 409 Conflict and can race/duplicate button handling. If you don't know "
+            "which one: `launchctl list | grep aiquantresearchbot` (a KeepAlive LaunchAgent "
+            "will relaunch a listener you kill from a terminal - unload it first with "
+            "`launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist` "
+            "if you want to run one manually instead), and `ps aux | grep approval_listener`."
+        ),
+    )
 
 
 def _offset_path(config: dict[str, Any]) -> Path:

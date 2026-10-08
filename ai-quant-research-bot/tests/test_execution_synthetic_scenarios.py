@@ -7,7 +7,9 @@ few cross-cutting Integration-category checks: the full pipeline
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -18,6 +20,13 @@ from src.execution.broker import ACCOUNT_MODE_LIVE, ACCOUNT_MODE_PAPER, FakeBrok
 from src.main import _process_execution_layer
 
 logger = logging.getLogger("test")
+
+# A fixed Wednesday, mid-session NY time - injected wherever a scenario
+# expects an entry to actually pass the trading-hours check, so results
+# never depend on the real wall-clock weekday the suite happens to run on
+# (the config's "00:00-23:59" window only widens the HOUR check -
+# is_within_trading_hours() hard-blocks Sat/Sun regardless of that).
+FIXED_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 def qa(confidence="VERY_HIGH", edge="POSITIVE"):
@@ -103,9 +112,35 @@ def test_scenario_a_auto_disabled_routes_to_approval_no_broker_contact(config):
 def test_scenario_b_auto_enabled_paper_verified_executes_autonomously(config):
     broker = paper_broker()
     entry = make_entry()
-    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker)
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
     assert executed == {"AMD"}
     assert len(broker.submitted_intents) == 1
+
+
+# --- B2: auto enabled, broker REJECTS the order -> a Telegram notice fires ---------
+
+
+def test_scenario_b2_auto_execute_broker_rejection_sends_a_telegram_notice(config, monkeypatch):
+    """Previously this was silent except for a log line - the user must be
+    told, not just the log file, that an AUTO_EXECUTE attempt actually
+    reached the broker and was turned down."""
+    from src.execution.broker import BrokerOrderRejected
+
+    broker = paper_broker()
+
+    def rejecting_submit(intent):
+        raise BrokerOrderRejected("TWS rejected: percentage constraint")
+
+    monkeypatch.setattr(broker, "submit_order", rejecting_submit)
+
+    sent = []
+    monkeypatch.setattr("src.telegram_bot.send_telegram_message", lambda token, chat_id, text, logger: sent.append(text) or True)
+
+    entry = make_entry()
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, "TOKEN", "123", broker=broker, now=FIXED_NOW)
+
+    assert executed == set()  # never counted as executed
+    assert any("REJECTED" in t and "AMD" in t for t in sent)
 
 
 # --- C: same candidate, LIVE account -> hard block, zero broker orders --------------
@@ -127,7 +162,7 @@ def test_scenario_d_partial_fill_protects_only_filled_shares(config):
 
     broker = paper_broker()
     entry = make_entry("NVDA")
-    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker)
+    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
     entry_order = broker.submitted_intents[0]
     broker_order = [o for o in broker._orders.values() if o.ticker == "NVDA"][0]
     broker.simulate_fill(broker_order.broker_order_id, shares=4, price=100.0)
@@ -154,7 +189,7 @@ def test_scenario_e_restart_after_submission_never_duplicates(config):
 
     broker = paper_broker()
     entry = make_entry("TSLA")
-    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker)
+    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
     assert len(broker.submitted_intents) == 1
 
     # Simulate the process restarting: a fresh manager rehydrated from the
@@ -265,7 +300,7 @@ def test_scenario_k_manual_approval_rechecks_gates_and_executes_only_if_still_va
         "symbol": "AMD", "strategy": "Trend Following", "score": 90,
         "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "shares": 10, "dollar_risk": 50.0,
     }
-    result = approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=100.1, logger=logger)
+    result = approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=100.1, logger=logger, now=FIXED_NOW)
     assert result["executed"] is True
     assert len(broker.submitted_intents) == 1
 
@@ -278,7 +313,7 @@ def test_scenario_l_closed_trade_records_actual_fill_in_execution_journal(config
 
     broker = paper_broker()
     entry = make_entry("AMD")
-    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker)
+    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
     entry_order = broker.submitted_intents[0]
     broker_order = [o for o in broker._orders.values() if o.ticker == "AMD"][0]
     broker.simulate_fill(broker_order.broker_order_id, shares=10, price=100.15)
@@ -304,7 +339,7 @@ def test_scenario_l_closed_trade_records_actual_fill_in_execution_journal(config
 def test_dry_run_mode_never_contacts_any_broker_even_with_an_auto_execute_candidate(config):
     config["execution"]["mode"] = "DRY_RUN"
     entry = make_entry("AMD")
-    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=None)
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=None, now=FIXED_NOW)
     assert executed == set()
     assert entry["execution_decision"].decision == "AUTO_EXECUTE"  # correctly classified, just never acted on
 
@@ -335,5 +370,5 @@ def test_src_main_module_imports_with_no_ibapi_installed():
 
 def test_a_top_candidate_with_no_execution_mode_configured_defaults_to_dry_run():
     entry = make_entry("AMD")
-    executed = _process_execution_layer([entry], "2026-09-09", {}, logger, None, None, broker=None)
+    executed = _process_execution_layer([entry], "2026-09-09", {}, logger, None, None, broker=None, now=FIXED_NOW)
     assert executed == set()

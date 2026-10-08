@@ -181,3 +181,57 @@ def test_run_one_tick_never_raises_even_if_one_managed_order_poll_fails(monkeypa
     monkeypatch.setattr(manager, "poll_entry_fill", boom)
     tick = position_monitor.run_one_tick(broker, manager, PERMISSIVE_CONFIG, [], logger)
     assert tick["connection_state"] == CONNECTION_CONNECTED  # did not raise/crash the tick
+
+
+# --- singleton lock: exactly one position_monitor may run at a time ----------------
+
+
+def test_position_monitor_singleton_lock_rejects_a_second_instance(tmp_path):
+    from src.execution.process_lock import ProcessAlreadyRunningError, acquire_singleton_lock
+
+    lock_path = tmp_path / position_monitor._LOCK_FILENAME
+    first = acquire_singleton_lock(lock_path, process_label="position_monitor")
+    try:
+        with pytest.raises(ProcessAlreadyRunningError):
+            acquire_singleton_lock(lock_path, process_label="position_monitor")
+    finally:
+        first.close()
+
+
+def test_position_monitor_main_resumes_in_flight_orders_from_the_journal(tmp_path, monkeypatch):
+    """The actual recovery contract for `python -m src.execution.
+    position_monitor`: an order submitted by a prior/different process
+    (e.g. main.py's auto-execution) must be resumed, not orphaned, on
+    restart. Exercises the real `main()` wiring (lock + restore +
+    run_forever) with everything below it faked, rather than only the
+    smaller restore_from_journal_rows unit covered elsewhere."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    journal_path = journal_dir / "executions.jsonl"
+
+    broker = FakeBroker()
+    broker.connect()
+    pre_existing_manager = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, order_manager.ExecutionJournal(journal_path))
+    pre_existing_manager.submit_entry(make_intent(ticker="NVDA"))
+
+    config = {
+        "data": {"journal_dir": str(journal_dir)},
+        "execution": {"mode": "IBKR_PAPER", "journal_path": str(journal_path)},
+    }
+    monkeypatch.setattr("src.utils.load_env", lambda: None)
+    monkeypatch.setattr("src.utils.load_config", lambda _path=None: config)
+    monkeypatch.setattr("src.utils.setup_logging", lambda cfg, log_filename=None: logger)
+    monkeypatch.setattr("src.execution.ibkr_client.IBKRClient", lambda: broker)
+
+    captured = {}
+
+    def fake_run_forever(broker_arg, manager_arg, config_arg, logger_arg, **kwargs):
+        captured["manager"] = manager_arg
+
+    monkeypatch.setattr(position_monitor, "run_forever", fake_run_forever)
+
+    exit_code = position_monitor.main()
+    assert exit_code == 0
+    resumed = captured["manager"].all_managed()
+    assert len(resumed) == 1
+    assert resumed[0].intent.ticker == "NVDA"

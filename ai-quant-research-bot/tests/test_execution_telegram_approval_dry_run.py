@@ -6,7 +6,9 @@ and never contacts IBKR, no matter what.
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -17,6 +19,12 @@ import src.paper_trades as paper_trades
 from src.main import _process_execution_layer, _send_paper_trade_approvals
 
 logger = logging.getLogger("test")
+
+# A fixed Wednesday, mid-session NY time - AMD's "would_submit: YES"
+# review depends on passing the trading-hours check, which the config's
+# "00:00-23:59" window alone cannot guarantee (is_within_trading_hours()
+# hard-blocks Sat/Sun regardless of configured hours).
+FIXED_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 def qa(confidence="VERY_HIGH", edge="POSITIVE"):
@@ -89,7 +97,7 @@ def test_valid_candidate_gets_an_approval_button(dry_run_config, monkeypatch):
     monkeypatch.setattr("src.telegram_bot.send_message_with_keyboard", lambda token, chat_id, text, keyboard, logger: sent.append(text) or 1)
 
     entry = make_entry("AMD")
-    blocked = _process_execution_layer([entry], "2026-09-09", dry_run_config, logger, None, None, broker=None)
+    blocked = _process_execution_layer([entry], "2026-09-09", dry_run_config, logger, None, None, broker=None, now=FIXED_NOW)
     assert blocked == set()  # AMD is fully valid - not blocked
 
     _send_paper_trade_approvals([entry], "2026-09-09", "tok", "chat1", dry_run_config, logger, skip_tickers=blocked)
@@ -109,7 +117,7 @@ def test_blocked_candidate_gets_no_approval_button(dry_run_config, monkeypatch):
             "position": {"strategy": "Trend Following", "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "shares": 10, "dollar_risk": 5000.0, "risk_reward": 3.0},
         },
     )
-    blocked = _process_execution_layer([entry], "2026-09-09", dry_run_config, logger, None, None, broker=None)
+    blocked = _process_execution_layer([entry], "2026-09-09", dry_run_config, logger, None, None, broker=None, now=FIXED_NOW)
     assert blocked == {"TSLA"}
 
     _send_paper_trade_approvals([entry], "2026-09-09", "tok", "chat1", dry_run_config, logger, skip_tickers=blocked)
@@ -129,7 +137,7 @@ def test_mixed_batch_only_valid_candidate_gets_a_button(dry_run_config, monkeypa
         },
     )
     ticker_results = [valid_entry, blocked_entry]
-    blocked = _process_execution_layer(ticker_results, "2026-09-09", dry_run_config, logger, None, None, broker=None)
+    blocked = _process_execution_layer(ticker_results, "2026-09-09", dry_run_config, logger, None, None, broker=None, now=FIXED_NOW)
     assert blocked == {"TSLA"}
 
     _send_paper_trade_approvals(ticker_results, "2026-09-09", "tok", "chat1", dry_run_config, logger, skip_tickers=blocked)

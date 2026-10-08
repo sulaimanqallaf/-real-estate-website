@@ -3,6 +3,7 @@ breaker, manual halt, max open positions, max new trades/day) and the
 "never loosen existing limits" invariant.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -191,3 +192,166 @@ def test_cli_halt_resume_status_round_trip(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(_sys, "argv", ["circuit_breaker", "resume"])
     cb.main()
     assert not halt_file.exists()
+
+
+# --- live_risk_inputs: the daily/weekly/drawdown/new-trade/open-position breakers ---
+# must actually be fed real numbers, not just be definable - these prove the feed,
+# then prove it actually blocks a real entry end to end.
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+from src import paper_trades  # noqa: E402
+
+
+def _closed_row(ticker="AMD", opened_at="2026-09-09", exited_at="2026-09-09", pnl_dollars=0.0, status="TARGET_HIT"):
+    row = {col: "" for col in paper_trades.PAPER_TRADE_COLUMNS}
+    row.update(
+        trade_id=f"{ticker}_{opened_at}_x", ticker=ticker, strategy="Trend Following", mode="",
+        status=status, opened_at=opened_at, exited_at=exited_at, exit_price=100.0, exit_reason="test",
+        pnl_dollars=pnl_dollars, pnl_pct=0.0, holding_days=0, entry_price=100.0, position_size=10,
+    )
+    return row
+
+
+def _open_row(ticker="NVDA", opened_at="2026-09-09"):
+    row = {col: "" for col in paper_trades.PAPER_TRADE_COLUMNS}
+    row.update(trade_id=f"{ticker}_{opened_at}_x", ticker=ticker, strategy="Trend Following", status="OPEN", opened_at=opened_at, entry_price=100.0, position_size=10)
+    return row
+
+
+def _config_with_paper_trades(tmp_path, rows, account_equity=10_000.0):
+    import pandas as pd
+
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    df = pd.DataFrame(rows, columns=paper_trades.PAPER_TRADE_COLUMNS)
+    config = {
+        "data": {"journal_dir": str(journal_dir)},
+        "paper_trading": {"paper_trades_file": "paper_trades.csv"},
+        "risk": {"account_equity": account_equity},
+    }
+    paper_trades.save_paper_trades_df(df, config)
+    return config
+
+
+AS_OF = datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc)  # a Wednesday
+
+
+def test_compute_daily_realized_pnl_pct_sums_only_todays_closes(tmp_path):
+    rows = [_closed_row(exited_at="2026-09-09", pnl_dollars=-50.0), _closed_row(exited_at="2026-09-08", pnl_dollars=-500.0)]
+    config = _config_with_paper_trades(tmp_path, rows)
+    df = paper_trades.load_paper_trades_df(config)
+    pct = cb.compute_daily_realized_pnl_pct(df, AS_OF, config["risk"]["account_equity"])
+    assert pct == pytest.approx(-50.0 / 10_000.0)
+
+
+def test_compute_daily_realized_pnl_pct_is_zero_not_none_with_no_trades_today(tmp_path):
+    config = _config_with_paper_trades(tmp_path, [])
+    df = paper_trades.load_paper_trades_df(config)
+    assert cb.compute_daily_realized_pnl_pct(df, AS_OF, config["risk"]["account_equity"]) == 0.0
+
+
+def test_compute_weekly_realized_pnl_pct_sums_the_whole_week(tmp_path):
+    # 2026-09-09 is a Wednesday; Monday is 2026-09-07.
+    rows = [_closed_row(exited_at="2026-09-07", pnl_dollars=-100.0), _closed_row(exited_at="2026-09-09", pnl_dollars=-50.0), _closed_row(exited_at="2026-08-31", pnl_dollars=-9999.0)]
+    config = _config_with_paper_trades(tmp_path, rows)
+    df = paper_trades.load_paper_trades_df(config)
+    pct = cb.compute_weekly_realized_pnl_pct(df, AS_OF, config["risk"]["account_equity"])
+    assert pct == pytest.approx(-150.0 / 10_000.0)
+
+
+def test_compute_current_drawdown_pct_reflects_the_running_equity_curve(tmp_path):
+    rows = [_closed_row(exited_at="2026-09-01", pnl_dollars=500.0), _closed_row(exited_at="2026-09-05", pnl_dollars=-1000.0)]
+    config = _config_with_paper_trades(tmp_path, rows)
+    df = paper_trades.load_paper_trades_df(config)
+    pct = cb.compute_current_drawdown_pct(df, config["risk"]["account_equity"])
+    # peak equity = 10500 (after the +500 trade); current = 9500 -> drawdown = 1000/10500
+    assert pct == pytest.approx(1000.0 / 10_500.0)
+
+
+def test_compute_current_drawdown_pct_is_zero_with_no_closed_trades(tmp_path):
+    config = _config_with_paper_trades(tmp_path, [])
+    df = paper_trades.load_paper_trades_df(config)
+    assert cb.compute_current_drawdown_pct(df, config["risk"]["account_equity"]) == 0.0
+
+
+def test_count_new_trades_today_counts_rows_opened_today_only(tmp_path):
+    rows = [_open_row(opened_at="2026-09-09"), _open_row(ticker="AMD", opened_at="2026-09-09"), _closed_row(opened_at="2026-09-08", exited_at="2026-09-09")]
+    config = _config_with_paper_trades(tmp_path, rows)
+    df = paper_trades.load_paper_trades_df(config)
+    assert cb.count_new_trades_today(df, AS_OF) == 2
+
+
+def test_count_current_open_positions_counts_only_open_status(tmp_path):
+    rows = [_open_row(), _open_row(ticker="AMD"), _closed_row()]
+    config = _config_with_paper_trades(tmp_path, rows)
+    df = paper_trades.load_paper_trades_df(config)
+    assert cb.count_current_open_positions(df) == 2
+
+
+def test_live_risk_inputs_returns_every_key_check_all_expects(tmp_path):
+    config = _config_with_paper_trades(tmp_path, [_closed_row(pnl_dollars=-10.0)])
+    inputs = cb.live_risk_inputs(config, as_of=AS_OF)
+    assert set(inputs) == {"realized_pnl_today_pct", "realized_pnl_week_pct", "current_drawdown_pct", "new_trades_today", "current_open_positions"}
+
+
+def test_live_risk_inputs_degrades_cleanly_with_an_incomplete_config():
+    """A config with no data.journal_dir/paper_trading section (common in
+    unit tests, and theoretically a genuinely incomplete deployment
+    config) must never crash the caller - every breaker simply has
+    nothing to trip on, same as "Data Unavailable" everywhere else."""
+    inputs = cb.live_risk_inputs({"risk": {"account_equity": 10_000}})
+    assert inputs["new_trades_today"] == 0
+    assert inputs["current_open_positions"] == 0
+
+
+def test_daily_loss_breaker_actually_trips_a_real_entry_via_approval_bridge(tmp_path):
+    """End-to-end proof (not just the unit computation above): a real
+    day's realized loss, read from paper_trades.csv exactly as it would
+    be in production, blocks a brand-new entry through the SAME
+    execute_approved_trade() path AUTO_EXECUTE and manual Telegram
+    approval both use."""
+    from src.execution import approval_bridge, order_manager
+    from src.execution.broker import FakeBroker
+
+    # execute_approved_trade() always evaluates against the real current
+    # time (no `as_of` injection point, deliberately - production entries
+    # are always "right now") - so this trade must be dated TODAY for the
+    # daily-loss window to actually include it.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    config = _config_with_paper_trades(tmp_path, [_closed_row(exited_at=today, pnl_dollars=-200.0)], account_equity=10_000.0)
+    config["execution_risk"] = {"max_daily_loss_pct": 0.01}  # -200/10_000 = -2% > 1% limit
+    config["execution"] = {"trading_hours_start": "00:00", "trading_hours_end": "23:59"}
+
+    broker = FakeBroker()
+    broker.connect()
+    manager = order_manager.OrderManager(broker, config)
+    record = {"symbol": "AMD", "strategy": "Trend Following", "score": 90, "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "shares": 10, "dollar_risk": 50.0}
+
+    result = approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=100.0, logger=logging.getLogger("test"))
+
+    assert result["executed"] is False
+    assert cb.BREAKER_DAILY_LOSS_LIMIT in result["reasons"]
+    assert broker.submitted_intents == []
+
+
+def test_max_new_trades_per_day_breaker_actually_trips_a_real_entry(tmp_path):
+    from src.execution import approval_bridge, order_manager
+    from src.execution.broker import FakeBroker
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    config = _config_with_paper_trades(tmp_path, [_open_row(ticker="NVDA", opened_at=today), _open_row(ticker="MSFT", opened_at=today)])
+    config["execution_risk"] = {"max_new_trades_per_day": 2}
+    config["execution"] = {"trading_hours_start": "00:00", "trading_hours_end": "23:59"}
+
+    broker = FakeBroker()
+    broker.connect()
+    manager = order_manager.OrderManager(broker, config)
+    record = {"symbol": "AMD", "strategy": "Trend Following", "score": 90, "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "shares": 10, "dollar_risk": 50.0}
+
+    result = approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=100.0, logger=logging.getLogger("test"))
+
+    assert result["executed"] is False
+    assert cb.BREAKER_MAX_NEW_TRADES_PER_DAY in result["reasons"]
+    assert broker.submitted_intents == []

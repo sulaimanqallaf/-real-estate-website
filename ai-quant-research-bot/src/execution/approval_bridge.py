@@ -41,6 +41,7 @@ def execute_approved_trade(
     current_market_price: float | None,
     logger: logging.Logger,
     trade_id: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """`record` is a `pending_approvals.json` entry (see `paper_trades.
     pending_record_from_entry`) after `paper_trades.process_decision()`
@@ -49,7 +50,11 @@ def execute_approved_trade(
     only decides whether to also place a broker order for it. A refusal
     here still leaves the trade correctly recorded as an internal
     simulated paper position (unchanged Phase 3 behavior) - it just never
-    reaches IBKR."""
+    reaches IBKR. `now` (optional, defaults to real current NY time) is
+    threaded into the trading-hours check only - tests inject a fixed
+    timestamp so a result never depends on the real wall-clock weekday/
+    hour the suite happens to run at; production code always leaves it
+    unset."""
     reasons: list[str] = []
 
     account = None
@@ -63,10 +68,13 @@ def execute_approved_trade(
     if broker.connection_state() != "CONNECTED":
         reasons.append("BROKER_DISCONNECTED")
 
-    breaker_result = circuit_breaker.check_all(config, account=account, connection_state=broker.connection_state())
+    breaker_result = circuit_breaker.check_all(
+        config, account=account, connection_state=broker.connection_state(),
+        **circuit_breaker.live_risk_inputs(config),
+    )
     reasons.extend(breaker_result.tripped)
 
-    hours_reason = pretrade_checks.check_trading_hours(_now_ny(), config)
+    hours_reason = pretrade_checks.check_trading_hours(now or _now_ny(), config)
     if hours_reason:
         reasons.append(hours_reason)
 
@@ -113,6 +121,7 @@ def handle_manual_approval(
     config: dict[str, Any],
     logger: logging.Logger,
     broker: Broker | None = None,
+    now: datetime | None = None,
 ) -> tuple[bool, str]:
     """Routes one Telegram button press through the correct path for the
     CURRENT `execution.mode` - the manual-approval continuation of Part R.
@@ -139,6 +148,11 @@ def handle_manual_approval(
     there is no separate `IBKR_PAPER_MANUAL` config value; manual vs.
     autonomous is entirely decided by `autonomous_paper.enabled`/
     `auto_execute.enabled`, which this function never reads or changes.
+
+    `now` (optional, defaults to real current time) is threaded straight
+    into `execute_approved_trade()`'s trading-hours check - test-only;
+    production always leaves it unset, since a real Telegram button tap
+    has no legitimate reason to pretend it happened at any time but now.
     """
     from .. import data_collector, paper_trades
     from . import order_manager
@@ -170,7 +184,7 @@ def handle_manual_approval(
 
         trade_id = paper_trades.generate_trade_id(symbol, report_date)
         current_price = data_collector.fetch_current_price(symbol, logger)
-        result = execute_approved_trade(record, config, broker, manager, current_market_price=current_price, logger=logger, trade_id=trade_id)
+        result = execute_approved_trade(record, config, broker, manager, current_market_price=current_price, logger=logger, trade_id=trade_id, now=now)
 
         if not result.get("executed"):
             reasons = "; ".join(result.get("reasons", []))

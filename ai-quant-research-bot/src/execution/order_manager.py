@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,15 +66,34 @@ class DuplicateIntentError(Exception):
     pass
 
 
+def _intent_from_dict(data: dict[str, Any]) -> OrderIntent:
+    """Inverse of `ExecutionJournal.record_state()`'s `intent` payload -
+    reconstructs the exact `OrderIntent` a journal row's ManagedOrder was
+    submitted with, so a restarted process can resume managing it (poll
+    fills, sync protection) rather than only knowing "a trade_id exists"."""
+    payload = dict(data)
+    payload["created_at"] = datetime.fromisoformat(payload["created_at"])
+    return OrderIntent(**payload)
+
+
 class OrderManager:
     """Owns the CREATED -> SUBMITTED -> ... -> CLOSED lifecycle for every
     intent this process has ever submitted, and is the ONLY thing in this
     codebase allowed to call `broker.submit_order()`."""
 
-    def __init__(self, broker: Broker, config: dict[str, Any], journal: "ExecutionJournal | None" = None):
+    def __init__(self, broker: Broker, config: dict[str, Any], journal: "ExecutionJournal | None" = None, on_event: Any = None):
         self.broker = broker
         self.config = config
         self.journal = journal
+        # Optional `(event: str, managed: ManagedOrder, extra: dict) -> None`
+        # hook, called every time `_record()` journals a state transition -
+        # lets a caller (position_monitor.py, main.py's auto-execution)
+        # turn "rejected"/"fill"/"protection_synced" into a Telegram notice
+        # without order_manager.py itself knowing anything about Telegram.
+        # A raising callback is swallowed here on purpose: a notification
+        # failure must never be allowed to break order management, which
+        # is why `_record()` still journals the transition FIRST either way.
+        self.on_event = on_event
         self._managed: dict[str, ManagedOrder] = {}  # keyed by intent_id
         self._trade_id_index: dict[str, str] = {}  # trade_id -> intent_id, for idempotency
 
@@ -109,15 +129,58 @@ class OrderManager:
         return False
 
     def restore_from_journal_rows(self, rows: list[dict[str, Any]]) -> None:
-        """Rehydrate in-memory idempotency state from a persisted journal
-        (Part I: "A restart must NOT send the same order again") - called
-        once at process startup before any new submission is attempted."""
+        """Rehydrate in-memory state from a persisted journal - called once
+        at process startup before any new submission is attempted, and the
+        ONLY thing that makes restart recovery actually work (Part I/J):
+
+        - Duplicate prevention (`is_duplicate()`'s trade_id index), as
+          before.
+        - A full `ManagedOrder` rebuilt into `self._managed` for every
+          intent_id whose last recorded state is non-terminal - this is
+          what lets a restarted `position_monitor` keep polling fills and
+          syncing stop/target protection for an order a DIFFERENT (now-
+          dead) process submitted, instead of silently losing track of it
+          until the next full reconciliation discrepancy. Without this, a
+          process that dies with an open entry order, a partial fill, or
+          active protection orphans all of it on restart.
+
+        The journal is append-only, so the LAST "state" row for a given
+        intent_id is authoritative; earlier rows for the same intent_id are
+        superseded, not merged."""
+        latest_by_intent: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if row.get("event") != "state" or not row.get("trade_id"):
+            if row.get("event") != "state" or not row.get("intent_id"):
                 continue
+            latest_by_intent[row["intent_id"]] = row
+
+        for intent_id, row in latest_by_intent.items():
             state = row.get("state")
-            if state not in (STATE_CANCELLED, STATE_REJECTED, STATE_CLOSED, STATE_ERROR):
-                self._trade_id_index[row["trade_id"]] = row.get("intent_id", row["trade_id"])
+            trade_id = row.get("trade_id")
+            if trade_id and state not in (STATE_CANCELLED, STATE_REJECTED, STATE_CLOSED, STATE_ERROR):
+                self._trade_id_index[trade_id] = intent_id
+
+            if state in (STATE_CANCELLED, STATE_REJECTED, STATE_CLOSED, STATE_ERROR):
+                continue  # terminal - nothing left to manage; the trade_id index entry above is skipped too
+
+            intent_data = row.get("intent")
+            if intent_data is None:
+                continue  # an older journal row written before intents were persisted in full - duplicate index above still works, there's just nothing to rebuild
+
+            try:
+                intent = _intent_from_dict(intent_data)
+            except (TypeError, ValueError, KeyError):
+                continue  # fail closed on a corrupt row - never guess an intent back into existence
+
+            self._managed[intent_id] = ManagedOrder(
+                intent=intent,
+                state=state or STATE_CREATED,
+                entry_broker_order_id=row.get("entry_broker_order_id"),
+                stop_broker_order_id=row.get("stop_broker_order_id"),
+                target_broker_order_id=row.get("target_broker_order_id"),
+                filled_quantity=row.get("filled_quantity") or 0.0,
+                avg_fill_price=row.get("avg_fill_price"),
+                rejection_reason=row.get("rejection_reason"),
+            )
 
     def submit_entry(self, intent: OrderIntent, allowed_tickers: set[str] | None = None) -> ManagedOrder:
         errors = order_state.validate_intent(intent, self.config, allowed_tickers)
@@ -189,6 +252,16 @@ class OrderManager:
 
         if broker_order.filled_quantity > managed.filled_quantity:
             self._apply_fill(managed, broker_order.filled_quantity, broker_order.avg_fill_price)
+        elif managed.filled_quantity > 0 and (managed.stop_broker_order_id is None or managed.target_broker_order_id is None):
+            # Recovery path: a genuinely filled position with no NEW fill
+            # to report can still be missing its protection - e.g. the
+            # process died between _apply_fill()'s "fill" journal row and
+            # _sync_protection() actually placing the stop/target leg(s),
+            # or a restart rebuilt this ManagedOrder from a journal row
+            # recorded at that exact gap. Waiting for a NEW fill would
+            # never catch this if the position is already fully filled -
+            # so every poll re-checks protection completeness directly.
+            self._sync_protection(managed)
 
         return managed
 
@@ -214,6 +287,8 @@ class OrderManager:
         if protect_qty <= 0:
             return
 
+        just_created = managed.stop_broker_order_id is None and managed.target_broker_order_id is None
+
         stop_intent = _exit_intent(managed.intent, order_state.ORDER_TYPE_STOP, managed.intent.stop_loss, protect_qty)
         target_intent = _exit_intent(managed.intent, order_state.ORDER_TYPE_LIMIT, managed.intent.target_price, protect_qty)
 
@@ -228,7 +303,7 @@ class OrderManager:
             self.broker.replace_order(managed.target_broker_order_id, quantity=protect_qty)
 
         managed.state = STATE_EXIT_PENDING if managed.state == STATE_FILLED else managed.state
-        self._record(managed, event="protection_synced", protected_quantity=protect_qty)
+        self._record(managed, event="protection_synced", protected_quantity=protect_qty, _protection_just_created=just_created)
 
     def cancel_entry(self, intent_id: str) -> bool:
         managed = self._managed[intent_id]
@@ -254,6 +329,11 @@ class OrderManager:
     def _record(self, managed: ManagedOrder, event: str, **extra: Any) -> None:
         if self.journal is not None:
             self.journal.record_state(managed, event=event, extra=extra)
+        if self.on_event is not None:
+            try:
+                self.on_event(event, managed, extra)
+            except Exception:  # noqa: BLE001 - a notification failure must never break order management; the state above is already journaled regardless
+                pass
 
 
 def _exit_intent(entry_intent: OrderIntent, order_type: str, price: float, quantity: float) -> OrderIntent:
@@ -290,6 +370,8 @@ class ExecutionJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record_state(self, managed: ManagedOrder, event: str, extra: dict[str, Any] | None = None) -> None:
+        intent_dict = asdict(managed.intent)
+        intent_dict["created_at"] = managed.intent.created_at.isoformat()
         row = {
             "event": "state",
             "type": event,
@@ -303,6 +385,11 @@ class ExecutionJournal:
             "filled_quantity": managed.filled_quantity,
             "avg_fill_price": managed.avg_fill_price,
             "rejection_reason": managed.rejection_reason,
+            # The full OrderIntent, so restore_from_journal_rows() can
+            # rebuild a complete ManagedOrder after a restart - see its
+            # docstring. Everything here is plain JSON-safe data (no
+            # credentials, no broker objects).
+            "intent": intent_dict,
         }
         if extra:
             row.update(extra)

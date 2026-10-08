@@ -471,6 +471,79 @@ launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist
 
 Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`.
 
+### Running it fully autonomously: the three canonical services
+
+Once `execution.mode` is `IBKR_PAPER` (and, when you've decided you're
+ready, `autonomous_paper.enabled`/`auto_execute.enabled` are both `true`
+in your local `.env`/override - see "Rollout" below), continuous
+hands-off operation is exactly these three `launchd` agents, each with
+its own singleton lock so a duplicate can never silently race another
+copy of itself:
+
+| Service | Plist | Schedule | What it owns |
+|---|---|---|---|
+| Daily research | `com.aiquantresearchbot.daily` | `StartCalendarInterval` (once/day) | Fetches data, runs strategies/regime/ML/scoring, classifies AUTO_EXECUTE candidates, submits qualifying PAPER entries. Documented above. |
+| Approval listener | `com.aiquantresearchbot.approvals` | `KeepAlive`/`RunAtLoad` (continuous) | Telegram polling: `/status /positions /orders /performance /halt /resume`, manual Approve/Reject/Watch buttons for anything that didn't auto-execute. Documented in section 5. |
+| Position monitor | `com.aiquantresearchbot.monitor` | `KeepAlive`/`RunAtLoad` (continuous) | Fill polling, stop/target protection sync, reconciliation, circuit breakers, restart recovery, lifecycle Telegram notices. |
+
+These are deliberately SEPARATE processes, not one monolithic service -
+a scheduled batch job (research/entry) and a continuous loop (fill/
+protection monitoring) have different restart semantics and failure
+modes, and splitting them means a crash in one never takes the other
+down with it. Each owns its own slice of the pipeline in `src/main.py`'s
+module docstring; nothing here duplicates another service's job.
+
+Create `~/Library/LaunchAgents/com.aiquantresearchbot.monitor.plist`
+(mirrors the approvals agent in section 5 - `KeepAlive`/`RunAtLoad`, not
+`StartCalendarInterval`, since this one runs continuously too):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiquantresearchbot.monitor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/full/path/to/ai-quant-research-bot/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.execution.position_monitor</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/full/path/to/ai-quant-research-bot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/position_monitor.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/position_monitor.err.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.monitor.plist
+```
+
+Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.monitor.plist`.
+
+**Verify all three are actually running:**
+
+```bash
+launchctl list | grep aiquantresearchbot
+```
+
+Three rows, each showing a PID (a `-` in the PID column means it's
+loaded but not currently running - check that agent's `.err.log`). If a
+service's own log reports "Another `<name>` is already running (lock
+held on ...)", a second copy tried to start while the first was still
+up - that's the singleton lock working as intended, not a bug; find and
+stop the duplicate (`ps aux | grep <module name>`) rather than ignoring
+the error.
+
 ---
 
 ## 7. How to read the reports
@@ -1808,6 +1881,27 @@ safety boundary:
   record `PENDING` and the button retryable, never stuck "approved" with
   nothing actually submitted.
 
+**Four distinct prices exist in this pipeline, and they are never
+conflated:** the *research price* (the daily bar's close, from
+`main.py`'s `analyze_symbol()` - what the strategies/regime/ML/scoring
+actually evaluated), the *signal-time entry price* (`OrderIntent.
+entry_price` - the limit price the whole sizing/risk/regime/portfolio
+pipeline decided on, frozen the moment the intent is built), the
+*current validation price* (`data_collector.fetch_current_price()` -
+yfinance's own last-quoted price, fetched fresh immediately before
+submission, used only for the slippage check against the signal-time
+price), and the *broker fill price* (`BrokerOrder.avg_fill_price` -
+what IBKR/TWS actually reports after a fill, the only one of the four
+that ever reaches the journal's `avg_fill_price` field or a fill
+Telegram notice). The validation price is deliberately an independent
+yfinance quote, not a request to IBKR's own market data feed
+(`reqMktData`) - most paper accounts have no live market-data
+subscription, so an IBKR quote would commonly be delayed anyway, and
+this system never labels any quote "live" it cannot actually guarantee
+is live. A missing validation price blocks the entry outright
+(`PRICE_MOVED_TOO_FAR`) rather than ever being treated as "close enough
+to live to trust."
+
 `IBKRClient.submit_order()`/`replace_order()`/`cancel_order()` are wired
 for real (`placeOrder`/`cancelOrder` over `ibapi`) - long US stocks/ETFs
 only (`contract.secType = "STK"`, `exchange = "SMART"`), no margin field
@@ -1853,9 +1947,18 @@ Every submission checks `OrderManager.is_duplicate()` first: the same
 `trade_id` already active, or an equivalent (ticker, strategy, entry,
 stop) intent already submitted. `restore_from_journal_rows()` rehydrates
 this check from the persisted `ExecutionJournal` at startup, so a process
-restart after an order was already submitted never resends it - even
-though the restarted process's in-memory `OrderManager` starts with no
-live `ManagedOrder` objects at all.
+restart after an order was already submitted never resends it.
+
+This rehydration rebuilds a FULL `ManagedOrder` - every broker order id,
+fill quantity, and the original `OrderIntent` itself, not just a
+duplicate-prevention flag - for every intent_id whose last recorded
+journal state isn't terminal. That's what lets `position_monitor.py`
+resume polling fills and syncing protection after a restart for an order
+submitted by a DIFFERENT, now-dead process (including `main.py`'s
+auto-execution): without the full rebuild, `all_managed()` would start
+empty and the restarted monitor would never touch that order again,
+silently, with no error. See `OrderManager.restore_from_journal_rows()`'s
+docstring for the exact mechanics.
 
 `reconciliation.py` compares local journal state against the broker's own
 positions/open orders/executions at startup and after every reconnect.
@@ -1874,6 +1977,17 @@ account mode, reconciliation failure, excessive rejections, stale data,
 and abnormal position state. `effective_execution_risk_limits()` clamps
 this layer's limits against the pre-existing `portfolio_risk` config via
 `min()` - it can never be looser than what already existed, only stricter.
+
+`circuit_breaker.live_risk_inputs(config)` is what actually feeds the
+daily loss, weekly loss, drawdown, and new-trades-per-day breakers real
+numbers, computed fresh from `data/journal/paper_trades.csv` every time:
+realized P&L closed today/this week as a fraction of `risk.
+account_equity`, peak-to-current drawdown of the running equity curve,
+and how many positions were opened today. Both `approval_bridge.
+execute_approved_trade()` (manual approval and AUTO_EXECUTE) and
+`position_monitor.run_one_tick()` call this before `check_all()` - a
+breaker that's merely defined but never fed real data can never trip, so
+this is what makes those four breakers actually enforce anything.
 
 A tripped breaker blocks NEW entries only; existing protected exits keep
 being managed. The manual kill switch is a durable file
@@ -1901,6 +2015,41 @@ CLOSE and feeding it back into `paper_trades.csv` (see "Learning
 feedback" below), reconciliation, circuit-breaker evaluation, and Telegram
 exit notifications. It exits immediately (code 0) if `execution.mode` is
 not `IBKR_PAPER` - there is nothing for it to connect to otherwise.
+
+**Only ONE position_monitor may run at a time** - two copies would both
+try to poll fills and sync/replace the SAME protective stop/target orders
+against the same broker account, racing each other. It takes an exclusive
+file lock (`data/journal/position_monitor.lock`) for the life of the
+process, exactly like `approval_listener.py`'s Telegram singleton lock -
+starting a second instance fails immediately with a clear error instead
+of racing silently.
+
+**Restart recovery is automatic.** On startup, before the monitoring loop
+begins, it rebuilds every still-active managed order (acknowledged,
+partially filled, filled, exit-pending) from
+`data/journal/executions.jsonl` - including orders submitted by a
+DIFFERENT process (e.g. `main.py`'s auto-execution, or a position_monitor
+that crashed earlier). Without this, a restart would silently orphan
+every in-flight order: it would never be polled for fills or have its
+protection synced again, with no error raised - the system would just
+quietly stop managing it. The log line `Position monitor resuming N
+in-flight managed order(s) from the journal` on startup is the thing to
+check after any restart.
+
+`OrderManager.poll_entry_fill()` also recovers a position that is already
+fully (or partially) filled but still missing one or both protective
+legs - e.g. a process that died between the "fill" journal row and the
+stop/target actually being placed. It re-checks protection completeness
+on every poll, not only when a NEW fill arrives, since an already fully
+filled position will never produce another fill to trigger that check
+otherwise.
+
+**Telegram notices fire automatically** for a broker rejection, a
+submission error, a partial fill, a full fill, protective stop/target
+creation or resizing, a newly-tripped circuit breaker, and a new
+reconciliation failure - see "Telegram command center" below. Each is
+sent at most once per new occurrence, never repeated every poll interval,
+so continuous monitoring doesn't turn into spam.
 
 ### Learning feedback (never auto-retrains)
 
@@ -1933,6 +2082,21 @@ the same `TELEGRAM_CHAT_ID` authorization check:
 
 No secret (bot token, IBKR account id, credentials) is ever included in a
 formatted reply.
+
+Beyond these on-demand commands, `main.py`'s auto-execution path and
+`position_monitor.py`'s continuous loop both push lifecycle notices
+automatically (`src/execution/lifecycle_notices.py`), so Telegram works as
+a monitoring channel without you having to poll it with `/status`:
+a broker rejection or submission error (immediately, with the real
+reason), a partial or full fill, protective stop/target creation or
+resizing, a newly-tripped circuit breaker, and a new reconciliation
+failure. Each fires once per new occurrence - a breaker/reconciliation
+failure that stays tripped across several poll intervals is not repeated
+every tick. A callback that raises (a Telegram outage, a bug in the
+notifier) is swallowed at the source (`OrderManager._record()`) and can
+never prevent the underlying state from being journaled or block order
+management - notifications are a side channel, never a dependency of the
+execution path itself.
 
 ### Config
 

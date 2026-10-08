@@ -314,6 +314,7 @@ def _attempt_auto_execution(
     config: dict[str, Any],
     logger: logging.Logger,
     trade_id: str,
+    now: Any = None,
 ) -> dict[str, Any]:
     """One AUTO_EXECUTE candidate's execution-time re-checks + broker
     submission - the exact same re-check discipline as
@@ -322,7 +323,9 @@ def _attempt_auto_execution(
     candidate's OWN entry price (this run's freshly fetched signal price)
     is also "current_market_price" here since auto-execution happens
     immediately after analysis, with no human-approval delay to go stale
-    over - unlike the approval-bridge path, where real time elapses."""
+    over - unlike the approval-bridge path, where real time elapses.
+    `now` (optional, defaults to real current time) is test-only - see
+    `_process_execution_layer`'s docstring."""
     from .execution import approval_bridge
 
     final = report_writer.final_position(entry)
@@ -332,10 +335,10 @@ def _attempt_auto_execution(
         "shares": final["shares"], "dollar_risk": final["dollar_risk"],
         "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
     }
-    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id)
+    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id, now=now)
 
 
-def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger) -> set[str]:
+def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> set[str]:
     """DRY_RUN order review only - converts every Top Candidate into an
     `OrderIntent`, runs every pre-submission check this system has, and
     logs exactly what order WOULD be submitted (or why it wouldn't be).
@@ -371,7 +374,7 @@ def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_
         trade_id = paper_trades.generate_trade_id(entry["symbol"], report_date)
         review = safe_run(
             logger, f"{entry['symbol']} DRY_RUN order review",
-            lambda r=record, tid=trade_id: order_review.review_order_intent(r, config, manager, current_market_price=r["entry"], trade_id=tid),
+            lambda r=record, tid=trade_id: order_review.review_order_intent(r, config, manager, current_market_price=r["entry"], now=now, trade_id=tid),
         )
         if review is None:
             # The review itself failed (unexpected) - fail closed: treat
@@ -393,8 +396,14 @@ def _process_execution_layer(
     token: str | None,
     chat_id: str | None,
     broker: Broker | None = None,
+    now: Any = None,
 ) -> set[str]:
-    """Phase 7 execution layer entry point from the daily run. Returns the
+    """Phase 7 execution layer entry point from the daily run. `now`
+    (optional, defaults to real current time) is threaded into the
+    DRY_RUN order review's trading-hours check only - tests inject a
+    fixed timestamp so the result never depends on the wall-clock time
+    the suite happens to run at; production code always leaves it unset.
+    Returns the
     set of ticker symbols that should NOT get a Telegram approval button
     this run - either because they were already AUTO_EXECUTEd (Part S), or
     (DRY_RUN only) because their order review said `would_submit` is
@@ -414,7 +423,7 @@ def _process_execution_layer(
 
     if execution_mode != "IBKR_PAPER" or not auto_candidates:
         if execution_mode == "DRY_RUN":
-            return safe_run(logger, "DRY_RUN order review", lambda: _review_top_candidates_dry_run(ticker_results, report_date, config, logger)) or set()
+            return safe_run(logger, "DRY_RUN order review", lambda: _review_top_candidates_dry_run(ticker_results, report_date, config, logger, now=now)) or set()
         return set()
 
     owns_broker = broker is None
@@ -431,11 +440,27 @@ def _process_execution_layer(
     executed_tickers: set[str] = set()
     try:
         journal = order_manager.ExecutionJournal(config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl"))
-        manager = order_manager.OrderManager(broker, config, journal)
+        on_event = None
+        if token and chat_id:
+            from . import telegram_bot
+            from .execution import lifecycle_notices
+
+            def on_event(event: str, managed: Any, extra: dict[str, Any], _token=token, _chat_id=chat_id) -> None:
+                text = lifecycle_notices.format_lifecycle_notice(event, managed, extra)
+                if text:
+                    telegram_bot.send_telegram_message(_token, _chat_id, text, logger)
+
+        manager = order_manager.OrderManager(broker, config, journal, on_event=on_event)
+        # Rehydrate duplicate-prevention/in-flight state from the journal -
+        # main.py's daily run is a separate process each time, so without
+        # this a crash-retry or a manually re-triggered run could resubmit
+        # the same trade_id (Part I: "a restart must NOT send the same
+        # order again").
+        manager.restore_from_journal_rows(journal.read_all())
 
         for entry in auto_candidates:
             trade_id = paper_trades.generate_trade_id(entry["symbol"], report_date)
-            result = safe_run(logger, f"{entry['symbol']} auto-execution", lambda e=entry, tid=trade_id: _attempt_auto_execution(e, broker, manager, config, logger, tid))
+            result = safe_run(logger, f"{entry['symbol']} auto-execution", lambda e=entry, tid=trade_id: _attempt_auto_execution(e, broker, manager, config, logger, tid, now=now))
             if result is None:
                 continue
             if not result.get("executed"):

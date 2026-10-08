@@ -231,6 +231,115 @@ def test_restart_no_duplicate_restore_from_journal_rows_blocks_resend(tmp_path, 
     assert len(broker.submitted_intents) == 1  # still just the one order from before "restart"
 
 
+def test_restore_from_journal_rows_rebuilds_a_full_managed_order_for_continued_monitoring(tmp_path, broker):
+    """The actual restart-recovery gap this closes: a process that only
+    rehydrates the duplicate-prevention index (the old behavior) can
+    detect "don't resubmit this" but can never again poll fills or sync
+    protection for an order a DIFFERENT (now-dead) process submitted -
+    all_managed() would stay empty forever. restore_from_journal_rows()
+    must rebuild the real ManagedOrder, with every broker id/fill/intent
+    field intact, so a restarted position_monitor can resume managing it."""
+    journal_path = tmp_path / "executions.jsonl"
+    journal = order_manager.ExecutionJournal(journal_path)
+    manager1 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    intent = make_intent()
+    managed = manager1.submit_entry(intent)
+    broker.simulate_fill(managed.entry_broker_order_id, shares=4, price=100.5)
+    manager1.poll_entry_fill(intent.intent_id)
+    assert managed.state == order_state.STATE_PARTIALLY_FILLED
+
+    manager2 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    manager2.restore_from_journal_rows(journal.read_all())
+
+    rebuilt = manager2.get(intent.intent_id)
+    assert rebuilt is not None
+    assert rebuilt.state == order_state.STATE_PARTIALLY_FILLED
+    assert rebuilt.entry_broker_order_id == managed.entry_broker_order_id
+    assert rebuilt.stop_broker_order_id == managed.stop_broker_order_id
+    assert rebuilt.filled_quantity == 4
+    assert rebuilt.avg_fill_price == 100.5
+    assert rebuilt.intent.ticker == intent.ticker
+    assert rebuilt.intent.stop_loss == intent.stop_loss
+    assert rebuilt.intent.target_price == intent.target_price
+
+    # And the rebuilt order is actually usable, not just inspectable - the
+    # restarted process can keep polling it as if it had submitted it itself.
+    broker.simulate_fill(rebuilt.entry_broker_order_id, shares=6, price=100.7)
+    manager2.poll_entry_fill(intent.intent_id)
+    assert rebuilt.state == order_state.STATE_EXIT_PENDING  # FILLED immediately followed by protection sync
+    assert broker._orders[rebuilt.stop_broker_order_id].quantity == 10
+
+
+def test_poll_entry_fill_recovers_a_filled_but_unprotected_order(manager, broker):
+    """Scenario D (process dies after fill but before protection): a
+    ManagedOrder can be fully filled with NEITHER protective leg placed
+    yet - e.g. the process died between _apply_fill()'s journal row and
+    _sync_protection() actually submitting the stop/target, or this is a
+    rebuilt order from a journal row recorded at exactly that gap. A fill
+    that never changes again (the position is already fully filled) must
+    still eventually get protected - waiting for a NEW fill would never
+    trigger it."""
+    managed = manager.submit_entry(make_intent(quantity=10))
+    broker.simulate_fill(managed.entry_broker_order_id, shares=10, price=100.0)
+
+    # Simulate exactly the gap: the fill is already reflected in filled_quantity,
+    # but no protection has been placed - as if _sync_protection() never ran.
+    managed.filled_quantity = 10
+    managed.state = order_state.STATE_FILLED
+    assert managed.stop_broker_order_id is None
+    assert managed.target_broker_order_id is None
+
+    manager.poll_entry_fill(managed.intent.intent_id)
+
+    assert managed.stop_broker_order_id is not None
+    assert managed.target_broker_order_id is not None
+    assert broker._orders[managed.stop_broker_order_id].quantity == 10
+    assert managed.state == order_state.STATE_EXIT_PENDING
+
+
+def test_restore_from_journal_rows_does_not_rebuild_terminal_orders(tmp_path, broker):
+    """A cancelled/rejected/closed/errored order has nothing left to
+    monitor - rebuilding it into _managed would be pure memory bloat for a
+    long-running process, and a stale entry an unrelated duplicate check
+    could trip over."""
+    journal_path = tmp_path / "executions.jsonl"
+    journal = order_manager.ExecutionJournal(journal_path)
+    manager1 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    intent = make_intent()
+    managed = manager1.submit_entry(intent)
+    manager1.cancel_entry(intent.intent_id)
+    assert managed.state == order_state.STATE_CANCELLED
+
+    manager2 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    manager2.restore_from_journal_rows(journal.read_all())
+
+    assert manager2.get(intent.intent_id) is None
+    assert manager2.all_managed() == []
+
+
+def test_restore_from_journal_rows_tolerates_a_row_with_no_intent_payload(tmp_path, broker):
+    """An older journal written before intents were persisted in full (or
+    any other row missing the 'intent' key) must not crash restore - the
+    duplicate-prevention index still works, there's just nothing to
+    rebuild for that row."""
+    journal_path = tmp_path / "executions.jsonl"
+    journal = order_manager.ExecutionJournal(journal_path)
+    manager1 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    intent = make_intent()
+    manager1.submit_entry(intent)
+
+    rows = journal.read_all()
+    for row in rows:
+        row.pop("intent", None)
+    journal_path.write_text("\n".join(__import__("json").dumps(r, default=str) for r in rows) + "\n")
+
+    manager2 = order_manager.OrderManager(broker, PERMISSIVE_CONFIG, journal)
+    manager2.restore_from_journal_rows(journal.read_all())  # must not raise
+
+    assert manager2.get(intent.intent_id) is None
+    assert manager2.is_duplicate(make_intent(intent_id=order_state.new_intent_id())) is True
+
+
 # --- Journal (Part U) -----------------------------------------------------------------
 
 
@@ -247,6 +356,20 @@ def test_journal_persists_every_state_transition(tmp_path, manager, broker):
     assert "acknowledged" in event_types
     assert "fill" in event_types
     assert "protection_synced" in event_types
+
+
+def test_journal_persists_the_full_intent_for_restart_recovery(tmp_path, manager, broker):
+    journal_path = tmp_path / "executions.jsonl"
+    manager.journal = order_manager.ExecutionJournal(journal_path)
+    intent = make_intent()
+    manager.submit_entry(intent)
+
+    rows = manager.journal.read_all()
+    acknowledged_row = next(r for r in rows if r["type"] == "acknowledged")
+    assert acknowledged_row["intent"]["ticker"] == intent.ticker
+    assert acknowledged_row["intent"]["stop_loss"] == intent.stop_loss
+    assert acknowledged_row["intent"]["target_price"] == intent.target_price
+    assert isinstance(acknowledged_row["intent"]["created_at"], str)  # JSON-safe, not a raw datetime
 
 
 def test_journal_never_contains_credential_like_fields(tmp_path, manager, broker):

@@ -13,11 +13,15 @@ pipeline itself.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from typing import Any
 
 from . import circuit_breaker, learning_feedback, order_manager, reconciliation
 from .broker import Broker, CONNECTION_CONNECTED, CONNECTION_DISCONNECTED, CONNECTION_HALTED
+from .process_lock import ProcessAlreadyRunningError, acquire_singleton_lock
+
+_LOCK_FILENAME = "position_monitor.lock"
 
 
 def run_one_tick(
@@ -53,12 +57,14 @@ def run_one_tick(
     if not report.ok:
         logger.error("Position monitor: reconciliation discrepancies found:\n%s", report.summary())
 
+    live_inputs = circuit_breaker.live_risk_inputs(config)
+    live_inputs["current_open_positions"] = len(broker.positions())  # the broker's own count is more authoritative here than paper_trades.csv's OPEN rows
     breaker_result = circuit_breaker.check_all(
         config,
         account=safe_run(logger, "account_summary", broker.account_summary),
         connection_state=state,
         reconciliation_ok=report.ok,
-        current_open_positions=len(broker.positions()),
+        **live_inputs,
     )
 
     return {
@@ -92,25 +98,61 @@ def run_forever(
     from ..utils import safe_run
 
     logger.info("Position monitor starting (poll interval %ss).", poll_interval_seconds)
+    previously_tripped: set[str] = set()
+    reconciliation_already_failing = False
     while True:
         local_open_trades = local_open_trades_fn() if local_open_trades_fn else []
         tick = run_one_tick(broker, manager, config, local_open_trades, logger)
         if token and chat_id:
             from .. import paper_trade_tracker, telegram_bot
+            from . import lifecycle_notices
 
             for trade in tick.get("closed_trades", []):
                 notice = paper_trade_tracker.format_exit_notification(trade)
                 safe_run(logger, f"{trade['ticker']} broker exit notification", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+
+            # Only notify on a NEWLY tripped breaker / a NEW reconciliation
+            # failure, not every tick it stays tripped - repeating the same
+            # alert every poll_interval_seconds would turn "monitoring" into
+            # spam exactly where the user asked it not to.
+            breakers = tick.get("breakers")
+            currently_tripped = set(breakers.tripped) if breakers is not None else set()
+            newly_tripped = sorted(currently_tripped - previously_tripped)
+            if newly_tripped:
+                notice = lifecycle_notices.format_circuit_breaker_notice(newly_tripped)
+                safe_run(logger, "circuit breaker notice", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+            previously_tripped = currently_tripped
+
+            reconciliation = tick.get("reconciliation")
+            reconciliation_failing_now = reconciliation is not None and not reconciliation.ok
+            if reconciliation_failing_now and not reconciliation_already_failing:
+                notice = lifecycle_notices.format_reconciliation_failure_notice(reconciliation.summary())
+                safe_run(logger, "reconciliation failure notice", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+            reconciliation_already_failing = reconciliation_failing_now
         time.sleep(poll_interval_seconds)
 
 
 def main() -> int:
-    from ..utils import load_config, load_env, setup_logging
-    from .broker import FakeBroker
+    from ..utils import load_config, load_env, resolve_path, setup_logging
 
     load_env()
     config = load_config(None)
     logger = setup_logging(config, log_filename="position_monitor.log")
+
+    # Exactly one position_monitor may run at a time - two would both try
+    # to poll fills and sync/replace the SAME protective stop/target
+    # orders against the same broker account, racing each other. Same
+    # mechanism as approval_listener.py's Telegram singleton lock.
+    lock_path = resolve_path(config["data"]["journal_dir"]) / _LOCK_FILENAME
+    try:
+        lock_file = acquire_singleton_lock(  # noqa: F841 - held for the process lifetime
+            lock_path, process_label="position_monitor",
+            extra_hint="Two copies would race to poll fills and sync protective stop/target orders against the same broker account.",
+        )
+    except ProcessAlreadyRunningError as exc:
+        logger.error(str(exc))
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     mode = config.get("execution", {}).get("mode", "DRY_RUN")
     if mode != "IBKR_PAPER":
@@ -128,8 +170,32 @@ def main() -> int:
 
     import os
 
-    manager = order_manager.OrderManager(broker, config, order_manager.ExecutionJournal(config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl")))
-    run_forever(broker, manager, config, logger, token=os.environ.get("TELEGRAM_BOT_TOKEN"), chat_id=os.environ.get("TELEGRAM_CHAT_ID"))
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    on_event = None
+    if token and chat_id:
+        from .. import telegram_bot
+        from . import lifecycle_notices
+
+        def on_event(event: str, managed: Any, extra: dict[str, Any]) -> None:
+            text = lifecycle_notices.format_lifecycle_notice(event, managed, extra)
+            if text:
+                telegram_bot.send_telegram_message(token, chat_id, text, logger)
+
+    journal = order_manager.ExecutionJournal(config.get("execution", {}).get("journal_path", "data/journal/executions.jsonl"))
+    manager = order_manager.OrderManager(broker, config, journal, on_event=on_event)
+    # Rebuild every still-active ManagedOrder (entry acknowledged/partially
+    # filled/filled/exit-pending) from the journal BEFORE the monitoring
+    # loop starts - without this, a restart orphans every order submitted
+    # by a previous run (or by main.py's auto-execution, a different
+    # process entirely): all_managed() would start empty, so this process
+    # would never poll fills or sync protection for them again. See
+    # OrderManager.restore_from_journal_rows()'s docstring.
+    manager.restore_from_journal_rows(journal.read_all())
+    logger.info("Position monitor resuming %d in-flight managed order(s) from the journal.", len(manager.all_managed()))
+
+    run_forever(broker, manager, config, logger, token=token, chat_id=chat_id)
     return 0
 
 

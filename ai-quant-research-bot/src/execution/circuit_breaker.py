@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from .broker import ACCOUNT_MODE_PAPER, AccountSummary
 
@@ -184,6 +186,121 @@ def check_max_open_positions(current_open_positions: int, limits: dict[str, Any]
 
 def check_max_new_trades_per_day(new_trades_today: int, limits: dict[str, Any]) -> str | None:
     return BREAKER_MAX_NEW_TRADES_PER_DAY if new_trades_today >= limits["max_new_trades_per_day"] else None
+
+
+# --- live risk inputs: the daily/weekly loss, drawdown, open-position and new-trade
+# breakers above are only as real as the numbers fed into them. Computed purely from
+# data/journal/paper_trades.csv (the same durable record performance_tracker.py and
+# portfolio_risk.py already treat as the single source of truth for realized P&L and
+# open positions) - never fabricated, and `None`/0 whenever there's nothing to compute
+# from yet (a fresh paper_trades.csv), which `check_all()`'s own checks already treat
+# as "nothing to trip on" rather than a false positive. -----------------------------
+
+
+def _closed_trades_since(df: pd.DataFrame, since: datetime) -> pd.DataFrame:
+    if df.empty:
+        return df
+    closed = df[df["status"] != "OPEN"].copy()
+    if closed.empty:
+        return closed
+    exited_at = pd.to_datetime(closed["exited_at"], errors="coerce", utc=True)
+    since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    return closed[exited_at >= since_utc]
+
+
+def compute_realized_pnl_pct(df: pd.DataFrame, since: datetime, account_equity: float | None) -> float | None:
+    """Sum of realized `pnl_dollars` for every trade CLOSED at/after
+    `since`, as a fraction of `account_equity` (PAPER trading's fixed
+    sizing baseline - `config.risk.account_equity` - not a live broker
+    balance, exactly like every other risk-sizing calculation in this
+    codebase). `None` only when there's no equity baseline to divide by;
+    zero realized trades in the window correctly yields 0.0, not None -
+    "no loss yet" must never be treated the same as "cannot compute"."""
+    if not account_equity:
+        return None
+    closed = _closed_trades_since(df, since)
+    if closed.empty:
+        return 0.0
+    pnl = pd.to_numeric(closed["pnl_dollars"], errors="coerce").fillna(0.0).sum()
+    return float(pnl) / float(account_equity)
+
+
+def compute_daily_realized_pnl_pct(df: pd.DataFrame, as_of: datetime, account_equity: float | None) -> float | None:
+    since = as_of.replace(hour=0, minute=0, second=0, microsecond=0)
+    return compute_realized_pnl_pct(df, since, account_equity)
+
+
+def compute_weekly_realized_pnl_pct(df: pd.DataFrame, as_of: datetime, account_equity: float | None) -> float | None:
+    since = (as_of - timedelta(days=as_of.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return compute_realized_pnl_pct(df, since, account_equity)
+
+
+def compute_current_drawdown_pct(df: pd.DataFrame, account_equity: float | None) -> float | None:
+    """Peak-to-current drawdown of the running equity curve
+    (`account_equity` + cumulative realized P&L, in CLOSE order), as a
+    fraction of the peak. 0.0 (never None) once there's an equity baseline
+    but no closed trades yet - there is nothing to be drawn down from."""
+    if not account_equity:
+        return None
+    closed = df[df["status"] != "OPEN"].copy() if not df.empty else df
+    if closed.empty:
+        return 0.0
+    closed["_exited_at"] = pd.to_datetime(closed["exited_at"], errors="coerce", utc=True)
+    closed = closed.sort_values("_exited_at")
+    pnl = pd.to_numeric(closed["pnl_dollars"], errors="coerce").fillna(0.0)
+    equity_curve = float(account_equity) + pnl.cumsum()
+    peak = equity_curve.cummax()
+    if peak.iloc[-1] <= 0:
+        return None  # account blown through zero - not a meaningful percentage, and check_max_drawdown would already be moot
+    return float((peak.iloc[-1] - equity_curve.iloc[-1]) / peak.iloc[-1])
+
+
+def count_new_trades_today(df: pd.DataFrame, as_of: datetime) -> int:
+    """Every row opened on `as_of`'s calendar date, OPEN or since closed -
+    a trade that already closed today still counts against today's
+    new-trade limit; it did happen today."""
+    if df.empty:
+        return 0
+    opened_at = pd.to_datetime(df["opened_at"], errors="coerce", utc=True)
+    today = as_of.astimezone(timezone.utc).date() if as_of.tzinfo else as_of.date()
+    return int((opened_at.dt.date == today).sum())
+
+
+def count_current_open_positions(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    return int((df["status"] == "OPEN").sum())
+
+
+def live_risk_inputs(config: dict[str, Any], as_of: datetime | None = None) -> dict[str, Any]:
+    """Everything `check_all()` needs to make the daily/weekly loss,
+    drawdown, open-position and new-trade-count breakers real, computed
+    fresh from `data/journal/paper_trades.csv`. Callers pass this
+    straight into `check_all(config, **live_risk_inputs(config), ...)`
+    alongside whatever broker-specific kwargs (`account`,
+    `connection_state`, `reconciliation_ok`) they already have."""
+    from .. import paper_trades
+
+    as_of = as_of or datetime.now(timezone.utc)
+    account_equity = config.get("risk", {}).get("account_equity")
+    try:
+        df = paper_trades.load_paper_trades_df(config)
+    except KeyError:
+        # config has no data.journal_dir/paper_trading.paper_trades_file
+        # configured (a minimal test config, or a genuinely incomplete
+        # deployment config) - nothing to compute from, so every breaker
+        # below stays un-tripped rather than crashing the caller. This is
+        # the same "Data Unavailable, never fabricated" degradation every
+        # other optional data source in this codebase uses.
+        df = pd.DataFrame(columns=paper_trades.PAPER_TRADE_COLUMNS)
+
+    return {
+        "realized_pnl_today_pct": compute_daily_realized_pnl_pct(df, as_of, account_equity),
+        "realized_pnl_week_pct": compute_weekly_realized_pnl_pct(df, as_of, account_equity),
+        "current_drawdown_pct": compute_current_drawdown_pct(df, account_equity),
+        "new_trades_today": count_new_trades_today(df, as_of),
+        "current_open_positions": count_current_open_positions(df),
+    }
 
 
 def check_all(

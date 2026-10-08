@@ -9,6 +9,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -20,6 +21,13 @@ from src.execution import approval_bridge, order_manager
 from src.execution.broker import ACCOUNT_MODE_LIVE, ACCOUNT_MODE_PAPER, FakeBroker
 
 logger = logging.getLogger("test")
+
+# A fixed Wednesday, mid-session NY time - injected into every
+# handle_manual_approval() call below so results never depend on the real
+# wall-clock weekday the suite happens to run on (the config's
+# "00:00-23:59" window only widens the HOUR check - is_within_trading_
+# hours() hard-blocks Sat/Sun regardless of configured hours).
+FIXED_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 def pending_record(symbol: str, report_date: str = "2026-09-09", **overrides) -> dict:
@@ -82,7 +90,7 @@ def test_approving_in_ibkr_paper_mode_submits_a_real_order(manual_config, monkey
     seed_pending(manual_config, "AMD")
     broker = paper_broker()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is True
     assert "submitted to IBKR" in message
@@ -100,7 +108,7 @@ def test_approved_trade_id_matches_between_order_intent_and_csv_row(manual_confi
     seed_pending(manual_config, "AMD")
     broker = paper_broker()
 
-    approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     intent_trade_id = broker.submitted_intents[0].trade_id
     df = paper_trades.load_paper_trades_df(manual_config)
@@ -115,7 +123,7 @@ def test_live_account_blocks_manual_approval_zero_orders_submitted(manual_config
     seed_pending(manual_config, "AMD")
     broker = live_broker()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is False
     assert "NOT submitted" in message
@@ -136,7 +144,7 @@ def test_unknown_account_mode_blocks_manual_approval(manual_config, monkeypatch)
     broker = FakeBroker(account_mode="UNKNOWN", account_id="X1")
     broker.connect()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is False
     assert broker.submitted_intents == []
@@ -153,7 +161,7 @@ def test_dry_run_mode_never_touches_broker_even_for_a_valid_approve(manual_confi
         def __getattr__(self, name):
             raise AssertionError(f"Broker.{name} must never be touched in DRY_RUN.")
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=_PoisonedBroker())
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=_PoisonedBroker(), now=FIXED_NOW)
 
     assert success is True
     assert "approved and recorded in paper_trades.csv" in message
@@ -167,11 +175,11 @@ def test_reject_and_watch_never_touch_broker_even_in_ibkr_paper_mode(manual_conf
             raise AssertionError(f"Broker.{name} must never be touched for reject/watch.")
 
     seed_pending(manual_config, "MSFT")
-    success, message = approval_bridge.handle_manual_approval("reject", "MSFT", "2026-09-09", manual_config, logger, broker=_PoisonedBroker())
+    success, message = approval_bridge.handle_manual_approval("reject", "MSFT", "2026-09-09", manual_config, logger, broker=_PoisonedBroker(), now=FIXED_NOW)
     assert success is True
 
     seed_pending(manual_config, "NVDA")
-    success, message = approval_bridge.handle_manual_approval("watch", "NVDA", "2026-09-09", manual_config, logger, broker=_PoisonedBroker())
+    success, message = approval_bridge.handle_manual_approval("watch", "NVDA", "2026-09-09", manual_config, logger, broker=_PoisonedBroker(), now=FIXED_NOW)
     assert success is True
 
     df = paper_trades.load_paper_trades_df(manual_config)
@@ -186,7 +194,7 @@ def test_price_moved_too_far_blocks_and_leaves_pending_retryable(manual_config, 
     seed_pending(manual_config, "AMD")
     broker = paper_broker()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is False
     assert "PRICE_MOVED_TOO_FAR" in message
@@ -200,7 +208,7 @@ def test_missing_current_price_blocks_rather_than_submitting_blind(manual_config
     seed_pending(manual_config, "AMD")
     broker = paper_broker()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is False
     assert broker.submitted_intents == []
@@ -214,7 +222,7 @@ def test_manual_kill_switch_blocks_manual_approval(manual_config, monkeypatch):
     seed_pending(manual_config, "AMD")
     broker = paper_broker()
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
 
     assert success is False
     assert broker.submitted_intents == []
@@ -231,14 +239,14 @@ def test_duplicate_approval_is_blocked_second_time(manual_config, monkeypatch):
     journal = order_manager.ExecutionJournal(journal_path)
     manager = order_manager.OrderManager(broker, manual_config, journal)
 
-    first = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    first = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
     assert first[0] is True
     assert len(broker.submitted_intents) == 1
 
     # The pending record is now APPROVED (terminal) - a second click on
     # the exact same button must be refused by peek_pending_decision()
     # before ever reaching the broker again.
-    second = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker)
+    second = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=broker, now=FIXED_NOW)
     assert second[0] is False
     assert len(broker.submitted_intents) == 1  # still just the one
 
@@ -254,7 +262,7 @@ def test_aggressive_disabled_blocks_manual_approval_before_any_broker_contact(ma
     manual_config["strategies"] = {"mean_reversion": {"aggressive_mode": {"enabled": False}}}
     seed_pending(manual_config, "GME", is_aggressive=True)
 
-    success, message = approval_bridge.handle_manual_approval("approve", "GME", "2026-09-09", manual_config, logger, broker=_PoisonedBroker())
+    success, message = approval_bridge.handle_manual_approval("approve", "GME", "2026-09-09", manual_config, logger, broker=_PoisonedBroker(), now=FIXED_NOW)
 
     assert success is False
     assert "Aggressive" in message
@@ -277,7 +285,7 @@ def test_connection_failure_leaves_pending_approval_retryable(manual_config, mon
 
     monkeypatch.setattr(ibkr_client, "IBKRClient", fake_ibkr_client)
 
-    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=None)
+    success, message = approval_bridge.handle_manual_approval("approve", "AMD", "2026-09-09", manual_config, logger, broker=None, now=FIXED_NOW)
 
     assert success is False
     assert "could not connect" in message
