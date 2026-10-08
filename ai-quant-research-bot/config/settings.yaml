@@ -452,11 +452,26 @@ intelligence:
     enabled: false
     # python_executable: ".venvs/tradingagents/bin/python"   # default if unset
     selected_analysts: ["market", "social", "news", "fundamentals"]
-    max_tickers_per_run: 2        # bounds real API cost per daily run
-    max_calls_per_day: 10         # a call-COUNT ceiling, not a verified dollar budget - see tradingagents_adapter.py
+    max_tickers_per_run: 2        # only the top-N worthwhile candidates (see _select_worthwhile_candidates) are analyzed per run
+    max_calls_per_day: 10         # a call-COUNT ceiling, enforced ALONGSIDE the $ limits below, not instead of them
     cache_ttl_hours: 24
     timeout_seconds: 180
     max_retries: 1
+    # Hard $ spend limits (GitHub Issue #1 follow-up requirement 5) -
+    # concurrency-safe reserve/commit/release ledger, see tradingagents_spend.py.
+    # max_cost_per_call_usd is the conservative ceiling RESERVED before the
+    # real per-call cost (from actual token usage) is known.
+    max_cost_per_call_usd: 1.00
+    max_daily_spend_usd: 5.00
+    max_monthly_spend_usd: 50.00
+    # Real $/million-token pricing, keyed by exact model name, used to turn
+    # ACTUAL token usage (from a LangChain callback wired into the isolated
+    # runner) into a dollar figure - see pricing.py. Left empty to use the
+    # built-in snapshot (DEFAULT_PRICING_USD_PER_MILLION_TOKENS); override
+    # here with current published rates before trusting the numbers.
+    # pricing:
+    #   claude-haiku-5-5: {input: 0.80, output: 4.00}
+    pricing: {}
     # Forwarded into TradingAgents' own config dict as overrides on top of
     # its DEFAULT_CONFIG - e.g. {"llm_provider": "anthropic", "deep_think_llm":
     # "...", "quick_think_llm": "...", "max_debate_rounds": 1}. Left empty by

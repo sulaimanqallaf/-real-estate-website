@@ -45,6 +45,18 @@ requirement 9/12):**
 5. The existing deterministic multi-agent engine (`pipeline.py`,
    `analysts.py`, etc.) is completely unmodified by this module -
    requirement 1.
+
+**Cost controls (GitHub Issue #1 follow-up requirements 4-6):**
+- Real per-model token usage (via a LangChain callback in
+  `tools/tradingagents_runner.py`) x configurable `$`/million-token
+  pricing (`pricing.py`) - never a fabricated cost for an unpriced model.
+- Hard daily + monthly `$` spend caps, enforced through a
+  concurrency-safe reserve/commit/release ledger (`tradingagents_spend.py`)
+  so two overlapping calls can never jointly exceed either cap.
+- `_select_worthwhile_candidates()` spends real API calls only on
+  tickers the existing deterministic gates have NOT already rejected,
+  ranked by the best available numeric signal - never on a candidate
+  that could not trade regardless of what this layer concludes.
 """
 
 from __future__ import annotations
@@ -52,33 +64,66 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import pricing, tradingagents_spend
 from .schemas import ACTION_BUY, ACTION_HOLD, ACTION_SELL, AgentOpinion, AgentResearchAssessment
 
 DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_MAX_RETRIES = 1
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
 DEFAULT_CACHE_TTL_HOURS = 24
-# A real per-call dollar cost is NOT tracked here - TradingAgents does not
-# expose a reliable per-run cost figure without wiring a token-accounting
-# callback through every provider, which has not been built. This is a
-# call-COUNT ceiling (a proxy for spend exposure), disclosed as exactly
-# that, never represented as a verified dollar budget.
+# A call-COUNT ceiling, kept alongside (not instead of) the real dollar
+# limits below - it bounds the worst-case number of subprocess
+# invocations per day regardless of what any one of them costs.
 DEFAULT_MAX_CALLS_PER_DAY = 10
 DEFAULT_MAX_TICKERS_PER_RUN = 2
+# A conservative per-call ceiling RESERVED before the real cost is known
+# (see tradingagents_spend.py's module docstring for the reserve/commit/
+# release pattern this backs) - deliberately generous so a single
+# expensive multi-round debate on a pricier model doesn't itself blow
+# the daily cap's accounting; the REAL cost, once known, is what actually
+# gets committed and counted toward future calls.
+DEFAULT_MAX_COST_PER_CALL_USD = 1.00
+DEFAULT_MAX_DAILY_SPEND_USD = 5.00
+DEFAULT_MAX_MONTHLY_SPEND_USD = 50.00
 
 _RATING_TO_ACTION = {
     "buy": ACTION_BUY, "overweight": ACTION_BUY,
     "hold": ACTION_HOLD, "review": ACTION_HOLD,
     "sell": ACTION_SELL, "underweight": ACTION_SELL,
 }
+
+# Defensive redaction for anything that might end up in a log line or an
+# error message surfaced up the chain (GitHub Issue #1's very first
+# instruction this session, about the Telegram bot token leaking through
+# HTTP error logs, applies equally here): a provider SDK's own exception
+# text occasionally echoes the key it rejected. Never assume upstream's
+# error strings are already safe to log verbatim.
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"AIza[A-Za-z0-9_-]{10,}"),
+    re.compile(r"(?i)bearer\s+\S+"),
+    re.compile(r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*\S+"),
+]
+
+
+def _redact(text: str | None) -> str:
+    if not text:
+        return ""
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
 
 
 def _repo_root() -> Path:
@@ -255,6 +300,24 @@ def run_one(
         logger.warning("TradingAgents adapter: daily call budget (%d) exhausted - skipping %s.", max_calls_per_day, ticker)
         return None
 
+    # Hard $ spend limits (GitHub Issue #1 requirement 5) - reserve a
+    # conservative ceiling BEFORE the real subprocess call, so a daily/
+    # monthly cap can never be exceeded by two calls racing each other;
+    # see tradingagents_spend.py's module docstring.
+    spend_db = tradingagents_spend.resolve_ledger_path(config)
+    estimate_usd = ta_config.get("max_cost_per_call_usd", DEFAULT_MAX_COST_PER_CALL_USD)
+    daily_limit_usd = ta_config.get("max_daily_spend_usd", DEFAULT_MAX_DAILY_SPEND_USD)
+    monthly_limit_usd = ta_config.get("max_monthly_spend_usd", DEFAULT_MAX_MONTHLY_SPEND_USD)
+    entry_id = str(uuid.uuid4())
+    try:
+        reserved = tradingagents_spend.reserve(spend_db, entry_id, estimate_usd, daily_limit_usd, monthly_limit_usd, now)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TradingAgents adapter: spend-ledger reservation failed, refusing to call (fail closed): %s", exc)
+        return None
+    if not reserved:
+        logger.warning("TradingAgents adapter: daily/monthly $ spend limit would be exceeded - skipping %s.", ticker)
+        return None
+
     work_dir = resolve_work_dir(config) / f"{ticker}_{report_date}"
     work_dir.mkdir(parents=True, exist_ok=True)
     request = {
@@ -272,20 +335,27 @@ def run_one(
 
     result = None
     last_error = None
+    process_ever_started = False
     for attempt in range(max_retries + 1):
         try:
             proc = subprocess.run(
                 [str(python_executable), str(resolve_runner_script()), str(request_path)],
                 capture_output=True, text=True, timeout=timeout_seconds,
             )
+            process_ever_started = True
         except subprocess.TimeoutExpired:
+            # The process DID start - and a provider call may have already
+            # been billed server-side before we gave up waiting for a
+            # response. Treated as spent (see the reservation commit below),
+            # never released.
+            process_ever_started = True
             last_error = f"timed out after {timeout_seconds}s"
             logger.warning("TradingAgents adapter: %s on attempt %d/%d for %s.", last_error, attempt + 1, max_retries + 1, ticker)
             time.sleep(DEFAULT_RETRY_BACKOFF_SECONDS)
             continue
-        except Exception as exc:  # noqa: BLE001
-            last_error = str(exc)
-            logger.warning("TradingAgents adapter: subprocess failed for %s: %s", ticker, exc)
+        except Exception as exc:  # noqa: BLE001 - e.g. a misconfigured python_executable (FileNotFoundError) - the process never ran, nothing was ever billed
+            last_error = _redact(str(exc))
+            logger.warning("TradingAgents adapter: could not start subprocess for %s: %s", ticker, last_error)
             time.sleep(DEFAULT_RETRY_BACKOFF_SECONDS)
             continue
 
@@ -295,13 +365,13 @@ def run_one(
             parsed = None
 
         if parsed is None:
-            last_error = f"no parseable JSON on stdout (exit {proc.returncode}): {proc.stderr[-500:]}"
+            last_error = f"no parseable JSON on stdout (exit {proc.returncode}): {_redact(proc.stderr[-500:])}"
             logger.warning("TradingAgents adapter: %s", last_error)
             time.sleep(DEFAULT_RETRY_BACKOFF_SECONDS)
             continue
 
         if not parsed.get("ok"):
-            last_error = parsed.get("error", "unknown error")
+            last_error = _redact(parsed.get("error", "unknown error"))
             logger.warning("TradingAgents adapter: run failed for %s: %s", ticker, last_error)
             # A real, reported failure (e.g. bad API key, provider error) is
             # not a transient blip worth retrying/backing off on - but a
@@ -314,6 +384,25 @@ def run_one(
         result = parsed
         break
 
+    # Reconcile the $ reservation with what actually happened - see
+    # tradingagents_spend.py's module docstring. Only a call that never
+    # even started a subprocess gets released; anything that ran (even a
+    # timeout, even a reported failure) might have already been billed by
+    # the provider, so it is committed, conservatively, at the reserved
+    # ceiling when the real cost can't be determined.
+    try:
+        if not process_ever_started:
+            tradingagents_spend.release(spend_db, entry_id)
+            cost_info = {"total_usd": 0.0, "by_model": {}, "unknown_models": []}
+        else:
+            token_usage = (result or {}).get("token_usage")
+            cost_info = pricing.estimate_cost_usd(token_usage, ta_config.get("pricing"))
+            actual_usd = cost_info["total_usd"] if cost_info["total_usd"] is not None else estimate_usd
+            tradingagents_spend.commit(spend_db, entry_id, actual_usd)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TradingAgents adapter: could not reconcile spend ledger for %s: %s", ticker, exc)
+        cost_info = {"total_usd": None, "by_model": {}, "unknown_models": []}
+
     try:
         _record_call(state_db, call_date)
     except Exception as exc:  # noqa: BLE001
@@ -322,6 +411,8 @@ def run_one(
     if result is None:
         logger.error("TradingAgents adapter: giving up on %s/%s after %d attempt(s): %s", ticker, report_date, max_retries + 1, last_error)
         return None
+
+    result["estimated_cost_usd"] = cost_info
 
     try:
         _cache_set(state_db, key, result, now)
@@ -368,15 +459,47 @@ def build_assessment(
         evidence=evidence, data_available=bool(reports) or bool(raw.get("final_trade_decision")),
     )
 
+    risk_notes = [f"Raw upstream rating: {rating}"] if rating else ["Upstream produced no parseable rating (REVIEW)."]
+    cost_info = raw.get("estimated_cost_usd")
+    if cost_info is not None:
+        if cost_info.get("total_usd") is not None:
+            risk_notes.append(f"Estimated cost: ${cost_info['total_usd']:.4f} (real token usage x configured pricing).")
+        elif cost_info.get("unknown_models"):
+            risk_notes.append(f"Estimated cost: unknown (no pricing entry for: {', '.join(cost_info['unknown_models'])}).")
+
     return AgentResearchAssessment(
         ticker=ticker, report_date=report_date, as_of=as_of, action=action, confidence=confidence,
         thesis=thesis[:2000], bull_points=bull_points, bear_points=bear_points,
-        risk_notes=[f"Raw upstream rating: {rating}"] if rating else ["Upstream produced no parseable rating (REVIEW)."],
+        risk_notes=risk_notes,
         analyst_opinions={"tradingagents_upstream": opinion},
         data_provenance=["source: upstream TauricResearch/TradingAgents package (real LangGraph run)"],
         quant_agent_decision=quant_agent_decision,
         duration_ms=duration_ms,
     )
+
+
+def _select_worthwhile_candidates(ticker_results: list[dict[str, Any]], max_tickers: int) -> list[dict[str, Any]]:
+    """GitHub Issue #1 requirement 6: "ensure the bot selects only
+    worthwhile candidate symbols for expensive multi-agent analysis."
+    Reuses `risk_reviewer`'s own upstream-rejection check (never
+    duplicated, never loosened here) to exclude anything the existing
+    deterministic gates have already rejected - spending a real, billed
+    LLM call analyzing a candidate that can never trade regardless of
+    what it concludes would be pure waste. The remainder is ranked by the
+    best available numeric signal (the Quant/ML composite score when
+    present, else the plain rule-based score) and only the top
+    `max_tickers` are selected."""
+    from .risk_reviewer import _is_rejected_upstream
+
+    eligible = [e for e in ticker_results if e.get("symbol") and not _is_rejected_upstream(e)]
+
+    def _rank(entry: dict[str, Any]) -> float:
+        quant = entry.get("quant_assessment")
+        quant_score = getattr(quant, "quant_score", None)
+        return quant_score if quant_score is not None else (entry.get("score", 0) or 0)
+
+    eligible.sort(key=_rank, reverse=True)
+    return eligible[:max_tickers]
 
 
 def run_shadow_tradingagents_research(
@@ -402,7 +525,7 @@ def run_shadow_tradingagents_research(
 
     portfolio_context = _build_portfolio_context(config, logger)
 
-    candidates = [e for e in ticker_results if e.get("symbol")][:max_tickers]
+    candidates = _select_worthwhile_candidates(ticker_results, max_tickers)
     for entry in candidates:
         ticker = entry["symbol"]
         from ..utils import safe_run

@@ -86,3 +86,23 @@ def test_format_three_way_report_never_raises_on_an_empty_summary(config):
     text = tradingagents_evaluation.format_three_way_report(summary)
     assert "SHADOW MODE" in text
     assert "dollar cost is not tracked" in text
+
+
+# --- Telegram summary --------------------------------------------------------------------
+
+
+def test_send_three_way_report_sends_the_formatted_text(config, monkeypatch):
+    sent = {}
+
+    def fake_send(token, chat_id, text, logger):
+        sent["text"] = text
+        return True
+
+    monkeypatch.setattr("src.telegram_bot.send_telegram_message", fake_send)
+
+    import logging
+
+    result = tradingagents_evaluation.send_three_way_report(config, logging.getLogger("test"), "TOKEN", "123")
+
+    assert result is True
+    assert "Three-way research comparison" in sent["text"]

@@ -226,14 +226,22 @@ def test_disabled_by_default_leaves_entries_untouched(tmp_path):
     assert "tradingagents_assessment" not in entries[0]
 
 
+def _tradeable_entry(symbol, score=50):
+    return {
+        "symbol": symbol, "score": score,
+        "best_risk_result": {"tradeable": True}, "regime_evaluation": {"blocked": False},
+        "portfolio_evaluation": {"decision": "ACCEPT"},
+    }
+
+
 def test_enabled_attaches_assessment_and_respects_max_tickers_per_run(config, monkeypatch):
     config["intelligence"]["tradingagents"]["max_tickers_per_run"] = 1
 
     monkeypatch.setattr(ta, "run_one", lambda *a, **k: {"ok": True, "final_rating": "Buy", "reports": {"market": "m"}})
-    entries = [{"symbol": "AMD"}, {"symbol": "NVDA"}]
+    entries = [_tradeable_entry("AMD", score=90), _tradeable_entry("NVDA", score=50)]
     ta.run_shadow_tradingagents_research(entries, "2026-09-09", config, logger)
 
-    assert entries[0].get("tradingagents_assessment") is not None
+    assert entries[0].get("tradingagents_assessment") is not None  # higher score - selected
     assert entries[1].get("tradingagents_assessment") is None  # beyond the per-run cap
 
 
@@ -245,3 +253,125 @@ def test_never_touches_execution_affecting_fields(config, monkeypatch):
     assert entry["best_risk_result"] == before[0]
     assert entry["portfolio_evaluation"] == before[1]
     assert "execution_decision" not in entry
+
+
+# --- secret redaction -------------------------------------------------------------------
+
+
+def test_redact_masks_common_api_key_shapes():
+    assert ta._redact("call failed: sk-abcdefghijklmnop") == "call failed: [REDACTED]"
+    assert ta._redact("call failed: sk-ant-abcdefghijklmnop") == "call failed: [REDACTED]"
+    assert ta._redact("Authorization: Bearer abcdefghijklmnop") == "[REDACTED]"
+    assert "abcdefghijklmnop" not in ta._redact("ANTHROPIC_API_KEY=abcdefghijklmnop")
+
+
+def test_redact_leaves_ordinary_text_alone():
+    assert ta._redact("no API key was set for provider openai") == "no API key was set for provider openai"
+
+
+def test_redact_handles_none_and_empty():
+    assert ta._redact(None) == ""
+    assert ta._redact("") == ""
+
+
+# --- candidate selection: never spends on an already-rejected candidate -----------------
+
+
+def test_select_worthwhile_candidates_excludes_upstream_rejections():
+    rejected = _tradeable_entry("ZZZZ", score=99)
+    rejected["label"] = "Avoid"
+    kept = _tradeable_entry("AMD", score=10)
+    selected = ta._select_worthwhile_candidates([rejected, kept], max_tickers=5)
+    assert selected == [kept]
+
+
+def test_select_worthwhile_candidates_ranks_by_quant_score_when_available():
+    low_quant = _tradeable_entry("AMD", score=99)
+    low_quant["quant_assessment"] = type("QA", (), {"quant_score": 10})()
+    high_quant = _tradeable_entry("NVDA", score=1)
+    high_quant["quant_assessment"] = type("QA", (), {"quant_score": 90})()
+    selected = ta._select_worthwhile_candidates([low_quant, high_quant], max_tickers=1)
+    assert selected == [high_quant]  # quant_score wins over the plain rule score
+
+
+# --- spend reservation integrated into run_one -------------------------------------------
+
+
+_FAKE_RUNNER_WITH_USAGE = textwrap.dedent("""
+    import json, sys
+    with open(sys.argv[1]) as f:
+        request = json.load(f)
+    print(json.dumps({
+        "ok": True, "signal": "Buy", "final_rating": "Buy",
+        "reports": {"market": "m"},
+        "token_usage": {"test-model": {"input_tokens": 1000000, "output_tokens": 0, "calls": 1}},
+    }))
+""")
+
+
+@pytest.fixture
+def fake_runner_with_usage(tmp_path):
+    script = tmp_path / "fake_runner_usage.py"
+    script.write_text(_FAKE_RUNNER_WITH_USAGE)
+    return script
+
+
+def test_run_one_commits_the_real_priced_cost_not_the_reservation_ceiling(config, fake_runner_with_usage, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_with_usage)
+    config["intelligence"]["tradingagents"]["pricing"] = {"test-model": {"input": 2.00, "output": 10.00}}
+    config["intelligence"]["tradingagents"]["max_cost_per_call_usd"] = 1.00  # the conservative reservation ceiling
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+    assert result["estimated_cost_usd"]["total_usd"] == 2.00  # 1M input tokens @ $2/M - real cost, not the $1.00 reservation
+
+    spend_db = ta.tradingagents_spend.resolve_ledger_path(config)
+    totals = ta.tradingagents_spend.spent_today_and_month(spend_db, now)
+    assert totals["today_usd"] == 2.00
+
+
+def test_run_one_refuses_to_call_once_the_daily_dollar_cap_is_reached(config, fake_runner_with_usage, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_with_usage)
+    config["intelligence"]["tradingagents"]["max_daily_spend_usd"] = 0.0001  # effectively zero room
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called once the daily $ cap refuses the reservation")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+    assert result is None
+
+
+def test_run_one_releases_the_reservation_when_the_process_never_starts(config, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path("/does/not/exist/python"))
+    config["intelligence"]["tradingagents"]["max_retries"] = 0
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+    assert result is None
+
+    spend_db = ta.tradingagents_spend.resolve_ledger_path(config)
+    totals = ta.tradingagents_spend.spent_today_and_month(spend_db, now)
+    assert totals["today_usd"] == 0.0  # released, not committed - the process never actually ran
+
+
+# --- per-ticker isolation: one bad ticker never stops the rest --------------------------
+
+
+def test_one_ticker_raising_never_blocks_the_next_ticker(config, monkeypatch):
+    config["intelligence"]["tradingagents"]["max_tickers_per_run"] = 5
+
+    def flaky_run_one(ticker, *a, **k):
+        if ticker == "AMD":
+            raise RuntimeError("simulated failure for AMD only")
+        return {"ok": True, "final_rating": "Buy", "reports": {"market": "m"}}
+
+    monkeypatch.setattr(ta, "run_one", flaky_run_one)
+    entries = [_tradeable_entry("AMD", score=90), _tradeable_entry("NVDA", score=50)]
+    ta.run_shadow_tradingagents_research(entries, "2026-09-09", config, logger)
+
+    assert entries[0].get("tradingagents_assessment") is None  # AMD failed
+    assert entries[1].get("tradingagents_assessment") is not None  # NVDA still processed

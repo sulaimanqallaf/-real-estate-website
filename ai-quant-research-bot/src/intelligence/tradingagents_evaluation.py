@@ -113,3 +113,39 @@ def format_three_way_report(summary: dict[str, Any]) -> str:
         "see GitHub Issue #1 for the forward-shadow validation this is building evidence toward."
     )
     return "\n".join(lines)
+
+
+def send_three_way_report(config: dict[str, Any], logger, token: str, chat_id: str, since: str | None = None, until: str | None = None) -> bool:
+    """GitHub Issue #1 follow-up requirement 9: a Telegram summary of the
+    three-way comparison, same pattern as `ml/weekly_report.send_weekly_
+    report()`. Informational only - sending this report is itself still
+    entirely passive and changes nothing about PAPER trading."""
+    from .. import telegram_bot
+
+    summary = compare_three_way(config, since=since, until=until)
+    text = format_three_way_report(summary)
+    return telegram_bot.send_telegram_message(token, chat_id, text, logger)
+
+
+def main() -> int:
+    import os
+
+    from ..utils import load_config, load_env, setup_logging
+
+    load_env()
+    config = load_config(None)
+    logger = setup_logging(config, log_filename="tradingagents_comparison_report.log")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.error("TradingAgents comparison report: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured - printing instead.")
+        print(format_three_way_report(compare_three_way(config)))
+        return 0
+
+    send_three_way_report(config, logger, token, chat_id)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

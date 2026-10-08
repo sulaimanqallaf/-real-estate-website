@@ -55,6 +55,55 @@ def main() -> int:
     return 0
 
 
+class _UsageTrackingCallbackHandler:
+    """Accumulates REAL per-model token usage across every LLM call this
+    run makes, via LangChain's standard callback interface - GitHub Issue
+    #1: "add actual dollar-cost accounting using provider token usage...
+    not call counts alone." `on_chat_model_start` records which model a
+    `run_id` belongs to (from `invocation_params`); `on_llm_end` reads the
+    provider-agnostic `AIMessage.usage_metadata` LangChain populates for
+    every chat model integration it ships (OpenAI/Anthropic/Google/etc.)
+    and adds it to that model's running total. Dollar pricing is computed
+    on the MAIN process side (`src/intelligence/pricing.py`) - this class
+    only ever reports raw token counts, never a dollar figure, so a
+    pricing-table update never requires touching the isolated environment.
+
+    Subclasses `langchain_core.callbacks.base.BaseCallbackHandler` lazily
+    (inside `__init__`) rather than at class-definition time, so this
+    module still imports cleanly (for the few pure-Python helpers a test
+    might want) even without `langchain_core` installed."""
+
+    def __new__(cls):
+        from langchain_core.callbacks.base import BaseCallbackHandler
+
+        class _Impl(BaseCallbackHandler):
+            def __init__(self):
+                self.usage: dict[str, dict[str, int]] = {}
+                self._model_by_run_id: dict[str, str] = {}
+
+            def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+                model = (kwargs.get("invocation_params") or {}).get("model") or (serialized or {}).get("name") or "unknown"
+                self._model_by_run_id[str(run_id)] = model
+
+            def on_llm_start(self, serialized, prompts, *, run_id, **kwargs):
+                model = (kwargs.get("invocation_params") or {}).get("model") or (serialized or {}).get("name") or "unknown"
+                self._model_by_run_id[str(run_id)] = model
+
+            def on_llm_end(self, response, *, run_id, **kwargs):
+                model = self._model_by_run_id.pop(str(run_id), "unknown")
+                entry = self.usage.setdefault(model, {"input_tokens": 0, "output_tokens": 0, "calls": 0})
+                entry["calls"] += 1
+                for generation_list in response.generations:
+                    for generation in generation_list:
+                        message = getattr(generation, "message", None)
+                        usage = getattr(message, "usage_metadata", None) if message is not None else None
+                        if usage:
+                            entry["input_tokens"] += usage.get("input_tokens", 0) or 0
+                            entry["output_tokens"] += usage.get("output_tokens", 0) or 0
+
+        return _Impl()
+
+
 def _run(request: dict) -> dict:
     from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -71,8 +120,9 @@ def _run(request: dict) -> dict:
     config["memory_log_path"] = f"{work_dir}/memory/trading_memory.md"
     config["checkpoint_enabled"] = False
 
+    usage_tracker = _UsageTrackingCallbackHandler()
     selected_analysts = request.get("selected_analysts") or ["market", "social", "news", "fundamentals"]
-    graph = TradingAgentsGraph(selected_analysts=selected_analysts, config=config)
+    graph = TradingAgentsGraph(selected_analysts=selected_analysts, config=config, callbacks=[usage_tracker])
 
     final_state, signal = graph.propagate(
         request["ticker"], request["trade_date"],
@@ -102,6 +152,9 @@ def _run(request: dict) -> dict:
         # run_settings() is an explicit allowlist in upstream (no keys, no
         # local paths) - safe to pass through as-is.
         "run_settings": graph.run_settings() if hasattr(graph, "run_settings") else None,
+        # Raw token counts only - no dollar figure computed here, see
+        # _UsageTrackingCallbackHandler's docstring.
+        "token_usage": usage_tracker.usage,
     }
 
 

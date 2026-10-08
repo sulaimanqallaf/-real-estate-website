@@ -2476,7 +2476,7 @@ optional, disabled-by-default integration.
 | Analyst graph (market/social/news/fundamentals), LangGraph orchestration, Bull/Bear debate, Research Manager, Trader, Portfolio Manager, Risk team, memory log + reflection | **Upstream `tradingagents` package**, run unmodified inside its own isolated environment |
 | News/fundamentals data vendors (SEC EDGAR, yfinance, optionally Alpha Vantage/FRED with the right API key) | **Upstream**, via its own `data_vendors` config |
 | LLM provider clients (OpenAI/Anthropic/Google/Azure/Bedrock/etc.) | **Upstream**, selected via `intelligence.tradingagents.config_overrides.llm_provider` |
-| The subprocess boundary, isolation, caching, retries, timeouts, call-budget ceiling, result mapping to this project's own `AgentResearchAssessment`, separate SQLite storage, and the three-way comparison report | **This project's own code** (`tradingagents_adapter.py`, `tradingagents_evaluation.py`, `tools/tradingagents_runner.py`) |
+| The subprocess boundary, isolation, caching, retries, timeouts, worthwhile-candidate selection, real token-usage-based $ cost accounting, the concurrency-safe daily/monthly spend ledger, result mapping to this project's own `AgentResearchAssessment`, separate SQLite storage, and the three-way comparison report | **This project's own code** (`tradingagents_adapter.py`, `tradingagents_evaluation.py`, `pricing.py`, `tradingagents_spend.py`, `tools/tradingagents_runner.py`) |
 | Any influence on IBKR Paper execution, circuit breakers, or risk limits | **None from either source** - see invariants below |
 
 ### Isolation
@@ -2491,13 +2491,31 @@ pair per call. A missing install, an incompatible dependency, or a breaking
 upstream release can never affect this project's own environment or test
 suite, because this project's own process never imports the package at all.
 
-Setup (optional, only if you want to actually run it):
+### Setup - one command
+
 ```bash
 ./scripts/setup_tradingagents_env.sh
-# then add an LLM provider key to .env, e.g.:
-#   ANTHROPIC_API_KEY=...
-# and set intelligence.tradingagents.enabled: true in config/settings.yaml
 ```
+
+This creates (or reuses) the isolated environment, installs the pinned
+version, and verifies the install by importing it - safe to re-run any
+time. It prints the exact remaining steps, which are:
+
+1. Add an LLM provider API key to your `.env` (already gitignored), e.g.:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+   or `OPENAI_API_KEY=sk-...`. **How the key actually reaches TradingAgents:**
+   `subprocess.run()` inherits this project's entire environment by
+   default (standard Python behavior) - the key is never read, copied, or
+   written anywhere by this project's own code; it flows straight from
+   your `.env` (loaded by `utils.load_env()` at process start) to the
+   isolated subprocess's environment, exactly like `PATH` or any other
+   inherited variable. It is never written into the request file the
+   adapter builds, and error text that might echo a key is redacted
+   (`_redact()`) before being logged.
+2. Set `intelligence.tradingagents.enabled: true` in `config/settings.yaml`.
+3. Optionally choose a provider/model via `intelligence.tradingagents.config_overrides`.
 
 ### Hard invariants (identical posture to the deterministic layer)
 
@@ -2512,34 +2530,54 @@ Setup (optional, only if you want to actually run it):
 4. Its predictions are stored in their own SQLite database
    (`data/journal/tradingagents_research_memory.db`), separate from both
    the deterministic engine's and `ml/decision_ledger.py`'s databases.
-5. Bounded cost: `max_tickers_per_run` (default 2) caps how many tickers
-   per daily run actually call it; `max_calls_per_day` is a call-COUNT
-   ceiling (not a verified dollar budget - see below); results are cached
-   for `cache_ttl_hours` (default 24h) by `(ticker, report_date, analysts,
-   config_overrides)`.
-6. No config path lets this reach `execution_policy.py`, `circuit_breaker.py`,
-   or `portfolio_risk.py`.
+5. **Worthwhile-candidate selection**: `_select_worthwhile_candidates()`
+   excludes anything the existing deterministic gates already rejected
+   and ranks the rest by the best available numeric signal - a real,
+   billed call is only ever spent on a candidate that could actually trade.
+6. **Real $ cost accounting, not call counts alone**: a LangChain callback
+   in the isolated runner records actual per-model token usage;
+   `pricing.py` turns that into a dollar figure via a configurable
+   $/million-token table (`intelligence.tradingagents.pricing`) - `None`,
+   never a fabricated number, for a model with no pricing entry.
+7. **Hard daily + monthly $ spend caps**
+   (`max_daily_spend_usd`/`max_monthly_spend_usd`), enforced through a
+   concurrency-safe reserve-then-reconcile SQLite ledger
+   (`tradingagents_spend.py`, `BEGIN IMMEDIATE` transactions) so two
+   overlapping calls can never jointly exceed either cap. A call-COUNT
+   ceiling (`max_calls_per_day`) still applies alongside the $ caps.
+8. No config path lets this reach `execution_policy.py`, `circuit_breaker.py`,
+   or `portfolio_risk.py` - verified by a grep-based test over every file
+   in `src/execution/` plus `portfolio_risk.py`/`risk_manager.py`.
 
 ### Known limitations, disclosed rather than hidden
 
-- **No real dollar-cost tracking.** TradingAgents does not expose a
-  reliable per-run token/cost figure without wiring a token-accounting
-  callback through every provider, which has not been built. Only
-  latency (`duration_ms`) and a call-count ceiling are tracked - never
-  represented as a verified spend figure.
-- **This has only been exercised in a cloud sandbox against the installed
-  package's own error paths (no API key configured)** - it has never
-  completed a real run against a real LLM provider. Confirmed working up
-  to the credential boundary (correct config/provider wiring, a clean
-  JSON error on a missing key), but not end-to-end.
-- **No historical backtest or forward-shadow validation period has run.**
-  `tradingagents_evaluation.compare_three_way()` only compares forward
-  from whenever you start running it for real.
+- **No real pricing-table accuracy guarantee.** The built-in $/million-token
+  table is a snapshot taken when it was written and WILL drift as
+  providers change pricing - verify/override `intelligence.tradingagents.
+  pricing` with current published rates before trusting the dollar
+  figures beyond a rough order of magnitude.
+- **No real end-to-end LLM-backed run has completed in this session.**
+  `tests/test_intelligence_tradingagents_live_smoke.py` is a genuine,
+  non-mocked integration test against the real package and a real
+  provider - it is SKIPPED (not faked) whenever no
+  `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` is present, which is the case in
+  the cloud sandbox this was built in. It will actually run the moment a
+  real key is available (e.g. on your Mac).
+- **No historical backtest or forward-shadow validation period has run
+  for real yet.** `tradingagents_evaluation.compare_three_way()` only
+  compares forward from whenever you start running this for real -
+  per Issue #1, strict shadow mode is kept until that period establishes
+  a measurable benefit; there is still no veto/reduce-only gate anywhere.
 
 ### Reading the output
 
 Per-candidate: an "Upstream TradingAgents (SHADOW, not executed): BUY/SELL/HOLD"
-line in the report text. For the full three-way comparison:
+line in the report text, including an estimated-cost note. For the full
+three-way comparison (as text, or sent to Telegram like the existing
+weekly learning report):
+```bash
+python -m src.intelligence.tradingagents_evaluation   # prints, or sends to Telegram if TELEGRAM_BOT_TOKEN/CHAT_ID are set
+```
 ```python
 from src.intelligence import tradingagents_evaluation
 summary = tradingagents_evaluation.compare_three_way(config)
