@@ -1,6 +1,11 @@
 .env
 .venv/
 venv/
+# Isolated environment for the optional upstream TradingAgents adapter
+# (GitHub Issue #1) - never committed; recreated via
+# scripts/setup_tradingagents_env.sh from the pinned commit in
+# requirements-tradingagents.txt.
+.venvs/
 __pycache__/
 *.pyc
 .pytest_cache/

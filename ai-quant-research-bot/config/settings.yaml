@@ -442,6 +442,28 @@ intelligence:
   # unset (the default) keeps the news analyst reporting Data Unavailable.
   news_provider: null
 
+  # OPTIONAL integration with the REAL upstream TauricResearch/TradingAgents
+  # package (GitHub Issue #1) - see src/intelligence/tradingagents_adapter.py
+  # and README "Multi-Agent Research Layer" for the full contract.
+  # Disabled by default: enabling it costs real LLM API calls and requires
+  # ./scripts/setup_tradingagents_env.sh to have been run once, plus an LLM
+  # provider API key (e.g. ANTHROPIC_API_KEY/OPENAI_API_KEY) in .env.
+  tradingagents:
+    enabled: false
+    # python_executable: ".venvs/tradingagents/bin/python"   # default if unset
+    selected_analysts: ["market", "social", "news", "fundamentals"]
+    max_tickers_per_run: 2        # bounds real API cost per daily run
+    max_calls_per_day: 10         # a call-COUNT ceiling, not a verified dollar budget - see tradingagents_adapter.py
+    cache_ttl_hours: 24
+    timeout_seconds: 180
+    max_retries: 1
+    # Forwarded into TradingAgents' own config dict as overrides on top of
+    # its DEFAULT_CONFIG - e.g. {"llm_provider": "anthropic", "deep_think_llm":
+    # "...", "quick_think_llm": "...", "max_debate_rounds": 1}. Left empty by
+    # default; TradingAgents' own default_config.py also honors its
+    # TRADINGAGENTS_* environment variables if you prefer setting it there.
+    config_overrides: {}
+
 logging:
   level: "INFO"
   log_dir: "data/reports"

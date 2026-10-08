@@ -1,0 +1,14 @@
+# Pinned dependency for the OPTIONAL upstream TradingAgents adapter
+# (GitHub Issue #1: "build a separate optional integration using the
+# real TradingAgents Python package"). Installed ONLY into the isolated
+# .venvs/tradingagents/ environment via scripts/setup_tradingagents_env.sh -
+# NEVER into this project's own requirements.txt/environment. TradingAgents
+# pulls in LangGraph/LangChain and (per the Apache-2.0 license it ships
+# under) a different, much heavier dependency footprint than this project
+# uses; isolating it means a dependency conflict or a breaking upstream
+# release can never affect src/main.py, src/execution/, or this project's
+# own test suite.
+#
+# Pinned to the exact commit resolved at review time (v0.6.0 tag), not a
+# moving branch HEAD, for reproducibility:
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@1394a3f72aa4393e1a98f51b382434c4b4c2d972

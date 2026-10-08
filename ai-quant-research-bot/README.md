@@ -2459,6 +2459,93 @@ intelligence:
   news_provider: null   # no provider ships today; the news analyst reports Data Unavailable until one is configured
 ```
 
+## OPTIONAL: real upstream TradingAgents integration - `tradingagents_adapter.py`
+
+The deterministic layer above is this project's own baseline and is unchanged
+by this section. Separately, GitHub Issue #1 also asked for an integration
+using the **actual** [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
+package - its real LangGraph-powered analysts, Bull/Bear debate, research
+manager, risk team, and memory/reflection system - not a recreation of it.
+`src/intelligence/tradingagents_adapter.py` provides that, as a separate,
+optional, disabled-by-default integration.
+
+### What comes from upstream vs. what is this project's own code
+
+| Capability | Source |
+|---|---|
+| Analyst graph (market/social/news/fundamentals), LangGraph orchestration, Bull/Bear debate, Research Manager, Trader, Portfolio Manager, Risk team, memory log + reflection | **Upstream `tradingagents` package**, run unmodified inside its own isolated environment |
+| News/fundamentals data vendors (SEC EDGAR, yfinance, optionally Alpha Vantage/FRED with the right API key) | **Upstream**, via its own `data_vendors` config |
+| LLM provider clients (OpenAI/Anthropic/Google/Azure/Bedrock/etc.) | **Upstream**, selected via `intelligence.tradingagents.config_overrides.llm_provider` |
+| The subprocess boundary, isolation, caching, retries, timeouts, call-budget ceiling, result mapping to this project's own `AgentResearchAssessment`, separate SQLite storage, and the three-way comparison report | **This project's own code** (`tradingagents_adapter.py`, `tradingagents_evaluation.py`, `tools/tradingagents_runner.py`) |
+| Any influence on IBKR Paper execution, circuit breakers, or risk limits | **None from either source** - see invariants below |
+
+### Isolation
+
+TradingAgents is installed into a **separate virtual environment**
+(`.venvs/tradingagents/`, never committed, never this project's own
+environment), pinned to an exact commit in `requirements-tradingagents.txt`
+(reviewed at v0.6.0). This project's own Python process never imports
+`tradingagents` - it only ever shells out to `tools/tradingagents_runner.py`
+running inside that isolated environment, exchanging one JSON request/response
+pair per call. A missing install, an incompatible dependency, or a breaking
+upstream release can never affect this project's own environment or test
+suite, because this project's own process never imports the package at all.
+
+Setup (optional, only if you want to actually run it):
+```bash
+./scripts/setup_tradingagents_env.sh
+# then add an LLM provider key to .env, e.g.:
+#   ANTHROPIC_API_KEY=...
+# and set intelligence.tradingagents.enabled: true in config/settings.yaml
+```
+
+### Hard invariants (identical posture to the deterministic layer)
+
+1. **Disabled by default** (`intelligence.tradingagents.enabled: false`).
+   Enabling it calls a real, billed LLM provider.
+2. SHADOW MODE ONLY, same call site as the deterministic layer - strictly
+   AFTER the execution layer has already decided/submitted every order.
+   Only ever adds `entry["tradingagents_assessment"]`.
+3. Portfolio context passed to it (`_build_portfolio_context()`) is a
+   READ-ONLY snapshot of open positions and account equity - never
+   credentials, never a broker handle.
+4. Its predictions are stored in their own SQLite database
+   (`data/journal/tradingagents_research_memory.db`), separate from both
+   the deterministic engine's and `ml/decision_ledger.py`'s databases.
+5. Bounded cost: `max_tickers_per_run` (default 2) caps how many tickers
+   per daily run actually call it; `max_calls_per_day` is a call-COUNT
+   ceiling (not a verified dollar budget - see below); results are cached
+   for `cache_ttl_hours` (default 24h) by `(ticker, report_date, analysts,
+   config_overrides)`.
+6. No config path lets this reach `execution_policy.py`, `circuit_breaker.py`,
+   or `portfolio_risk.py`.
+
+### Known limitations, disclosed rather than hidden
+
+- **No real dollar-cost tracking.** TradingAgents does not expose a
+  reliable per-run token/cost figure without wiring a token-accounting
+  callback through every provider, which has not been built. Only
+  latency (`duration_ms`) and a call-count ceiling are tracked - never
+  represented as a verified spend figure.
+- **This has only been exercised in a cloud sandbox against the installed
+  package's own error paths (no API key configured)** - it has never
+  completed a real run against a real LLM provider. Confirmed working up
+  to the credential boundary (correct config/provider wiring, a clean
+  JSON error on a missing key), but not end-to-end.
+- **No historical backtest or forward-shadow validation period has run.**
+  `tradingagents_evaluation.compare_three_way()` only compares forward
+  from whenever you start running it for real.
+
+### Reading the output
+
+Per-candidate: an "Upstream TradingAgents (SHADOW, not executed): BUY/SELL/HOLD"
+line in the report text. For the full three-way comparison:
+```python
+from src.intelligence import tradingagents_evaluation
+summary = tradingagents_evaluation.compare_three_way(config)
+print(tradingagents_evaluation.format_three_way_report(summary))
+```
+
 ## Disclaimer
 
 Research and educational tool only. Not financial advice. No trades are placed -

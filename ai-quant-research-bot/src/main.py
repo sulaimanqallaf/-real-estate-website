@@ -716,6 +716,18 @@ def run(config_path: str | None = None) -> int:
         lambda: agent_research_pipeline.run_shadow_research(ticker_results, report_date, config, logger),
     )
 
+    # OPTIONAL real upstream TradingAgents integration (GitHub Issue #1) -
+    # same shadow-mode call site and invariants as the deterministic layer
+    # above; disabled by default (intelligence.tradingagents.enabled) and
+    # calls a real, billed LLM provider when enabled. See
+    # src/intelligence/tradingagents_adapter.py's module docstring.
+    from .intelligence import tradingagents_adapter
+
+    safe_run(
+        logger, "upstream TradingAgents research layer (shadow mode)",
+        lambda: tradingagents_adapter.run_shadow_tradingagents_research(ticker_results, report_date, config, logger),
+    )
+
     csv_path, json_path = report_writer.save_reports(ticker_results, config, report_date)
     logger.info("Saved report: %s | %s", csv_path, json_path)
 

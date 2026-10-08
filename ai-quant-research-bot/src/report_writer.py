@@ -75,6 +75,7 @@ def format_candidate_block(entry: dict[str, Any]) -> str:
         plan_str += format_big_money_context_line(entry)
         plan_str += format_quant_agent_context_line(entry)
         plan_str += format_agent_research_context_line(entry)
+        plan_str += format_tradingagents_context_line(entry)
 
     return (
         f"{entry['symbol']}\n"
@@ -216,6 +217,19 @@ def format_agent_research_section(ticker_results: list[dict[str, Any]], config: 
         "See src/intelligence/evaluation.py for the ongoing accuracy comparison."
     )
     return f"{header}\n\n" + "\n".join(lines)
+
+
+def format_tradingagents_context_line(entry: dict[str, Any]) -> str:
+    """The OPTIONAL real upstream TradingAgents integration's per-candidate
+    line (GitHub Issue #1) - separate from `format_agent_research_context_
+    line()`'s deterministic-engine line above, since the two are stored
+    and evaluated separately (`src/intelligence/tradingagents_adapter.py`).
+    Empty string whenever `entry["tradingagents_assessment"]` was never set
+    - the default (`intelligence.tradingagents.enabled: false`)."""
+    assessment = entry.get("tradingagents_assessment")
+    if assessment is None:
+        return ""
+    return f"Upstream TradingAgents (SHADOW, not executed): {assessment.action} - {assessment.thesis[:160]}\n"
 
 
 def format_quant_agent_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:

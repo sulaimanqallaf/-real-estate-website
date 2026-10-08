@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS assessments (
     data_provenance TEXT,
     quant_agent_decision TEXT,
     reflection_note TEXT,
+    duration_ms REAL,
     recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assessments_ticker ON assessments(ticker);
@@ -88,14 +89,14 @@ def record_assessment(db_path: str | Path, assessment: AgentResearchAssessment) 
             """INSERT INTO assessments (
                 assessment_id, ticker, report_date, as_of, action, confidence, thesis,
                 bull_points, bear_points, risk_notes, analyst_opinions, data_provenance,
-                quant_agent_decision, reflection_note, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                quant_agent_decision, reflection_note, duration_ms, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 assessment_id, payload["ticker"], payload["report_date"], payload["as_of"],
                 payload["action"], payload["confidence"], payload["thesis"],
                 json.dumps(payload["bull_points"]), json.dumps(payload["bear_points"]), json.dumps(payload["risk_notes"]),
                 json.dumps(payload["analyst_opinions"]), json.dumps(payload["data_provenance"]),
-                payload["quant_agent_decision"], payload["reflection_note"],
+                payload["quant_agent_decision"], payload["reflection_note"], payload["duration_ms"],
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
