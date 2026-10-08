@@ -116,14 +116,132 @@ def test_call_budget_remaining_decrements_and_resets_per_day(config):
 # --- portfolio context (read-only, never credentials) ------------------------------------
 
 
-def test_build_portfolio_context_degrades_to_empty_dict_with_no_paper_trades(config):
-    assert ta._build_portfolio_context(config, logger) == {}
+def test_build_portfolio_context_is_unknown_not_empty_when_config_is_incomplete(config):
+    # This config has no "paper_trading" section at all - load_paper_trades_df()
+    # cannot even determine the CSV path, so the right answer is "we don't
+    # know", never a confident "zero holdings."
+    assert ta._build_portfolio_context(config, logger) is None
 
 
 def test_build_portfolio_context_never_includes_credentials():
     ctx = ta._build_portfolio_context({"data": {"journal_dir": "/nonexistent"}}, logger)
     assert "api_key" not in json.dumps(ctx).lower()
     assert "token" not in json.dumps(ctx).lower()
+
+
+def _paper_trading_config(tmp_path):
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    return {
+        "data": {"journal_dir": str(journal_dir)},
+        "paper_trading": {"paper_trades_file": "paper_trades.csv", "pending_approvals_file": "pending_approvals.json"},
+        "risk": {"account_equity": 10_000},
+        "intelligence": {"tradingagents": {"enabled": True}},
+    }
+
+
+def _record(config, symbol, provenance, status="OPEN", trade_id=None, entry=100.0, shares=10):
+    import src.paper_trades as paper_trades
+
+    paper_trades.record_paper_trade(
+        {
+            "symbol": symbol, "strategy": "Trend Following", "signal": "Top Candidate", "score": 90,
+            "entry": entry, "stop_loss": 95.0, "target": 115.0, "risk_reward": 3.0,
+            "shares": shares, "dollar_risk": 50.0, "regime_at_entry": "TRENDING_UP",
+            "report_date": "2026-09-09", "decided_at": None,
+        },
+        config, trade_id=trade_id, provenance=provenance,
+    )
+    if status != "OPEN":
+        df = paper_trades.load_paper_trades_df(config)
+        df.loc[df["ticker"] == symbol, "status"] = status
+        df.to_csv(paper_trades._paper_trades_path(config), index=False)
+
+
+def test_build_portfolio_context_is_a_known_flat_book_with_an_empty_but_readable_csv(tmp_path):
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    # Force the file to exist (empty, but a real, readable ledger) - distinct
+    # from "no paper_trading config at all" (unknown -> None).
+    paper_trades.load_paper_trades_df(config)  # no rows recorded
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx == {"cash": 10_000, "currency": None, "positions": []}
+
+
+def test_build_portfolio_context_includes_an_actual_broker_paper_position(tmp_path):
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    _record(config, "AMD", paper_trades.PROVENANCE_BROKER_PAPER, entry=100.0, shares=10)
+
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx is not None
+    assert ctx["positions"] == [{"ticker": "AMD", "quantity": 10.0, "average_price": 100.0}]
+
+
+def test_build_portfolio_context_excludes_a_simulated_never_submitted_row(tmp_path):
+    """The exact bug class this follow-up asks to guard against: a
+    SIMULATED (DRY_RUN, never actually submitted to any broker) row must
+    never be reported to TradingAgents as if it were a real holding."""
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    _record(config, "AMD", paper_trades.PROVENANCE_SIMULATED, entry=100.0, shares=10)
+
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx is not None
+    assert ctx["positions"] == []  # a known, confirmed flat book - the SIMULATED row is real data, correctly excluded
+
+
+def test_build_portfolio_context_excludes_a_broker_paper_row_that_is_already_closed(tmp_path):
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    _record(config, "AMD", paper_trades.PROVENANCE_BROKER_PAPER, status="TARGET_HIT", entry=100.0, shares=10)
+
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx["positions"] == []
+
+
+def test_build_portfolio_context_mixes_correctly_when_both_provenances_are_present(tmp_path):
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    _record(config, "AMD", paper_trades.PROVENANCE_BROKER_PAPER, entry=100.0, shares=10)
+    _record(config, "NVDA", paper_trades.PROVENANCE_SIMULATED, entry=200.0, shares=5)
+
+    ctx = ta._build_portfolio_context(config, logger)
+    tickers = [p["ticker"] for p in ctx["positions"]]
+    assert tickers == ["AMD"]  # only the real broker-paper row - NVDA's simulated row stays out
+
+
+def test_build_portfolio_context_skips_a_row_with_a_missing_quantity_rather_than_guessing(tmp_path):
+    import src.paper_trades as paper_trades
+
+    config = _paper_trading_config(tmp_path)
+    _record(config, "AMD", paper_trades.PROVENANCE_BROKER_PAPER, entry=100.0, shares=10)
+    df = paper_trades.load_paper_trades_df(config)
+    df.loc[df["ticker"] == "AMD", "position_size"] = None
+    df.to_csv(paper_trades._paper_trades_path(config), index=False)
+
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx["positions"] == []  # never fabricates a quantity for a malformed row
+
+
+def test_build_portfolio_context_excludes_a_row_from_an_old_format_csv_missing_status_or_provenance(tmp_path):
+    """A corrupt/old-format CSV missing the `provenance`/`status` columns
+    entirely: `load_paper_trades_df()` already reindexes those in as NaN
+    (never raises) - a NaN status can never equal "OPEN", so the row is
+    correctly excluded from positions, same as any other malformed row,
+    rather than treated as a confirmed open position."""
+    config = _paper_trading_config(tmp_path)
+    journal_dir = Path(config["data"]["journal_dir"])
+    (journal_dir / "paper_trades.csv").write_text("ticker,entry_price\nAMD,100.0\n", encoding="utf-8")
+
+    ctx = ta._build_portfolio_context(config, logger)
+    assert ctx is not None
+    assert ctx["positions"] == []
 
 
 # --- run_one: real subprocess plumbing using a fixture script in place of tradingagents --

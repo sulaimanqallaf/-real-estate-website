@@ -124,10 +124,25 @@ def _run(request: dict) -> dict:
     selected_analysts = request.get("selected_analysts") or ["market", "social", "news", "fundamentals"]
     graph = TradingAgentsGraph(selected_analysts=selected_analysts, config=config, callbacks=[usage_tracker])
 
+    # propagate() expects a real tradingagents.portfolio.PortfolioContext
+    # object (it calls .render()/.fingerprint() on it), never a plain
+    # dict - build one from the JSON payload when given. `None` is passed
+    # straight through as `None`: upstream's own portfolio.py distinguishes
+    # "no context at all" from "a flat book with zero positions", and the
+    # main-process adapter already encodes that distinction (see
+    # tradingagents_adapter._build_portfolio_context()'s docstring) -
+    # this script must not collapse it back into one state.
+    portfolio_payload = request.get("portfolio")
+    portfolio_obj = None
+    if portfolio_payload is not None:
+        from tradingagents.portfolio import PortfolioContext
+
+        portfolio_obj = PortfolioContext.model_validate(portfolio_payload)
+
     final_state, signal = graph.propagate(
         request["ticker"], request["trade_date"],
         asset_type=request.get("asset_type", "stock"),
-        portfolio=request.get("portfolio"),
+        portfolio=portfolio_obj,
     )
 
     debate = final_state.get("investment_debate_state") or {}

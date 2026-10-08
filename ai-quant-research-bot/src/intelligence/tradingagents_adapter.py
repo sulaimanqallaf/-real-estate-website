@@ -241,22 +241,78 @@ def _record_call(db_path: Path, call_date: str) -> None:
         )
 
 
-def _build_portfolio_context(config: dict[str, Any], logger: logging.Logger) -> dict[str, Any]:
-    """A READ-ONLY snapshot of broker-paper positions and account equity -
-    never credentials, never a broker handle. Degrades to `{}` on any
-    failure (GitHub Issue #1 integration-plan point 2: "read-only...
-    never credentials or control capabilities")."""
+def _build_portfolio_context(config: dict[str, Any], logger: logging.Logger) -> dict[str, Any] | None:
+    """A READ-ONLY snapshot of ACTUAL broker-paper positions - never
+    credentials, never a broker handle (GitHub Issue #1 integration-plan
+    point 2). Shaped to match upstream's own
+    `tradingagents.portfolio.PortfolioContext` schema exactly (`cash`,
+    `currency`, `positions: [{ticker, quantity, average_price}]`), which
+    `tools/tradingagents_runner.py` validates straight into that type
+    before calling `propagate()`.
+
+    **Bug fixed (reported after a real Mac run):** this used to read
+    `r["symbol"]`/`r.get("shares")`, but `paper_trades.load_paper_trades_
+    df()`'s real columns are `ticker`/`position_size` (see
+    `paper_trades.PAPER_TRADE_COLUMNS`) - every call crashed with
+    `KeyError: 'symbol'`.
+
+    **Simulated vs. broker-paper, never confused:** only rows whose
+    `provenance` resolves (via `paper_trades.effective_provenance()`) to
+    `PROVENANCE_BROKER_PAPER` are included - a `SIMULATED` row was never
+    actually submitted to a broker and must never be reported to an
+    external research tool as a real holding. In pure DRY_RUN/simulated
+    deployments this correctly, deliberately reports zero positions: a
+    simulated approval is not a real position, and saying otherwise
+    would be exactly the "invented position" this must never do.
+
+    **Returns `None` - not `{}`, not an empty positions list - on any
+    failure.** Matches upstream's own three-state portfolio model
+    (`portfolio.py`'s docstring: "a position, a flat book, and no
+    context at all... treating 'not provided' as 'flat' would invent a
+    fact about the caller's account"): `None` here means "unknown,"
+    propagated by `run_one()`/the runner as `portfolio=None` (no context
+    given at all) - never silently rendered as a confirmed flat book."""
+    from ..utils import is_nan
+
     try:
         from .. import paper_trades
 
         df = paper_trades.load_paper_trades_df(config)
-        open_rows = df[df["status"] == "OPEN"] if "status" in df.columns else df.iloc[0:0]
-        positions = [{"ticker": r["symbol"], "shares": r.get("shares")} for _, r in open_rows.iterrows()]
-        equity = config.get("risk", {}).get("account_equity")
-        return {"positions": positions, "account_equity": equity}
-    except Exception as exc:  # noqa: BLE001 - portfolio context is advisory only
-        logger.warning("TradingAgents adapter: could not build portfolio context: %s", exc)
-        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TradingAgents adapter: could not read paper_trades.csv for portfolio context - treating as UNKNOWN, never as zero holdings: %s", exc)
+        return None
+
+    try:
+        if df.empty:
+            open_broker_rows = df.iloc[0:0]
+        else:
+            is_open = df["status"] == "OPEN"
+            is_broker_paper = df["provenance"].apply(paper_trades.effective_provenance) == paper_trades.PROVENANCE_BROKER_PAPER
+            open_broker_rows = df[is_open & is_broker_paper]
+
+        positions = []
+        for _, row in open_broker_rows.iterrows():
+            ticker = row.get("ticker")
+            quantity = row.get("position_size")
+            if not ticker or is_nan(ticker) or quantity is None or is_nan(quantity):
+                continue  # a malformed row is skipped, never guessed into a position
+            entry_price = row.get("entry_price")
+            positions.append({
+                "ticker": str(ticker),
+                "quantity": float(quantity),
+                "average_price": None if entry_price is None or is_nan(entry_price) else float(entry_price),
+            })
+
+        # risk.account_equity is this paper account's configured equity -
+        # the same figure circuit_breaker.py/portfolio_risk.py already
+        # treat as authoritative for a PAPER account throughout this
+        # codebase - not a live broker cash balance, but not invented
+        # either; None (unknown) when not configured at all.
+        cash = config.get("risk", {}).get("account_equity")
+        return {"cash": cash, "currency": None, "positions": positions}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TradingAgents adapter: could not build portfolio context from loaded trades - treating as UNKNOWN, never as zero holdings: %s", exc)
+        return None
 
 
 def run_one(
@@ -323,7 +379,11 @@ def run_one(
     request = {
         "ticker": ticker, "trade_date": report_date, "work_dir": str(work_dir),
         "selected_analysts": selected_analysts, "config_overrides": config_overrides,
-        "portfolio": portfolio_context or {},
+        # None (unknown/not given) must survive as literal `null` in the
+        # request JSON, never coerced to `{}` - see _build_portfolio_
+        # context()'s docstring on why "unknown" and "flat book" are
+        # deliberately distinct states.
+        "portfolio": portfolio_context,
     }
     request_path = work_dir / "request.json"
     with open(request_path, "w", encoding="utf-8") as f:
