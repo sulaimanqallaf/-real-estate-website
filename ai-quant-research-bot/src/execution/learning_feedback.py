@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import paper_trades
+from ..ml import decision_ledger
+from ..utils import safe_run
 from . import order_state
 from .order_manager import OrderManager
 
@@ -105,6 +107,19 @@ def check_exit_fills(manager: OrderManager, config: dict[str, Any], logger: logg
             logger.info(
                 "Broker-paper trade closed: %s %s status=%s pnl_pct=%s",
                 closed["ticker"], closed["trade_id"], closed["status"], closed.get("pnl_pct"),
+            )
+            # GitHub Issue #1 P1: the REAL broker outcome, attached to
+            # whichever decision-ledger row(s) share this trade_id - never
+            # the daily-report's own simulated/guessed numbers.
+            safe_run(
+                logger, f"{closed['ticker']} decision ledger outcome",
+                lambda c=closed: decision_ledger.record_outcome(
+                    decision_ledger.resolve_db_path(config), trade_id=c["trade_id"], outcome_status=c["status"],
+                    exit_reason=c.get("exit_reason"), exited_at=c.get("exited_at"),
+                    pnl_dollars=c.get("pnl_dollars"), pnl_pct=c.get("pnl_pct"),
+                    actual_exit_price=c.get("exit_price"), commission=commission,
+                    provenance=paper_trades.PROVENANCE_BROKER_PAPER,
+                ),
             )
 
     return closed_trades

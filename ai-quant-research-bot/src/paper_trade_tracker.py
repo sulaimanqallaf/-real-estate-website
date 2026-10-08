@@ -42,6 +42,8 @@ from typing import Any
 import pandas as pd
 
 from . import paper_trades
+from .ml import decision_ledger
+from .utils import safe_run
 
 _EXIT_ICONS = {"TARGET_HIT": "🎯", "STOPPED": "🛑", "TIME_EXIT": "⏱"}
 _EXIT_TITLES = {
@@ -158,6 +160,22 @@ def check_open_trades(
             logger.info(
                 "Paper trade closed: %s %s status=%s pnl_pct=%s",
                 closed["ticker"], closed["trade_id"], closed["status"], closed["pnl_pct"],
+            )
+            # GitHub Issue #1 P1: a SIMULATED outcome still gets recorded
+            # (tagged PROVENANCE_SIMULATED, never BROKER_PAPER) - the
+            # learning pipeline needs to tell the two apart, not pretend
+            # this one never happened. See decision_ledger.py's module
+            # docstring on why a simulated outcome must never be trained
+            # on as if it were a real fill.
+            safe_run(
+                logger, f"{closed['ticker']} decision ledger outcome",
+                lambda c=closed: decision_ledger.record_outcome(
+                    decision_ledger.resolve_db_path(config), trade_id=c["trade_id"], outcome_status=c["status"],
+                    exit_reason=c.get("exit_reason"), exited_at=c.get("exited_at"),
+                    pnl_dollars=c.get("pnl_dollars"), pnl_pct=c.get("pnl_pct"),
+                    actual_entry_price=c.get("entry_price"), actual_exit_price=c.get("exit_price"),
+                    provenance=paper_trades.PROVENANCE_SIMULATED,
+                ),
             )
 
     if newly_closed:

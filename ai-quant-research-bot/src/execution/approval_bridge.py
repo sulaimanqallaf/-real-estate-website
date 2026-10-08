@@ -191,6 +191,25 @@ def handle_manual_approval(
             logger.warning("Manual approval blocked for %s: %s", symbol, reasons)
             return False, f"{symbol}: NOT submitted - {reasons}. The pending approval is unaffected; try again."
 
+        # GitHub Issue #1 P1: a manually-approved trade's decision snapshot
+        # is only recorded NOW, with trade_id already known, since a
+        # Telegram approval happens asynchronously (minutes to hours after
+        # the daily report's own decision-ledger row for this candidate,
+        # which has no trade_id - see main.py's _record_decision_snapshot).
+        # record_outcome() later matches on this SAME trade_id.
+        from ..ml import decision_ledger
+        from ..utils import safe_run
+
+        safe_run(
+            logger, f"{symbol} decision ledger",
+            lambda: decision_ledger.record_decision(
+                decision_ledger.resolve_db_path(config), ticker=symbol, decision="MANUALLY_APPROVED", report_date=report_date,
+                strategy=record.get("strategy"), regime=record.get("regime_at_entry"), signal_score=record.get("score"),
+                signal_entry_price=record.get("entry"), stop_loss=record.get("stop_loss"), target_price=record.get("target"),
+                planned_shares=result["managed"].intent.quantity, dollar_risk=record.get("dollar_risk"), trade_id=trade_id,
+            ),
+        )
+
         success, message = paper_trades.process_decision(
             "approve", symbol, report_date, config, logger, trade_id=trade_id, provenance=paper_trades.PROVENANCE_BROKER_PAPER,
         )

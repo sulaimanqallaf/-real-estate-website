@@ -32,6 +32,7 @@ from . import (
 from .data_providers import macro_provider, options_flow_provider
 from .execution import execution_policy, order_manager
 from .execution.broker import Broker
+from .ml import decision_ledger
 from .ml import model_registry as ml_model_registry
 from .ml import predictor as ml_predictor
 from .strategies import mean_reversion, momentum_breakout, skew_map, trend_following
@@ -307,6 +308,48 @@ def _classify_execution_decisions(ticker_results: list[dict[str, Any]], config: 
         entry["execution_decision"] = execution_policy.classify_candidate(entry, config)
 
 
+def _record_decision_snapshot(entry: dict[str, Any], report_date: str, config: dict[str, Any], logger: logging.Logger, trade_id: str | None = None) -> None:
+    """GitHub Issue #1 P1 - records ONE candidate's decision+feature
+    snapshot into the decision ledger (`src/ml/decision_ledger.py`),
+    regardless of whether it ends up traded. Called once per `entry` per
+    run from `_process_execution_layer` for every ticker (AUTO_EXECUTE,
+    REQUIRE_APPROVAL, WATCH_ONLY, and REJECT alike - a blocked/missed
+    decision is exactly as valuable to the learning pipeline as a traded
+    one), and a second time, with `trade_id` now known, from the
+    AUTO_EXECUTE loop right before attempting submission - see that call
+    site's comment for why a manually-approved trade instead gets its own
+    separate row at approval time rather than retrofitting this one.
+    Never raises - a ledger write failure must never abort the run it's
+    only ever observing."""
+    quant = entry.get("quant_assessment")
+    final = report_writer.final_position(entry)
+    decision = entry.get("execution_decision")
+
+    safe_run(
+        logger, f"{entry['symbol']} decision ledger",
+        lambda: decision_ledger.record_decision(
+            decision_ledger.resolve_db_path(config),
+            ticker=entry["symbol"],
+            decision=decision.decision if decision is not None else "UNCLASSIFIED",
+            report_date=report_date,
+            strategy=final.get("strategy") if final else None,
+            regime=(entry.get("regime_evaluation") or {}).get("regime"),
+            signal_score=entry.get("score"),
+            quant_score=getattr(quant, "quant_score", None),
+            ml_confidence=getattr(quant, "ml_confidence", None),
+            calibrated_probability=getattr(quant, "calibrated_probability", None),
+            model_horizon=getattr(quant, "horizon", None),
+            reasons=decision.reasons if decision is not None else None,
+            signal_entry_price=final.get("entry") if final else None,
+            stop_loss=final.get("stop_loss") if final else None,
+            target_price=final.get("target") if final else None,
+            planned_shares=final.get("shares") if final else None,
+            dollar_risk=final.get("dollar_risk") if final else None,
+            trade_id=trade_id,
+        ),
+    )
+
+
 def _attempt_auto_execution(
     entry: dict[str, Any],
     broker: Broker,
@@ -429,6 +472,8 @@ def _process_execution_layer(
     Tests inject a `FakeBroker` directly instead.
     """
     _classify_execution_decisions(ticker_results, config)
+    for entry in ticker_results:
+        _record_decision_snapshot(entry, report_date, config, logger)
 
     execution_mode = config.get("execution", {}).get("mode", "DRY_RUN")
     auto_candidates = [e for e in ticker_results if e["execution_decision"].decision == execution_policy.DECISION_AUTO_EXECUTE]
@@ -472,6 +517,13 @@ def _process_execution_layer(
 
         for entry in auto_candidates:
             trade_id = paper_trades.generate_trade_id(entry["symbol"], report_date)
+            # A SECOND decision-ledger row, now with the real trade_id -
+            # this is the one record_outcome() will actually match
+            # against once the fill/exit resolves. The first (trade_id-
+            # less) row recorded above still stands, documenting that
+            # this candidate was AUTO_EXECUTE-classified before any
+            # execution-time re-check ran.
+            _record_decision_snapshot(entry, report_date, config, logger, trade_id=trade_id)
             result = safe_run(logger, f"{entry['symbol']} auto-execution", lambda e=entry, tid=trade_id: _attempt_auto_execution(e, broker, manager, config, logger, tid, now=now))
             if result is None:
                 continue

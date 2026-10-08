@@ -396,6 +396,49 @@ def test_scenario_l_closed_trade_records_actual_fill_in_execution_journal(config
     assert closed_rows
 
 
+def test_scenario_l2_broker_executed_outcome_lands_in_the_decision_ledger(config):
+    """GitHub Issue #1 P1 end-to-end: an AUTO_EXECUTE candidate's decision
+    snapshot (recorded with its trade_id at submission time) must have
+    its REAL broker outcome attached once the target fills - via the
+    exact same learning_feedback.check_exit_fills() path a real
+    position_monitor tick uses, not a hand-built ManagedOrder."""
+    from src.ml import decision_ledger
+
+    broker = paper_broker()
+    entry = make_entry("AMD")
+    _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
+    trade_id = broker.submitted_intents[0].trade_id
+
+    db_path = decision_ledger.resolve_db_path(config)
+    decision_rows = decision_ledger.query_decisions(db_path)
+    assert any(r["trade_id"] == trade_id and r["decision"] == "AUTO_EXECUTE" for r in decision_rows)
+
+    from src.execution import learning_feedback, order_manager
+
+    entry_order = broker.submitted_intents[0]
+    broker_order = [o for o in broker._orders.values() if o.ticker == "AMD"][0]
+    broker.simulate_fill(broker_order.broker_order_id, shares=10, price=100.15, commission=1.0)
+
+    manager = order_manager.OrderManager(broker, config)
+    managed = order_manager.ManagedOrder(intent=entry_order, entry_broker_order_id=broker_order.broker_order_id, state=order_manager.order_state.STATE_ACKNOWLEDGED)
+    manager._managed[entry_order.intent_id] = managed
+    manager.poll_entry_fill(entry_order.intent_id)  # fills + syncs protection -> EXIT_PENDING
+    broker.simulate_fill(managed.target_broker_order_id, shares=10, price=112.0, commission=1.0)
+
+    learning_feedback.check_exit_fills(manager, config, logger)
+
+    resolved = decision_ledger.query_decisions(db_path, only_with_outcome=True)
+    matching = [r for r in resolved if r["trade_id"] == trade_id]
+    assert len(matching) == 1
+    assert matching[0]["outcome_status"] == "TARGET_HIT"
+    assert matching[0]["provenance"] == "BROKER_PAPER"
+    # paper_trades.csv's own P&L is computed against the signal entry
+    # price (100.0, from make_entry's position), not the broker's actual
+    # fill price (100.15) - matching close_trade_with_actual_fill()'s
+    # existing, unchanged behavior.
+    assert matching[0]["pnl_dollars"] == pytest.approx((112.0 - 100.0) * 10)
+
+
 # --- cross-cutting integration checks -------------------------------------------------
 
 
@@ -431,7 +474,13 @@ def test_src_main_module_imports_with_no_ibapi_installed():
         builtins.__import__ = original_import
 
 
-def test_a_top_candidate_with_no_execution_mode_configured_defaults_to_dry_run():
+def test_a_top_candidate_with_no_execution_mode_configured_defaults_to_dry_run(tmp_path):
+    # Deliberately minimal config (testing execution.mode's own default,
+    # not journal paths) - still gives data.journal_dir an isolated
+    # tmp_path so the decision ledger (main._record_decision_snapshot,
+    # called for every ticker_result regardless of mode) never falls
+    # back to writing into the real repo's data/ml/ directory.
     entry = make_entry("AMD")
-    executed = _process_execution_layer([entry], "2026-09-09", {}, logger, None, None, broker=None, now=FIXED_NOW)
+    config = {"data": {"journal_dir": str(tmp_path)}}
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=None, now=FIXED_NOW)
     assert executed == set()

@@ -347,6 +347,15 @@ ml:
     "5d": 0.01
     "10d": 0.015
     "20d": 0.02
+  # Decision+outcome ledger (GitHub Issue #1 P1) - see
+  # src/ml/decision_ledger.py. SQLite, always at
+  # <data.journal_dir>/decision_ledger.db (same convention as
+  # paper_trades.csv/pending_approvals.json below - no separate path
+  # config, so redirecting data.journal_dir is always enough to isolate
+  # it too). Written by main.py (one row per classified candidate) and by
+  # execution.learning_feedback.py/paper_trade_tracker.py (the outcome,
+  # once known). Read-only to src/ml/retrain_scheduler.py and the weekly
+  # Telegram report.
 
 # Structural price features (Fair Value Gaps, swing highs/lows, order
 # blocks, BOS/CHoCH, liquidity sweeps) already configured under `smc:`
