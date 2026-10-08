@@ -323,6 +323,38 @@ def recover_cache_metadata_from_request_files(config: dict[str, Any], logger: lo
     return {"recovered": len(recovered), "unmatched_rows": len(null_keys) - len(recovered), "checked_files": checked_files}
 
 
+def list_cached_raw_results(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Returns every cached TradingAgents result with its FULL raw
+    payload (bull/bear history, reports, token usage, etc.) - the same
+    shape `run_one()` itself returns, not `inspect_cached_results()`'s
+    narrower summary. Zero API calls, zero subprocess use - a pure
+    SQLite read. Used by `inspect_cached_results()` and by
+    `tradingagents_preview.py` (GitHub Issue #1 follow-up: previewing the
+    report from cache alone). Best-effort recovers `NULL` ticker/
+    report_date first, same as `inspect_cached_results()`. Returns `[]`
+    for a missing database, never raises."""
+    db_path = resolve_state_db_path(config)
+    if not Path(db_path).exists():
+        return []
+
+    try:
+        recover_cache_metadata_from_request_files(config)
+    except Exception:  # noqa: BLE001 - listing must proceed even if recovery fails
+        pass
+
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT ticker, report_date, cached_at, result_json FROM cache ORDER BY cached_at DESC").fetchall()
+
+    results = []
+    for row in rows:
+        try:
+            raw = json.loads(row["result_json"])
+        except (ValueError, TypeError):
+            continue
+        results.append({"ticker": row["ticker"], "report_date": row["report_date"], "cached_at": row["cached_at"], "raw": raw})
+    return results
+
+
 def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """GitHub Issue #1 follow-up requirement 6: inspect every cached
     TradingAgents result WITHOUT making a new API call (no subprocess,
@@ -342,32 +374,18 @@ def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any]
     exactly as before.
 
     Returns `[]` for a missing database, never raises."""
-    db_path = resolve_state_db_path(config)
-    if not Path(db_path).exists():
-        return []
-
-    try:
-        recover_cache_metadata_from_request_files(config)
-    except Exception:  # noqa: BLE001 - inspection must proceed even if recovery fails; rows simply keep whatever metadata they already had
-        pass
-
     table = pricing_table if pricing_table is not None else config.get("intelligence", {}).get("tradingagents", {}).get("pricing")
-    with _connect(db_path) as conn:
-        rows = conn.execute("SELECT ticker, report_date, cached_at, result_json FROM cache ORDER BY cached_at DESC").fetchall()
 
     inspected = []
-    for row in rows:
-        try:
-            result = json.loads(row["result_json"])
-        except (ValueError, TypeError):
-            continue
+    for cached in list_cached_raw_results(config):
+        result = cached["raw"]
         token_usage = result.get("token_usage")
         # Only re-price when usage was actually recorded - an entry from
         # before token tracking existed keeps whatever (possibly absent/
         # unknown) cost it already had, never a fabricated $0.00.
         cost_info = pricing.estimate_cost_usd(token_usage, table) if "token_usage" in result else result.get("estimated_cost_usd")
         inspected.append({
-            "ticker": row["ticker"], "report_date": row["report_date"], "cached_at": row["cached_at"],
+            "ticker": cached["ticker"], "report_date": cached["report_date"], "cached_at": cached["cached_at"],
             "final_rating": result.get("final_rating") or result.get("signal"),
             "token_usage": token_usage, "estimated_cost_usd": cost_info,
         })
