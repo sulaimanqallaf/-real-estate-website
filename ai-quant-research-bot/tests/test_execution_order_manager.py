@@ -148,6 +148,30 @@ def test_full_fill_moves_to_filled_and_places_both_exit_legs_at_full_quantity(ma
     assert target_order.side == order_state.SIDE_SELL
 
 
+def test_protective_legs_share_the_same_oca_group_and_survive_a_resize(manager, broker):
+    """GitHub Issue #1 P0: stop and target must be linked at the broker
+    (OCA), not merely cancelled locally after a poll detects a fill - see
+    IBKRClient._build_ibkr_order()'s oca_group handling. order_manager.py
+    carries the group through OrderIntent.metadata since FakeBroker (and
+    the real Broker protocol) only ever take an OrderIntent, never raw
+    order fields."""
+    managed = manager.submit_entry(make_intent(quantity=10))
+    broker.simulate_fill(managed.entry_broker_order_id, shares=4, price=100.0)
+    manager.poll_entry_fill(managed.intent.intent_id)
+
+    stop_intent = next(i for i in broker.submitted_intents if i.side == order_state.SIDE_SELL and i.order_type == order_state.ORDER_TYPE_STOP)
+    target_intent = next(i for i in broker.submitted_intents if i.side == order_state.SIDE_SELL and i.order_type == order_state.ORDER_TYPE_LIMIT)
+    oca_group = stop_intent.metadata["oca_group"]
+    assert oca_group == target_intent.metadata["oca_group"]
+    assert oca_group == order_manager.oca_group_for_entry(managed.intent.intent_id)
+
+    # A later resize (more shares fill) must keep both legs in the SAME group.
+    broker.simulate_fill(managed.entry_broker_order_id, shares=6, price=100.2)
+    manager.poll_entry_fill(managed.intent.intent_id)
+    assert broker._orders[managed.stop_broker_order_id].quantity == 10
+    assert broker._orders[managed.target_broker_order_id].quantity == 10
+
+
 def test_partial_fill_protects_only_filled_shares(manager, broker):
     """Part H: requested 10, filled 4 -> protect only 4, never the full 10."""
     managed = manager.submit_entry(make_intent(quantity=10))

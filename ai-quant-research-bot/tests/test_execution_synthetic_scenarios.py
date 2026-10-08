@@ -29,6 +29,21 @@ logger = logging.getLogger("test")
 FIXED_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
+@pytest.fixture(autouse=True)
+def _stub_current_price_quote(monkeypatch):
+    """`_attempt_auto_execution()` now fetches an independent, fresh quote
+    via `data_collector.fetch_current_price()` (GitHub Issue #1 finding 1 -
+    it used to compare the signal price to itself) - these synthetic
+    scenarios aren't testing slippage/quote-freshness, so stub a quote
+    matching every `make_entry()` candidate's own 100.0 signal price
+    (zero slippage) rather than hitting the network (unavailable in this
+    sandbox) or letting trading-hours-adjacent flakiness in. Tests that
+    ARE about slippage/a missing quote override this explicitly."""
+    import src.data_collector as data_collector
+
+    monkeypatch.setattr(data_collector, "fetch_current_price", lambda symbol, logger: 100.0)
+
+
 def qa(confidence="VERY_HIGH", edge="POSITIVE"):
     return type("QA", (), {"ml_confidence": confidence, "strategy_edge": edge})()
 
@@ -116,6 +131,11 @@ def test_scenario_b_auto_enabled_paper_verified_executes_autonomously(config):
     assert executed == {"AMD"}
     assert len(broker.submitted_intents) == 1
 
+    # GitHub Issue #1 finding 5: an AUTO_EXECUTE row must be marked
+    # BROKER_PAPER so the simulated daily-bar tracker never closes it.
+    df = paper_trades.load_paper_trades_df(config)
+    assert df.iloc[0]["provenance"] == paper_trades.PROVENANCE_BROKER_PAPER
+
 
 # --- B2: auto enabled, broker REJECTS the order -> a Telegram notice fires ---------
 
@@ -141,6 +161,49 @@ def test_scenario_b2_auto_execute_broker_rejection_sends_a_telegram_notice(confi
 
     assert executed == set()  # never counted as executed
     assert any("REJECTED" in t and "AMD" in t for t in sent)
+
+
+# --- B3: AUTO_EXECUTE slippage check must compare an INDEPENDENT quote, never itself --
+
+
+def test_scenario_b3_auto_execute_fetches_an_independent_quote_not_the_signal_price_itself(config, monkeypatch):
+    """GitHub Issue #1 finding 1: _attempt_auto_execution() used to pass
+    current_market_price=the candidate's own signal entry price, so the
+    slippage check always compared a number to itself (moved_pct == 0,
+    every time, by construction) and could never block anything. Proves
+    two things: (1) fetch_current_price() is actually called with the
+    candidate's ticker, and (2) a price that has genuinely moved beyond
+    the configured tolerance since the signal was computed now correctly
+    blocks the auto-execution."""
+    import src.data_collector as data_collector
+
+    calls = []
+    monkeypatch.setattr(data_collector, "fetch_current_price", lambda symbol, logger: calls.append(symbol) or 110.0)  # signal entry is 100.0 - 10% away
+
+    broker = paper_broker()
+    entry = make_entry("AMD")
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
+
+    assert calls == ["AMD"]  # an independent quote was actually fetched for this ticker
+    assert executed == set()  # never counted as executed
+    assert broker.submitted_intents == []  # the moved price blocked it before ever reaching the broker
+
+
+def test_scenario_b4_auto_execute_skips_entry_when_no_current_quote_is_available(config, monkeypatch):
+    """Without a reliable current execution price, skip the entry -
+    submitting blind is never safer than skipping (same fail-closed
+    contract pretrade_checks.check_slippage() already enforces for the
+    manual-approval path)."""
+    import src.data_collector as data_collector
+
+    monkeypatch.setattr(data_collector, "fetch_current_price", lambda symbol, logger: None)
+
+    broker = paper_broker()
+    entry = make_entry("AMD")
+    executed = _process_execution_layer([entry], "2026-09-09", config, logger, None, None, broker=broker, now=FIXED_NOW)
+
+    assert executed == set()
+    assert broker.submitted_intents == []
 
 
 # --- C: same candidate, LIVE account -> hard block, zero broker orders --------------

@@ -101,6 +101,10 @@ def test_approving_in_ibkr_paper_mode_submits_a_real_order(manual_config, monkey
     assert len(df) == 1
     assert df.iloc[0]["ticker"] == "AMD"
     assert df.iloc[0]["status"] == "OPEN"
+    # GitHub Issue #1 finding 5: a real IBKR submission must be marked
+    # BROKER_PAPER so paper_trade_tracker.py's daily-bar simulation never
+    # touches it - only the broker's own actual fill may close it.
+    assert df.iloc[0]["provenance"] == paper_trades.PROVENANCE_BROKER_PAPER
 
 
 def test_approved_trade_id_matches_between_order_intent_and_csv_row(manual_config, monkeypatch):

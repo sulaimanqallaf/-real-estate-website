@@ -156,6 +156,64 @@ def test_approve_safe_candidate_writes_paper_trade(tmp_path, caplog):
     records = paper_trades.load_pending_approvals(config)
     assert records["2026-09-09|NVDA"]["status"] == "APPROVED"
 
+    assert row["provenance"] == paper_trades.PROVENANCE_SIMULATED  # no broker involved - the default
+
+
+def test_process_decision_passes_through_broker_paper_provenance(tmp_path):
+    """GitHub Issue #1 finding 5: the manual IBKR-approval path marks its
+    row PROVENANCE_BROKER_PAPER explicitly so paper_trade_tracker.py's
+    daily-bar simulation will never touch it - this is the exact
+    mechanism `execution.approval_bridge.handle_manual_approval()` relies
+    on after a real broker submission succeeds."""
+    import logging
+
+    config = fresh_config(tmp_path)
+    _seed_pending(config, make_entry(symbol="NVDA", strategy=STRATEGY_NAME_SAFE))
+
+    paper_trades.process_decision(
+        "approve", "NVDA", "2026-09-09", config, logging.getLogger("t"), provenance=paper_trades.PROVENANCE_BROKER_PAPER,
+    )
+
+    df = paper_trades.load_paper_trades_df(config)
+    assert df.iloc[0]["provenance"] == paper_trades.PROVENANCE_BROKER_PAPER
+
+
+def test_record_paper_trade_defaults_to_simulated_provenance(tmp_path):
+    config = fresh_config(tmp_path)
+    record = {
+        "symbol": "AMD", "strategy": "Trend Following", "signal": "Top Candidate", "score": 90,
+        "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "risk_reward": 3.0,
+        "shares": 10, "dollar_risk": 50.0, "regime_at_entry": "TRENDING_UP",
+        "report_date": "2026-09-09", "decided_at": None,
+    }
+    paper_trades.record_paper_trade(record, config)
+    df = paper_trades.load_paper_trades_df(config)
+    assert df.iloc[0]["provenance"] == paper_trades.PROVENANCE_SIMULATED
+
+
+def test_record_paper_trade_accepts_explicit_broker_paper_provenance(tmp_path):
+    config = fresh_config(tmp_path)
+    record = {
+        "symbol": "AMD", "strategy": "Trend Following", "signal": "Top Candidate", "score": 90,
+        "entry": 100.0, "stop_loss": 95.0, "target": 115.0, "risk_reward": 3.0,
+        "shares": 10, "dollar_risk": 50.0, "regime_at_entry": "TRENDING_UP",
+        "report_date": "2026-09-09", "decided_at": None,
+    }
+    paper_trades.record_paper_trade(record, config, provenance=paper_trades.PROVENANCE_BROKER_PAPER)
+    df = paper_trades.load_paper_trades_df(config)
+    assert df.iloc[0]["provenance"] == paper_trades.PROVENANCE_BROKER_PAPER
+
+
+def test_effective_provenance_treats_missing_or_unknown_values_as_simulated():
+    import math
+
+    assert paper_trades.effective_provenance(float("nan")) == paper_trades.PROVENANCE_SIMULATED
+    assert paper_trades.effective_provenance(None) == paper_trades.PROVENANCE_SIMULATED
+    assert paper_trades.effective_provenance("") == paper_trades.PROVENANCE_SIMULATED
+    assert paper_trades.effective_provenance("GARBAGE") == paper_trades.PROVENANCE_SIMULATED
+    assert paper_trades.effective_provenance(paper_trades.PROVENANCE_BROKER_PAPER) == paper_trades.PROVENANCE_BROKER_PAPER
+    assert math.isnan(float("nan"))  # sanity: nan is the real pandas-missing-value shape this must handle
+
 
 def test_approve_aggressive_candidate_succeeds_when_enabled(tmp_path):
     import logging

@@ -319,13 +319,24 @@ def _attempt_auto_execution(
     """One AUTO_EXECUTE candidate's execution-time re-checks + broker
     submission - the exact same re-check discipline as
     execution.approval_bridge.execute_approved_trade (Part R), applied to
-    the autonomous path (Part S) instead of a Telegram button. The
-    candidate's OWN entry price (this run's freshly fetched signal price)
-    is also "current_market_price" here since auto-execution happens
-    immediately after analysis, with no human-approval delay to go stale
-    over - unlike the approval-bridge path, where real time elapses.
-    `now` (optional, defaults to real current time) is test-only - see
-    `_process_execution_layer`'s docstring."""
+    the autonomous path (Part S) instead of a Telegram button.
+
+    **Bug fixed (GitHub Issue #1 finding 1):** this used to pass
+    `current_market_price=final["entry"]` - the candidate's OWN
+    signal-time entry price compared against itself, so `pretrade_checks.
+    check_slippage()` computed a slippage of exactly zero on every single
+    call and could never actually block anything. "Auto-execution happens
+    immediately after analysis" is not a reason to skip an independent
+    quote: the research pipeline (yfinance daily bars, indicators,
+    strategies, regime, ML, portfolio risk) can itself take real wall-
+    clock time across hundreds of tickers, and the whole POINT of this
+    check is to catch exactly that kind of staleness - comparing a number
+    to itself can never catch anything. Fetches the SAME independent,
+    freshly-timestamped quote (`data_collector.fetch_current_price()`)
+    the manual-approval path already uses; a missing quote fails closed
+    (`PRICE_MOVED_TOO_FAR`, never submitted blind) via `check_slippage()`,
+    exactly like every other path into this codebase."""
+    from . import data_collector
     from .execution import approval_bridge
 
     final = report_writer.final_position(entry)
@@ -335,7 +346,8 @@ def _attempt_auto_execution(
         "shares": final["shares"], "dollar_risk": final["dollar_risk"],
         "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
     }
-    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=final["entry"], logger=logger, trade_id=trade_id, now=now)
+    current_market_price = data_collector.fetch_current_price(entry["symbol"], logger)
+    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=current_market_price, logger=logger, trade_id=trade_id, now=now)
 
 
 def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> set[str]:
@@ -477,7 +489,7 @@ def _process_execution_layer(
                 "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
                 "report_date": report_date, "decided_at": None,
             }
-            paper_trades.record_paper_trade(pending_record, config, trade_id=trade_id)
+            paper_trades.record_paper_trade(pending_record, config, trade_id=trade_id, provenance=paper_trades.PROVENANCE_BROKER_PAPER)
 
             if token and chat_id:
                 from . import telegram_bot

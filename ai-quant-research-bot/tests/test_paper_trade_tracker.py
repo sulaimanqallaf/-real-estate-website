@@ -224,6 +224,71 @@ def test_open_trade_remains_open_if_no_exit_hit(tmp_path):
     assert persisted.iloc[0]["status"] == "OPEN"
 
 
+def test_broker_paper_row_is_never_closed_by_the_daily_bar_simulation(tmp_path):
+    """GitHub Issue #1 finding 5: a row this system actually submitted to
+    IBKR must be closed ONLY by the broker's real fill
+    (execution.learning_feedback.check_exit_fills), never by this
+    module's daily-bar guess - even when the daily bar's high/low would
+    otherwise clearly trigger a target/stop. Corrupting a real broker
+    outcome with a fabricated price is exactly what this isolation
+    prevents."""
+    config = fresh_config(tmp_path)
+    broker_trade = make_open_trade(trade_id="NVDA_2026-01-05_broker01")
+    broker_trade["provenance"] = paper_trades.PROVENANCE_BROKER_PAPER
+    seed_paper_trades_csv(config, [broker_trade])
+    price_data = {
+        "NVDA": make_price_df(
+            {"2026-01-07": (103, 118, 102, 116, 1_000_000)}  # high (118) clearly >= target (115)
+        )
+    }
+
+    closed = paper_trade_tracker.check_open_trades(price_data, config, LOGGER)
+
+    assert closed == []  # never touched, despite the bar clearly crossing target
+    persisted = paper_trades.load_paper_trades_df(config)
+    assert persisted.iloc[0]["status"] == "OPEN"
+
+
+def test_simulated_row_is_still_closed_normally_alongside_a_broker_paper_row(tmp_path):
+    """The isolation above must be selective, not a blanket freeze - a
+    plain SIMULATED row in the SAME run still gets evaluated normally."""
+    config = fresh_config(tmp_path)
+    broker_trade = make_open_trade(trade_id="NVDA_2026-01-05_broker01", ticker="NVDA")
+    broker_trade["provenance"] = paper_trades.PROVENANCE_BROKER_PAPER
+    simulated_trade = make_open_trade(trade_id="AMD_2026-01-05_sim01", ticker="AMD")
+    seed_paper_trades_csv(config, [broker_trade, simulated_trade])
+    price_data = {
+        "NVDA": make_price_df({"2026-01-07": (103, 118, 102, 116, 1_000_000)}),
+        "AMD": make_price_df({"2026-01-07": (103, 118, 102, 116, 1_000_000)}),
+    }
+
+    closed = paper_trade_tracker.check_open_trades(price_data, config, LOGGER)
+
+    assert len(closed) == 1
+    assert closed[0]["trade_id"] == "AMD_2026-01-05_sim01"
+    persisted = paper_trades.load_paper_trades_df(config)
+    broker_row = persisted[persisted["trade_id"] == "NVDA_2026-01-05_broker01"].iloc[0]
+    simulated_row = persisted[persisted["trade_id"] == "AMD_2026-01-05_sim01"].iloc[0]
+    assert broker_row["status"] == "OPEN"
+    assert simulated_row["status"] == "TARGET_HIT"
+
+
+def test_a_row_with_no_provenance_column_at_all_defaults_to_simulated(tmp_path):
+    """Backward compatibility: a row written before this column existed
+    must still be evaluated normally (default SIMULATED), not silently
+    frozen open forever."""
+    config = fresh_config(tmp_path)
+    trade = make_open_trade()
+    assert "provenance" not in trade  # this fixture never sets it
+    seed_paper_trades_csv(config, [trade])
+    price_data = {"NVDA": make_price_df({"2026-01-07": (103, 118, 102, 116, 1_000_000)})}
+
+    closed = paper_trade_tracker.check_open_trades(price_data, config, LOGGER)
+
+    assert len(closed) == 1
+    assert closed[0]["status"] == "TARGET_HIT"
+
+
 def test_closed_trade_is_not_processed_twice_within_one_call(tmp_path):
     config = fresh_config(tmp_path)
     open_trade = make_open_trade(trade_id="AAA")

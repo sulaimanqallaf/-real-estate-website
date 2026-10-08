@@ -284,11 +284,16 @@ def _connected_client_with_fake_app():
             self.raw_orders = {}
             self.order_ack_events: dict[str, Any] = {}
             self.order_errors: dict[str, tuple[int, str]] = {}
+            self.raw_executions: dict[str, Any] = {}
             self.positions_end_event = _ImmediatelySetEvent()
             self.open_orders_end_event = _ImmediatelySetEvent()
+            self.exec_details_end_event = _ImmediatelySetEvent()
 
     class _ImmediatelySetEvent:
         def clear(self):
+            pass
+
+        def set(self):
             pass
 
         def wait(self, timeout):
@@ -308,6 +313,19 @@ def _connected_client_with_fake_app():
             # unmodified.
             self.order_status_to_simulate: str | None = "Submitted"  # None = simulate no callback at all (acknowledgement timeout)
             self.order_error_to_simulate: tuple[int, str] | None = None  # (code, text) = simulate an order-specific error() callback instead
+            # Test-configurable: executions() to simulate reporting via
+            # reqExecutions() - each a dict with execution_id/broker_order_id/
+            # ticker/side/shares/price/commission/timestamp keys (commission
+            # may be omitted to simulate a never-arriving commissionReport()).
+            self.executions_to_report: list[dict[str, Any]] = []
+
+        def reqExecutions(self, reqId, exec_filter):
+            for execution in self.executions_to_report:
+                entry = self._wrapper.raw_executions.setdefault(execution["execution_id"], {"commission": None})
+                entry.update({k: v for k, v in execution.items() if k != "commission"})
+                if "commission" in execution:
+                    entry["commission"] = execution["commission"]
+            self._wrapper.exec_details_end_event.set()
 
         def reqPositions(self):
             # Simulates the real EWrapper.position() callback having
@@ -384,6 +402,9 @@ def _install_fake_ibapi_order_types(monkeypatch):
     class _FakeOrderCancel:
         pass
 
+    class _FakeExecutionFilter:
+        pass
+
     fake_ibapi = types.ModuleType("ibapi")
     fake_contract_mod = types.ModuleType("ibapi.contract")
     fake_contract_mod.Contract = _FakeContract
@@ -391,11 +412,14 @@ def _install_fake_ibapi_order_types(monkeypatch):
     fake_order_mod.Order = _FakeOrder
     fake_order_cancel_mod = types.ModuleType("ibapi.order_cancel")
     fake_order_cancel_mod.OrderCancel = _FakeOrderCancel
+    fake_execution_mod = types.ModuleType("ibapi.execution")
+    fake_execution_mod.ExecutionFilter = _FakeExecutionFilter
 
     monkeypatch.setitem(sys.modules, "ibapi", fake_ibapi)
     monkeypatch.setitem(sys.modules, "ibapi.contract", fake_contract_mod)
     monkeypatch.setitem(sys.modules, "ibapi.order", fake_order_mod)
     monkeypatch.setitem(sys.modules, "ibapi.order_cancel", fake_order_cancel_mod)
+    monkeypatch.setitem(sys.modules, "ibapi.execution", fake_execution_mod)
 
 
 def test_positions_returns_empty_list_when_broker_reports_none():
@@ -562,6 +586,99 @@ def test_submit_order_places_a_stop_sell_with_aux_price(monkeypatch):
     assert order.orderType == "STP"
     assert order.auxPrice == 95.0
     assert not hasattr(order, "lmtPrice") or order.lmtPrice is None
+
+
+def test_submit_order_sets_oca_group_and_type_from_intent_metadata(monkeypatch):
+    """GitHub Issue #1 P0: a protective stop/target leg's OrderIntent.
+    metadata carries oca_group/oca_type (set by order_manager._exit_
+    intent()) - submit_order() must set them on the real ibapi Order so
+    TWS enforces the linkage server-side."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    intent = _make_intent(side="SELL", order_type="STOP", entry_price=95.0, metadata={"oca_group": "oca_abc123", "oca_type": 1})
+    client.submit_order(intent)
+
+    _, _, order = client._app.placed_orders[0]
+    assert order.ocaGroup == "oca_abc123"
+    assert order.ocaType == 1
+
+
+def test_submit_order_leaves_oca_fields_unset_for_an_entry_order_with_no_metadata(monkeypatch):
+    """A plain entry order (no oca_group in metadata) must never get a
+    fabricated OCA linkage - absence of metadata means absence of the
+    ocaGroup attribute on the built Order, not an empty-string group."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    intent = _make_intent(side="BUY", order_type="LIMIT", entry_price=100.0)
+    client.submit_order(intent)
+
+    _, _, order = client._app.placed_orders[0]
+    assert not hasattr(order, "ocaGroup")
+
+
+def test_replace_order_preserves_the_oca_group_from_the_raw_snapshot(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._wrapper.raw_orders["1000"] = {
+        "broker_order_id": "1000", "ticker": "AMD", "side": "SELL", "order_type": "STOP",
+        "quantity": 4.0, "limit_price": 95.0, "status": "Submitted",
+        "filled_quantity": 0.0, "remaining_quantity": 4.0, "avg_fill_price": None, "parent_id": None,
+        "oca_group": "oca_abc123", "oca_type": 1,
+    }
+
+    client.replace_order("1000", quantity=10)
+
+    _, _, order = client._app.placed_orders[0]
+    assert order.ocaGroup == "oca_abc123"
+    assert order.ocaType == 1
+
+
+def test_open_order_callback_preserves_oca_group_reported_back_by_tws(monkeypatch):
+    """Exercises the REAL `_IBWrapper.openOrder()` callback (built via the
+    real, lazily-imported `_build_app()`, not the `_FakeWrapper` test
+    double used elsewhere in this file) to prove it actually records
+    whatever ocaGroup/ocaType TWS echoes back on an order."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+
+    class _FakeEClient:
+        def __init__(self, wrapper):
+            pass
+
+    monkeypatch.setitem(sys.modules, "ibapi.client", type(sys)("ibapi.client"))
+    sys.modules["ibapi.client"].EClient = _FakeEClient
+    monkeypatch.setitem(sys.modules, "ibapi.wrapper", type(sys)("ibapi.wrapper"))
+
+    class _FakeEWrapper:
+        def __init__(self):
+            pass
+
+    sys.modules["ibapi.wrapper"].EWrapper = _FakeEWrapper
+
+    client._build_app()
+    wrapper = client._wrapper
+
+    class _FakeOrderState:
+        status = "Submitted"
+
+    class _FakeOrderWithOca:
+        permId = None
+        action = "SELL"
+        orderType = "STP"
+        totalQuantity = 10.0
+        lmtPrice = None
+        parentId = None
+        ocaGroup = "oca_xyz"
+        ocaType = 1
+
+    class _FakeContract:
+        symbol = "AMD"
+
+    wrapper.openOrder(2000, _FakeContract(), _FakeOrderWithOca(), _FakeOrderState())
+    assert wrapper.raw_orders["2000"]["oca_group"] == "oca_xyz"
+    assert wrapper.raw_orders["2000"]["oca_type"] == 1
 
 
 def test_submit_order_never_uses_margin_or_options_fields(monkeypatch):
@@ -749,3 +866,116 @@ def test_replace_order_resubmits_with_the_same_order_id_and_new_quantity(monkeyp
     assert order.totalQuantity == 10
     assert order.auxPrice == 95.0
     assert updated.quantity == 10
+
+
+# --- executions() / commission (GitHub Issue #1 P0) ---------------------------------
+
+
+def test_executions_refuses_when_not_connected():
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="not CONNECTED"):
+        client.executions()
+
+
+def test_executions_maps_every_field_including_commission(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.executions_to_report = [
+        {
+            "execution_id": "ex1", "broker_order_id": "1000", "ticker": "AMD", "side": "BOT",
+            "shares": 10.0, "price": 100.5, "commission": 1.25,
+            "timestamp": ibkr_client.datetime(2026, 9, 9, 14, 30, tzinfo=ibkr_client.timezone.utc),
+        },
+    ]
+    results = client.executions()
+    assert len(results) == 1
+    exe = results[0]
+    assert exe.execution_id == "ex1"
+    assert exe.broker_order_id == "1000"
+    assert exe.ticker == "AMD"
+    assert exe.shares == 10.0
+    assert exe.price == 100.5
+    assert exe.commission == 1.25
+
+
+def test_executions_reports_commission_as_none_when_never_received(monkeypatch):
+    """commissionReport() is a separate callback from execDetails() -
+    IBKR does not guarantee it always arrives. A missing commission must
+    be None ("unknown"), never a fabricated 0.0."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._app.executions_to_report = [
+        {"execution_id": "ex2", "broker_order_id": "1001", "ticker": "MSFT", "side": "SLD", "shares": 5.0, "price": 300.0, "timestamp": ibkr_client.datetime.now(ibkr_client.timezone.utc)},
+    ]
+    results = client.executions()
+    assert len(results) == 1
+    assert results[0].commission is None
+
+
+def test_executions_deduplicates_by_execution_id(monkeypatch):
+    """ibapi can redeliver the same execId - execDetails()/commissionReport()
+    merge into the SAME dict entry rather than appending, so a redelivery
+    can never produce two BrokerExecutions for one real fill."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    # Simulate execDetails() firing twice for the same execId, as ibapi's
+    # own at-least-once delivery can do - the SAME execution reported
+    # twice by reqExecutions() must still merge into one entry, not two.
+    now = ibkr_client.datetime.now(ibkr_client.timezone.utc)
+    duplicate_execution = {
+        "execution_id": "ex3", "broker_order_id": "1002", "ticker": "AMD",
+        "side": "BOT", "shares": 10.0, "price": 100.0, "commission": 0.5, "timestamp": now,
+    }
+    client._app.executions_to_report = [duplicate_execution, dict(duplicate_execution)]
+
+    results = client.executions()
+    assert len(results) == 1
+    assert results[0].execution_id == "ex3"
+
+
+def test_executions_excludes_a_commission_only_entry_with_no_exec_details(monkeypatch):
+    """A commissionReport() that arrives before (or without) its matching
+    execDetails() leaves a bare {"commission": ...} placeholder - must
+    never be reported as a BrokerExecution with fabricated ticker/side/
+    shares/price fields."""
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+    client._wrapper.raw_executions["ex4"] = {"commission": 2.0}
+    results = client.executions()
+    assert results == []
+
+
+def test_executions_raises_on_timeout(monkeypatch):
+    _install_fake_ibapi_order_types(monkeypatch)
+    client = _connected_client_with_fake_app()
+
+    class _NeverSetEvent:
+        def clear(self):
+            pass
+
+        def set(self):
+            pass
+
+        def wait(self, timeout):
+            return False
+
+    client._wrapper.exec_details_end_event = _NeverSetEvent()
+    with pytest.raises(ibkr_client.IBKRConnectionError, match="Timed out"):
+        client.executions()
+
+
+def test_parse_ibkr_execution_time_parses_the_documented_format():
+    parsed = ibkr_client._parse_ibkr_execution_time("20260909  14:30:00")
+    assert parsed.year == 2026
+    assert parsed.month == 9
+    assert parsed.day == 9
+    assert parsed.hour == 14
+    assert parsed.minute == 30
+
+
+def test_parse_ibkr_execution_time_falls_back_to_now_on_garbage_input():
+    before = ibkr_client.datetime.now(ibkr_client.timezone.utc)
+    parsed = ibkr_client._parse_ibkr_execution_time("not-a-real-timestamp")
+    after = ibkr_client.datetime.now(ibkr_client.timezone.utc)
+    assert before <= parsed <= after

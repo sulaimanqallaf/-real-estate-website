@@ -47,12 +47,17 @@ Part J's reconciliation can actually detect an "unknown" order the system
 didn't create). `replace_order()`/`cancel_order()` reuse the SAME
 `placeOrder`/`cancelOrder` calls IBKR itself documents as the "modify an
 existing order" and "cancel" conventions - there is no separate "modify"
-endpoint. **`executions()` remains `NotImplementedError`** - fill
-quantity/price is already available through `get_order()`'s `orderStatus`
-data (the actual mechanism `order_manager.poll_entry_fill()` uses), so
-`executions()` is only needed for a commission figure in a journal note,
-not for anything safety-relevant; it's deferred rather than adding a
-fourth untested `ibapi` callback chain for a cosmetic detail.
+endpoint. **`executions()` is wired via `reqExecutions()`/`execDetails()`/
+`commissionReport()`** (GitHub Issue #1 P0: this was previously
+`NotImplementedError`, and `learning_feedback.check_exit_fills()` calls it
+unconditionally on every broker-paper exit fill it detects, AFTER already
+cancelling the orphaned sibling leg - a missing implementation didn't
+just lose a cosmetic commission figure, it meant that call always raised,
+which meant the trade was never actually marked CLOSED (in
+`paper_trades.csv` or in the managed order's own state) against real
+IBKR - stuck in EXIT_PENDING forever, repeating the same crash every
+single tick, even though its sibling leg really had been cancelled). Deduplicated by `execId`; a missing commission is `None`
+("unknown"), never fabricated as `0.0`.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from . import order_state
@@ -94,6 +100,14 @@ _REJECTED_ORDER_STATUSES = {"Inactive", "Cancelled", "ApiCancelled"}
 # actually talks to ibapi, so nothing upstream needs to know IBKR's
 # conventions.
 _ORDER_TYPE_TO_IBKR = {order_state.ORDER_TYPE_LIMIT: "LMT", order_state.ORDER_TYPE_STOP: "STP"}
+
+# IBKR's documented OCA (One-Cancels-All) type codes. 1 = cancel every
+# other order in the group immediately, with "block" aggregation behavior
+# disabled (never silently combine this order's size with another
+# identical one before applying the cancel) - the standard choice for a
+# protective stop/target pair that must never both remain live. See
+# _build_ibkr_order()'s oca_group handling.
+_OCA_TYPE_CANCEL_WITH_BLOCK = 1
 
 # Long US stocks/ETFs only (Part A/E hard constraint) - every order this
 # client ever places uses exactly this contract shape; there is no
@@ -220,6 +234,21 @@ def _order_from_raw(entry: dict[str, Any] | None) -> BrokerOrder:
     )
 
 
+def _parse_ibkr_execution_time(raw: str) -> datetime:
+    """ibapi's `Execution.time` is documented as `"yyyymmdd  HH:mm:ss"`
+    (local-to-TWS time, sometimes with a trailing ` TZ` abbreviation IBKR
+    added in later API versions) - never crash the caller over a format
+    IBKR itself doesn't guarantee byte-for-byte across versions; fall back
+    to "now" (UTC) rather than raise, since a wrong-but-present
+    `BrokerExecution.timestamp` is still vastly more useful downstream
+    than an exception that takes down the whole `executions()` call."""
+    try:
+        date_part, time_part = raw.strip().split()[:2]
+        return datetime.strptime(f"{date_part} {time_part}", "%Y%m%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (ValueError, IndexError, AttributeError):
+        return datetime.now(timezone.utc)
+
+
 @dataclass
 class IBKRConfig:
     host: str
@@ -267,6 +296,7 @@ class IBKRClient:
     # (via openOrder/orderStatus/error) before failing closed - see
     # submit_order()'s docstring for why this can never be skipped.
     _ORDER_ACK_TIMEOUT_SECONDS = 10
+    _EXECUTIONS_TIMEOUT_SECONDS = 10
 
     def __init__(self, config: IBKRConfig | None = None):
         self.config = config or IBKRConfig.from_env()
@@ -351,6 +381,13 @@ class IBKRClient:
                 # order-specific rejection, recorded in order_errors).
                 self.order_ack_events: dict[str, threading.Event] = {}
                 self.order_errors: dict[str, tuple[int, str]] = {}
+                # execDetails()/commissionReport() can arrive in EITHER
+                # order for the same fill - keyed by execId so each is
+                # naturally deduplicated (a re-delivered execId just
+                # overwrites the same entry) regardless of which callback
+                # fills in which field first. See executions()'s docstring.
+                self.raw_executions: dict[str, dict[str, Any]] = {}
+                self.exec_details_end_event = threading.Event()
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
                 self.next_order_id = orderId
@@ -392,6 +429,14 @@ class IBKRClient:
                         "filled_quantity": entry.get("filled_quantity", 0.0),
                         "remaining_quantity": entry.get("remaining_quantity", float(order.totalQuantity)),
                         "avg_fill_price": entry.get("avg_fill_price"),
+                        # TWS echoes back whatever OCA group this order was
+                        # submitted with - preserved here so replace_order()
+                        # (which rebuilds the order from this snapshot, not
+                        # from the original OrderIntent) keeps a resized
+                        # stop/target in the SAME broker-enforced OCA group
+                        # rather than silently dropping the linkage.
+                        "oca_group": getattr(order, "ocaGroup", None) or entry.get("oca_group"),
+                        "oca_type": getattr(order, "ocaType", None) or entry.get("oca_type"),
                     }
                 )
                 ack_event = self.order_ack_events.get(key)
@@ -420,6 +465,36 @@ class IBKRClient:
 
             def openOrderEnd(self) -> None:  # noqa: N802
                 self.open_orders_end_event.set()
+
+            def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:  # noqa: N802
+                # commissionReport() for this SAME execId can arrive before
+                # OR after this callback - never overwrite a commission
+                # already recorded by setdefault-merging into whatever's
+                # there, exactly like openOrder()/orderStatus() already do
+                # for raw_orders above.
+                entry = self.raw_executions.setdefault(execution.execId, {"commission": None})
+                entry.update(
+                    {
+                        "execution_id": execution.execId,
+                        "broker_order_id": str(execution.orderId),
+                        "ticker": contract.symbol,
+                        "side": execution.side,
+                        "shares": float(execution.shares),
+                        "price": float(execution.price),
+                        "timestamp": _parse_ibkr_execution_time(execution.time),
+                    }
+                )
+
+            def commissionReport(self, commissionReport: Any) -> None:  # noqa: N802
+                entry = self.raw_executions.setdefault(commissionReport.execId, {"commission": None})
+                # IBKR reports an unset commission as its own sentinel
+                # float (sys.float_info.max) rather than omitting the
+                # field - never report that giant number as a real cost.
+                commission = commissionReport.commission
+                entry["commission"] = float(commission) if commission is not None and commission < 1e9 else None
+
+            def execDetailsEnd(self, reqId: int) -> None:  # noqa: N802
+                self.exec_details_end_event.set()
 
             def error(self, reqId, errorCode: int, errorString: str, advancedOrderRejectJson: str = "") -> None:  # noqa: N802
                 # ibapi reports plenty of benign informational "errors" (e.g.
@@ -548,7 +623,7 @@ class IBKRClient:
         contract.currency = _STOCK_CURRENCY
         return contract
 
-    def _build_ibkr_order(self, side: str, order_type: str, quantity: float, price: float) -> Any:
+    def _build_ibkr_order(self, side: str, order_type: str, quantity: float, price: float, oca_group: str | None = None, oca_type: int | None = None) -> Any:
         from ibapi.order import Order
 
         order = Order()
@@ -564,6 +639,18 @@ class IBKRClient:
             order.lmtPrice = price
         elif order.orderType == "STP":
             order.auxPrice = price
+        if oca_group:
+            # Broker-enforced protective exits (GitHub Issue #1 P0): a
+            # stop and target submitted with the SAME ocaGroup are linked
+            # at TWS itself - the instant one fills (or is cancelled), TWS
+            # cancels every other order in the group server-side, closing
+            # the race where both legs are still technically live at the
+            # broker between a fill and this process's own (much slower,
+            # poll-interval-bound) local sibling-cancel in learning_
+            # feedback.check_exit_fills(). That local cancel stays in
+            # place as defense-in-depth, not a replacement.
+            order.ocaGroup = oca_group
+            order.ocaType = oca_type or _OCA_TYPE_CANCEL_WITH_BLOCK
         return order
 
     def submit_order(self, intent: Any) -> BrokerOrder:
@@ -597,7 +684,11 @@ class IBKRClient:
 
         try:
             contract = self._build_stock_contract(intent.ticker)
-            order = self._build_ibkr_order(intent.side, intent.order_type, intent.quantity, intent.entry_price)
+            metadata = getattr(intent, "metadata", None) or {}
+            order = self._build_ibkr_order(
+                intent.side, intent.order_type, intent.quantity, intent.entry_price,
+                oca_group=metadata.get("oca_group"), oca_type=metadata.get("oca_type"),
+            )
             self._app.placeOrder(order_id, contract, order)
 
             if not ack_event.wait(self._ORDER_ACK_TIMEOUT_SECONDS):
@@ -654,13 +745,60 @@ class IBKRClient:
         quantity = changes.get("quantity", entry.get("quantity"))
         price = changes.get("limit_price", entry.get("limit_price"))
         contract = self._build_stock_contract(entry.get("ticker") or "")
-        order = self._build_ibkr_order(entry.get("side") or order_state.SIDE_BUY, entry.get("order_type") or order_state.ORDER_TYPE_LIMIT, quantity, price)
+        order = self._build_ibkr_order(
+            entry.get("side") or order_state.SIDE_BUY, entry.get("order_type") or order_state.ORDER_TYPE_LIMIT, quantity, price,
+            # Preserve the OCA linkage across a resize - TWS echoed it back
+            # to openOrder()/orderStatus() when this order was first placed
+            # (see those callbacks), so it survives here even though this
+            # method only ever sees the raw_orders snapshot, never the
+            # original OrderIntent.
+            oca_group=entry.get("oca_group"), oca_type=entry.get("oca_type"),
+        )
 
         self._app.placeOrder(int(broker_order_id), contract, order)
         return _order_from_raw({**entry, "quantity": quantity, "limit_price": price, "remaining_quantity": quantity})
 
     def executions(self) -> list[BrokerExecution]:
-        raise NotImplementedError("Populated by the concrete EWrapper 'execDetails' callback.")
+        """Fetches every execution (fill) IBKR has recorded for this
+        login via `reqExecutions()` (Part V - closing a broker-paper
+        trade needs its actual commission; `learning_feedback.
+        check_exit_fills()` calls this on every EXIT_PENDING fill it
+        finds). Deduplicated by execution id: `_IBWrapper.execDetails()`
+        and `commissionReport()` both merge into the SAME dict entry
+        keyed by `execId` rather than appending, so a redelivered execId
+        (ibapi does not guarantee at-most-once delivery) can never
+        produce two `BrokerExecution`s for one real fill.
+
+        Commission is best-effort - `commissionReport()` is a SEPARATE
+        callback from `execDetails()` and IBKR does not guarantee they
+        arrive paired within any particular window; if one is still
+        missing by the time `execDetailsEnd()` fires, `commission` is
+        `None` ("unknown"), never fabricated as `0.0`. Learning_feedback's
+        caller already treats a `None`/missing commission as unknown and
+        never lets that crash trade-closure handling."""
+        self._require_connected("read executions")
+        from ibapi.execution import ExecutionFilter
+
+        self._wrapper.raw_executions = {}
+        self._wrapper.exec_details_end_event.clear()
+        self._app.reqExecutions(9002, ExecutionFilter())
+        if not self._wrapper.exec_details_end_event.wait(self._EXECUTIONS_TIMEOUT_SECONDS):
+            raise IBKRConnectionError(f"Timed out waiting for TWS to finish reporting executions (execDetailsEnd never received within {self._EXECUTIONS_TIMEOUT_SECONDS}s).")
+
+        return [
+            BrokerExecution(
+                execution_id=entry["execution_id"],
+                broker_order_id=entry["broker_order_id"],
+                ticker=entry["ticker"],
+                side=entry["side"],
+                shares=entry["shares"],
+                price=entry["price"],
+                commission=entry.get("commission"),
+                timestamp=entry["timestamp"],
+            )
+            for entry in self._wrapper.raw_executions.values()
+            if "execution_id" in entry  # a commissionReport() that arrived before its execDetails() leaves a bare {"commission": ...} entry briefly - excluded if execDetails() never actually followed it up
+        ]
 
 
 def main() -> int:

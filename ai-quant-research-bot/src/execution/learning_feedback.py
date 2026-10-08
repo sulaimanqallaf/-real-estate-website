@@ -21,8 +21,25 @@ from . import order_state
 from .order_manager import OrderManager
 
 
-def _commission_for_order(broker: Any, broker_order_id: str) -> float:
-    return sum((e.commission or 0.0) for e in broker.executions() if e.broker_order_id == broker_order_id)
+def _commission_for_order(broker: Any, broker_order_id: str, logger: logging.Logger) -> float | None:
+    """Sums commission across every execution IBKR reports for this order
+    id. Returns `None` ("unknown") rather than `0.0` whenever there is
+    genuinely nothing to report it from - `executions()` itself failing
+    (e.g. `IBKRClient` timing out waiting for `execDetailsEnd`), or IBKR
+    simply not having reported any execution for this order id yet.
+    **A commission lookup failure must never block recording the trade's
+    actual close** - this is cost/reporting detail, not safety-relevant,
+    exactly like every other "Data Unavailable, never fabricated" source
+    in this codebase."""
+    try:
+        executions = broker.executions()
+    except Exception as exc:  # noqa: BLE001 - commission is best-effort; the trade close below must proceed regardless
+        logger.warning("Could not fetch executions to compute commission for order %s: %s", broker_order_id, exc)
+        return None
+    matching = [e for e in executions if e.broker_order_id == broker_order_id]
+    if not matching:
+        return None
+    return sum((e.commission or 0.0) for e in matching)
 
 
 def check_exit_fills(manager: OrderManager, config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
@@ -67,8 +84,12 @@ def check_exit_fills(manager: OrderManager, config: dict[str, Any], logger: logg
         if sibling_order_id:
             manager.broker.cancel_order(sibling_order_id)
 
-        commission = _commission_for_order(manager.broker, filled_leg.broker_order_id)
+        commission = _commission_for_order(manager.broker, filled_leg.broker_order_id, logger)
         exit_price = filled_leg.avg_fill_price if filled_leg.avg_fill_price is not None else filled_leg.limit_price
+        if commission is not None:
+            notes = f"Broker-executed exit (commission ${commission:.2f})"
+        else:
+            notes = "Broker-executed exit (commission unknown)"
         closed = paper_trades.close_trade_with_actual_fill(
             trade_id=managed.intent.trade_id,
             exit_price=exit_price,
@@ -76,7 +97,7 @@ def check_exit_fills(manager: OrderManager, config: dict[str, Any], logger: logg
             exit_reason=exit_reason,
             status=status,
             config=config,
-            notes=f"Broker-executed exit (commission ${commission:.2f})" if commission else "Broker-executed exit",
+            notes=notes,
         )
         manager.close_position(managed.intent.intent_id)
         if closed is not None:

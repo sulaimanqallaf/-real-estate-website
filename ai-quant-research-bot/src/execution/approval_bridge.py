@@ -191,7 +191,9 @@ def handle_manual_approval(
             logger.warning("Manual approval blocked for %s: %s", symbol, reasons)
             return False, f"{symbol}: NOT submitted - {reasons}. The pending approval is unaffected; try again."
 
-        success, message = paper_trades.process_decision("approve", symbol, report_date, config, logger, trade_id=trade_id)
+        success, message = paper_trades.process_decision(
+            "approve", symbol, report_date, config, logger, trade_id=trade_id, provenance=paper_trades.PROVENANCE_BROKER_PAPER,
+        )
         if not success:
             # Extremely unlikely (the exact same record just passed peek_
             # pending_decision()'s read-only checks moments ago) - but if

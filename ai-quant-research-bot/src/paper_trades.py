@@ -55,7 +55,30 @@ PAPER_TRADE_COLUMNS = [
     # forward. Blank for any row recorded before this column existed - never
     # backfilled with a guess.
     "regime_at_entry",
+    # GitHub Issue #1 P0: distinguishes a row this system actually
+    # submitted to IBKR (PROVENANCE_BROKER_PAPER) from one that only ever
+    # existed as this CSV's own bookkeeping (PROVENANCE_SIMULATED - DRY_RUN
+    # approvals, and every row recorded before this column existed, via
+    # effective_provenance()'s default). paper_trade_tracker.py's daily-
+    # bar simulation must NEVER close a BROKER_PAPER row - only `execution.
+    # learning_feedback.check_exit_fills()`, using the broker's ACTUAL
+    # fill, is allowed to close one. See paper_trade_tracker.py's module
+    # docstring for why conflating the two would corrupt real broker-paper
+    # P&L with a fabricated daily-bar guess.
+    "provenance",
 ]
+
+PROVENANCE_SIMULATED = "SIMULATED"
+PROVENANCE_BROKER_PAPER = "BROKER_PAPER"
+
+
+def effective_provenance(raw_value: Any) -> str:
+    """A row written before the `provenance` column existed (or any other
+    missing/blank/unrecognized value) is PROVENANCE_SIMULATED - never
+    silently treated as broker-managed, which would make paper_trade_
+    tracker.py skip evaluating it and leave it OPEN forever. Only an
+    exact, explicit PROVENANCE_BROKER_PAPER marks a row as broker-owned."""
+    return raw_value if raw_value == PROVENANCE_BROKER_PAPER else PROVENANCE_SIMULATED
 
 
 # --- callback_data encoding (Telegram caps this at 64 bytes) ----------------------
@@ -231,6 +254,7 @@ def peek_pending_decision(action: str, symbol: str, report_date: str, config: di
 
 def process_decision(
     action: str, symbol: str, report_date: str, config: dict[str, Any], logger: logging.Logger, trade_id: str | None = None,
+    provenance: str = PROVENANCE_SIMULATED,
 ) -> tuple[bool, str]:
     """Resolve one button press. Returns (success, message_to_show_the_user).
 
@@ -245,6 +269,12 @@ def process_decision(
     the SAME trade_id lands on both the `OrderIntent` and this CSV row -
     see `record_paper_trade()`'s docstring for why they'd otherwise drift
     apart. Passed straight through to `record_paper_trade()`.
+
+    `provenance`: passed straight through to `record_paper_trade()` - the
+    manual IBKR-approval path passes `PROVENANCE_BROKER_PAPER` (same
+    reasoning as `trade_id` above: the broker submission already
+    succeeded by the time this runs); every other caller (DRY_RUN
+    simulated approvals, Reject, Watch Only) leaves the default.
     """
     if action not in VALID_ACTIONS:
         return False, f"Unrecognized action: {action}"
@@ -281,7 +311,7 @@ def process_decision(
     _save_all(records, config)
 
     if action == "approve":
-        record_paper_trade(record, config, trade_id=trade_id)
+        record_paper_trade(record, config, trade_id=trade_id, provenance=provenance)
         logger.info("Approved paper trade: %s (%s)", symbol, record["strategy"])
         return True, f"{symbol} approved and recorded in paper_trades.csv."
 
@@ -397,8 +427,16 @@ def save_paper_trades_df(df: pd.DataFrame, config: dict[str, Any]) -> Path:
     return path
 
 
-def record_paper_trade(record: dict[str, Any], config: dict[str, Any], trade_id: str | None = None) -> Path:
+def record_paper_trade(record: dict[str, Any], config: dict[str, Any], trade_id: str | None = None, provenance: str = PROVENANCE_SIMULATED) -> Path:
     """Create one OPEN paper position from an approved candidate.
+
+    `provenance`: PROVENANCE_SIMULATED (default - a DRY_RUN approval with
+    no broker involved at all) or PROVENANCE_BROKER_PAPER (this system
+    actually submitted the entry to IBKR - the AUTO_EXECUTE path and
+    manual IBKR-approval path both pass this explicitly). See
+    `paper_trade_tracker.check_open_trades()`'s docstring for why this
+    distinction exists: a BROKER_PAPER row must only ever be closed by
+    the broker's own actual fill, never by a fabricated daily-bar guess.
 
     Default status is OPEN immediately - there is no separate PENDING state for
     the *position* itself. (PENDING already means something else here: it's the
@@ -443,6 +481,7 @@ def record_paper_trade(record: dict[str, Any], config: dict[str, Any], trade_id:
         "holding_days": "",
         "notes": "",
         "regime_at_entry": record.get("regime_at_entry"),
+        "provenance": provenance,
     }
 
     existing = load_paper_trades_df(config)

@@ -130,6 +130,50 @@ def test_commission_is_recorded_in_notes(config):
     assert "1.5" in str(row["notes"])
 
 
+def test_commission_fetch_failure_never_blocks_trade_closure(config, monkeypatch):
+    """GitHub Issue #1 P0: IBKRClient.executions() used to be
+    NotImplementedError, which meant this exact call path always raised,
+    and the trade was NEVER marked closed against real IBKR - stuck in
+    EXIT_PENDING forever. A commission lookup failure (timeout, or any
+    other broker.executions() exception) must still let the close
+    complete, with the commission simply recorded as unknown."""
+    broker = FakeBroker()
+    broker.connect()
+    seed_open_trade(config)
+    manager, managed = make_filled_managed(broker, config)
+    broker.simulate_fill(managed.target_broker_order_id, shares=10, price=112.0)
+
+    def boom():
+        raise RuntimeError("simulated: executions() timed out")
+
+    monkeypatch.setattr(broker, "executions", boom)
+    closed = learning_feedback.check_exit_fills(manager, config, logger)
+
+    assert len(closed) == 1  # the close still completed
+    assert managed.state == order_state.STATE_CLOSED
+    df = paper_trades.load_paper_trades_df(config)
+    row = df[df["trade_id"] == "AMD_2026-09-09_aaaaaaaa"].iloc[0]
+    assert "unknown" in str(row["notes"]).lower()
+
+
+def test_commission_is_unknown_not_zero_when_no_matching_execution_exists(config, monkeypatch):
+    """No execution reported for this order id at all (e.g. IBKR hasn't
+    caught up yet) must record commission as unknown, never a fabricated
+    verified $0.00."""
+    broker = FakeBroker()
+    broker.connect()
+    seed_open_trade(config)
+    manager, managed = make_filled_managed(broker, config)
+    broker.simulate_fill(managed.target_broker_order_id, shares=10, price=112.0)
+    monkeypatch.setattr(broker, "executions", lambda: [])  # IBKR hasn't reported any execution yet
+
+    learning_feedback.check_exit_fills(manager, config, logger)
+
+    df = paper_trades.load_paper_trades_df(config)
+    row = df[df["trade_id"] == "AMD_2026-09-09_aaaaaaaa"].iloc[0]
+    assert "unknown" in str(row["notes"]).lower()
+
+
 def test_no_op_when_no_leg_has_filled_yet(config):
     broker = FakeBroker()
     broker.connect()

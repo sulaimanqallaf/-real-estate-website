@@ -14,6 +14,17 @@ see `IBKRClient`'s module docstring). The tradeoff: a brief window after
 entry fills where the position is unprotected until the exit legs are
 placed; `order_manager.py` places them synchronously, immediately upon
 detecting the fill, to keep that window as short as possible.
+
+**Broker-enforced OCA (GitHub Issue #1 P0):** the stop and target legs are
+still two independent SELL orders (not an IBKR native bracket), but both
+carry the SAME `ocaGroup`/`ocaType` (see `_exit_intent()` and
+`IBKRClient._build_ibkr_order()`) - TWS itself cancels one the instant the
+other fills or is cancelled. This closes the race the earlier design left
+open: between a fill and this process's own poll-interval-bound local
+sibling-cancel (`learning_feedback.check_exit_fills()`), both legs were
+technically still live at the broker and could both have filled (e.g. a
+fast-moving gap through both levels). The local cancel in `learning_
+feedback.py` stays in place as defense-in-depth, not a replacement.
 """
 
 from __future__ import annotations
@@ -336,6 +347,16 @@ class OrderManager:
                 pass
 
 
+def oca_group_for_entry(entry_intent_id: str) -> str:
+    """Stable OCA group name for one entry's protective exit pair - the
+    SAME value every time `_sync_protection()` is called for this managed
+    order, including across a later resize (`replace_order()` preserves
+    whatever `oca_group` TWS already echoed back - see `ibkr_client.py`),
+    so the stop and target legs stay linked at the broker for the whole
+    life of the position, not just at creation."""
+    return f"oca_{entry_intent_id}"
+
+
 def _exit_intent(entry_intent: OrderIntent, order_type: str, price: float, quantity: float) -> OrderIntent:
     return order_state.OrderIntent(
         intent_id=order_state.new_intent_id(),
@@ -354,7 +375,12 @@ def _exit_intent(entry_intent: OrderIntent, order_type: str, price: float, quant
         trade_id=entry_intent.trade_id,
         regime=entry_intent.regime,
         account_mode_at_creation=entry_intent.account_mode_at_creation,
-        metadata={"parent_intent_id": entry_intent.intent_id},
+        # Broker-enforced OCA linkage (GitHub Issue #1 P0) - IBKRClient.
+        # submit_order()/replace_order() read oca_group/oca_type from here
+        # and set them on the real ibapi Order; FakeBroker ignores them
+        # (it has no server-side OCA concept to simulate), so this is a
+        # pure addition, not a behavior change, for every existing test.
+        metadata={"parent_intent_id": entry_intent.intent_id, "oca_group": oca_group_for_entry(entry_intent.intent_id), "oca_type": 1},
     )
 
 

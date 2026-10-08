@@ -15,6 +15,15 @@ same bar (conservative assumption)"). Reusing it here keeps the codebase's answe
 to "which one wins" consistent everywhere it's asked, rather than having two
 different answers depending on whether a trade was simulated or is live.
 
+Broker-paper isolation (GitHub Issue #1 finding 5): a row whose `provenance`
+column (see `paper_trades.py`) is `PROVENANCE_BROKER_PAPER` - an actual IBKR
+submission, via AUTO_EXECUTE or manual IBKR approval - is NEVER evaluated here,
+no matter how long it stays OPEN. Only `execution.learning_feedback.
+check_exit_fills()`, using the broker's own actual fill, may close one. Running
+this daily-bar simulation against a real broker position would fabricate a
+close price/date for a trade whose real outcome is whatever IBKR actually did -
+corrupting the one thing this system promises never to invent.
+
 Idempotency: check_open_trades() only ever evaluates rows whose status is still
 "OPEN". The moment a trade closes, its status becomes a terminal value
 (TARGET_HIT / STOPPED / TIME_EXIT) and it is never evaluated again by any later
@@ -116,6 +125,18 @@ def check_open_trades(
         trade = row.to_dict()
 
         if trade["status"] != "OPEN":
+            updated_rows.append(trade)
+            continue
+
+        if paper_trades.effective_provenance(trade.get("provenance")) == paper_trades.PROVENANCE_BROKER_PAPER:
+            # This row is an actual IBKR submission, owned exclusively by
+            # execution.learning_feedback.check_exit_fills() using the
+            # broker's REAL fill - the daily-bar simulation below must
+            # NEVER fabricate a close price/date for it (GitHub Issue #1
+            # finding 5: "ensure broker-executed trades cannot also be
+            # closed by a simulated daily-bar tracker"). Left OPEN here
+            # unconditionally; position_monitor.py is what actually
+            # closes it.
             updated_rows.append(trade)
             continue
 
