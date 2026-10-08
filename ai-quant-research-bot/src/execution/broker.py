@@ -177,6 +177,15 @@ class FakeBroker:
         order = self._orders.get(broker_order_id)
         if order is None:
             return False
+        if order.status == "Filled":
+            # A real broker ignores (no-ops) a cancel on an order that has
+            # already filled - it never retroactively overwrites a genuine
+            # fill with "Cancelled". This matters for the simultaneous
+            # stop+target fill race: check_exit_fills() cancels whichever
+            # leg it didn't act on, and if that leg had ALSO just filled
+            # (a gap that blows through both legs on the same tick), the
+            # fake broker must not erase evidence of that second fill.
+            return False
         self._orders[broker_order_id] = _replace(order, status="Cancelled")
         return True
 

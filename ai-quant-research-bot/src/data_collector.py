@@ -92,6 +92,41 @@ def fetch_current_price(symbol: str, logger: logging.Logger) -> float | None:
         return None
 
 
+def latest_bar_age_days(symbol: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> int | None:
+    """Age in days of the most recent cached daily bar for `symbol`
+    (`data/raw/{symbol}_daily.csv`, written by `fetch_symbol_history()`),
+    for `circuit_breaker.check_all()`'s `latest_bar_age_days` input -
+    GitHub Issue #1: "never assume delayed market data is real-time."
+    yfinance daily bars are themselves end-of-day, not streaming, so this
+    is a genuine, separate staleness signal from `fetch_current_price()`'s
+    best-effort last trade price - it catches the case where the daily
+    research pipeline itself ran on stale/cached history (a failed
+    refresh, a stalled data provider), not just intraday price movement.
+    Returns `None` ("unknown", never fabricated as fresh) when the file
+    is missing or empty, exactly like every other "Data Unavailable"
+    source in this codebase."""
+    from datetime import datetime, timezone
+
+    raw_dir = config.get("data", {}).get("raw_dir")
+    if not raw_dir:
+        return None
+    raw_path = resolve_path(raw_dir) / f"{symbol}_daily.csv"
+    if not raw_path.exists():
+        return None
+    try:
+        df = pd.read_csv(raw_path, index_col=0, parse_dates=True)
+        if df.empty:
+            return None
+        last_bar_date = df.index[-1]
+        if last_bar_date.tzinfo is None:
+            last_bar_date = last_bar_date.tz_localize("UTC")
+        reference = now or datetime.now(timezone.utc)
+        return (reference.date() - last_bar_date.date()).days
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not determine latest bar age for %s: %s", symbol, exc)
+        return None
+
+
 def fetch_raw_option_chain(symbol: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (calls, puts) DataFrames for one expiration. Raises on any failure."""
     ticker = yf.Ticker(symbol)

@@ -391,7 +391,11 @@ def _attempt_auto_execution(
         "regime_at_entry": (entry.get("regime_evaluation") or {}).get("regime"),
     }
     current_market_price = data_collector.fetch_current_price(entry["symbol"], logger)
-    return approval_bridge.execute_approved_trade(record, config, broker, manager, current_market_price=current_market_price, logger=logger, trade_id=trade_id, now=now)
+    bar_age = data_collector.latest_bar_age_days(entry["symbol"], config, logger)
+    return approval_bridge.execute_approved_trade(
+        record, config, broker, manager, current_market_price=current_market_price, logger=logger,
+        trade_id=trade_id, now=now, latest_bar_age_days=bar_age,
+    )
 
 
 def _review_top_candidates_dry_run(ticker_results: list[dict[str, Any]], report_date: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> set[str]:

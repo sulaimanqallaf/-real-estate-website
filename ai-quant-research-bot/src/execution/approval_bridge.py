@@ -6,8 +6,10 @@ when both `autonomous_paper.enabled` and `auto_execute.enabled` are true.
 Paper Trade," the record in `pending_approvals.json` may be hours old.
 `execute_approved_trade()` re-checks everything that can legitimately have
 changed since then - account mode, circuit breakers, current market price
-vs. the signal price, portfolio exposure, duplicate/conflicting orders,
-market hours, and data freshness - before ever calling
+vs. the signal price, cached daily-bar staleness (GitHub Issue #1: never
+assume delayed market data is real-time), portfolio exposure,
+duplicate/conflicting orders, market hours, and data freshness - before
+ever calling
 `OrderManager.submit_entry()`. It does NOT re-run the full regime/ML
 pipeline (that's still the same decision the record already captured); see
 module docstring below for exactly which gates are re-verified and why
@@ -42,6 +44,7 @@ def execute_approved_trade(
     logger: logging.Logger,
     trade_id: str | None = None,
     now: datetime | None = None,
+    latest_bar_age_days: int | None = None,
 ) -> dict[str, Any]:
     """`record` is a `pending_approvals.json` entry (see `paper_trades.
     pending_record_from_entry`) after `paper_trades.process_decision()`
@@ -77,7 +80,7 @@ def execute_approved_trade(
     reconciliation_ok, reconciliation_summary = circuit_breaker.read_reconciliation_status(config)
     breaker_result = circuit_breaker.check_all(
         config, account=account, connection_state=broker.connection_state(),
-        reconciliation_ok=reconciliation_ok,
+        reconciliation_ok=reconciliation_ok, latest_bar_age_days=latest_bar_age_days,
         **circuit_breaker.live_risk_inputs(config),
     )
     reasons.extend(breaker_result.tripped)
@@ -194,7 +197,11 @@ def handle_manual_approval(
 
         trade_id = paper_trades.generate_trade_id(symbol, report_date)
         current_price = data_collector.fetch_current_price(symbol, logger)
-        result = execute_approved_trade(record, config, broker, manager, current_market_price=current_price, logger=logger, trade_id=trade_id, now=now)
+        bar_age = data_collector.latest_bar_age_days(symbol, config, logger)
+        result = execute_approved_trade(
+            record, config, broker, manager, current_market_price=current_price, logger=logger,
+            trade_id=trade_id, now=now, latest_bar_age_days=bar_age,
+        )
 
         if not result.get("executed"):
             reasons = "; ".join(result.get("reasons", []))
