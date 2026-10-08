@@ -694,7 +694,7 @@ def _map_rating_to_action(rating: str | None) -> str:
     return _RATING_TO_ACTION.get(rating.strip().lower(), ACTION_HOLD)
 
 
-_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}[^\n]*\n?", re.MULTILINE)
 _MARKDOWN_EMPHASIS_RE = re.compile(r"(\*\*|__|\*|_)")
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -712,10 +712,17 @@ def _summarize_debate_text(text: str | None, max_chars: int = _DEBATE_EXCERPT_CH
     Issue #1 follow-up: "do not invoke an LLM just to preview cached
     results").
 
-    Strips markdown heading markers (`#`/`##`/...) and emphasis markers
-    (`**`/`__`/`*`/`_`) so a heading like "## Bull Case\\n\\n**Strong
-    margins**" reads as "Bull Case Strong margins" instead of leaking
-    raw markdown syntax into the report. Collapses to a single excerpt
+    Strips whole markdown HEADING LINES (`#`/`##`/... through end of
+    line) - not just the `#` marker - because the heading's own words
+    (e.g. "Bull Case", "Bear Case") are typically boilerplate that
+    duplicates the "Bull case:"/"Bear case:" label the report already
+    prepends; leaving them in produced a redundant "Bull case: Bull
+    Case <actual content>" artifact. Also strips inline emphasis markers
+    (`**`/`__`/`*`/`_`), so a transcript like "## Bull Case\\n\\n**Strong
+    margins**" reads as a clean "Strong margins" excerpt. This only ever
+    affects the DISPLAY excerpt built here - the original transcript in
+    `raw["bull_history"]`/`raw["bear_history"]` (and the cached row it
+    came from) is never altered. Collapses to a single excerpt
     truncated at a WORD boundary (never mid-word) and, when the source
     was longer than the excerpt, appends an explicit
     "(excerpt, N of M chars - see cached transcript for the full

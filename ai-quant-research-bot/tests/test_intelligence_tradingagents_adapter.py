@@ -865,3 +865,24 @@ def test_repriced_cost_info_never_mutates_the_input_dict():
     before = dict(raw)
     ta.repriced_cost_info(raw, {"gpt-6-luna": {"input": 1.0, "output": 1.0}})
     assert raw == before
+
+
+def test_summarize_debate_text_removes_the_whole_heading_line_not_just_the_hash_marker():
+    """GitHub Issue #1 follow-up: stripping only the '#' marker left the
+    heading's own boilerplate words ('Bull Case') in the excerpt,
+    producing a redundant 'Bull case: Bull Case ...' artifact once
+    report_writer prepends its own label. The whole heading line must
+    be removed, leaving only the substantive body text - without
+    touching the original transcript this is built from."""
+    result = ta._summarize_debate_text("## Bull Case\n\n**AMD margins** are improving on datacenter mix.")
+    assert "Bull Case" not in result
+    assert result == "AMD margins are improving on datacenter mix."
+
+
+def test_summarize_debate_text_strips_multiple_heading_lines():
+    text = "## Bull Case\n\nStrong margins.\n\n### Key Catalyst\n\nUpcoming earnings beat expected."
+    result = ta._summarize_debate_text(text)
+    assert "Bull Case" not in result
+    assert "Key Catalyst" not in result
+    assert "Strong margins" in result
+    assert "Upcoming earnings beat expected" in result
