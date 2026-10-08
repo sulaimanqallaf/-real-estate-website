@@ -471,20 +471,26 @@ launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist
 
 Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`.
 
-### Running it fully autonomously: the three canonical services
+### Running it fully autonomously: the canonical services
 
 Once `execution.mode` is `IBKR_PAPER` (and, when you've decided you're
 ready, `autonomous_paper.enabled`/`auto_execute.enabled` are both `true`
 in your local `.env`/override - see "Rollout" below), continuous
-hands-off operation is exactly these three `launchd` agents, each with
-its own singleton lock so a duplicate can never silently race another
-copy of itself:
+hands-off operation is exactly these `launchd` agents, each with its own
+singleton lock (where one applies) so a duplicate can never silently
+race another copy of itself:
 
 | Service | Plist | Schedule | What it owns |
 |---|---|---|---|
-| Daily research | `com.aiquantresearchbot.daily` | `StartCalendarInterval` (once/day) | Fetches data, runs strategies/regime/ML/scoring, classifies AUTO_EXECUTE candidates, submits qualifying PAPER entries. Documented above. |
+| Daily research | `com.aiquantresearchbot.daily` | `StartCalendarInterval` (once/day) | Fetches data, runs strategies/regime/ML/scoring, classifies AUTO_EXECUTE candidates, submits qualifying PAPER entries, records a decision snapshot per candidate. Documented above. |
 | Approval listener | `com.aiquantresearchbot.approvals` | `KeepAlive`/`RunAtLoad` (continuous) | Telegram polling: `/status /positions /orders /performance /halt /resume`, manual Approve/Reject/Watch buttons for anything that didn't auto-execute. Documented in section 5. |
 | Position monitor | `com.aiquantresearchbot.monitor` | `KeepAlive`/`RunAtLoad` (continuous) | Fill polling, stop/target protection sync, reconciliation, circuit breakers, restart recovery, lifecycle Telegram notices. |
+| Retrain scheduler | `com.aiquantresearchbot.retrain` | `StartCalendarInterval` (weekly) | `python -m src.ml.retrain_scheduler` - trains a fresh CHALLENGER per ticker/model family, promotes only via the unchanged `model_registry.decide_promotion()` gate, and rolls back a CHAMPION whose real PAPER outcomes have a losing record. See "Quant / ML Intelligence Layer" below. |
+| Weekly learning report | `com.aiquantresearchbot.weeklyreport` | `StartCalendarInterval` (weekly) | `python -m src.ml.weekly_report` - sends the Telegram summary described below. |
+
+The last two are read of/append to the decision ledger and model event
+log only - neither imports `circuit_breaker.py`/`execution_policy.py` or
+anything else that could touch a safety limit or trading permission.
 
 These are deliberately SEPARATE processes, not one monolithic service -
 a scheduled batch job (research/entry) and a continuous loop (fill/

@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from . import decision_ledger
+from . import decision_ledger, model_events
 from . import models as ml_models
 from . import model_registry, trainer
 
@@ -35,7 +35,7 @@ MIN_TRADES_FOR_DETERIORATION_CHECK = 10
 MIN_ACCEPTABLE_WIN_RATE = 0.30
 
 
-def rollback_champion(registry: model_registry.ModelRegistry, model_id: str, reason: str, logger: logging.Logger) -> bool:
+def rollback_champion(registry: model_registry.ModelRegistry, model_id: str, reason: str, logger: logging.Logger, config: dict[str, Any] | None = None) -> bool:
     """Demotes `model_id` (must currently be CHAMPION) to RETIRED, and -
     if an earlier RETIRED model exists for the SAME slot (task, target,
     horizon, model_type) - restores the most recently trained one as the
@@ -50,6 +50,8 @@ def rollback_champion(registry: model_registry.ModelRegistry, model_id: str, rea
 
     registry.set_status(model_id, model_registry.STATUS_RETIRED)
     logger.warning("Rolled back CHAMPION %s (%s): %s", model_id, meta.model_type, reason)
+    if config is not None:
+        model_events.record_event(config, model_events.EVENT_ROLLED_BACK, model_id, model_type=meta.model_type, reason=reason)
 
     previous_candidates = [
         m for m in registry.list_metadata(task=meta.task, target=meta.target, horizon=meta.horizon, status=model_registry.STATUS_RETIRED)
@@ -92,7 +94,7 @@ def check_for_champion_deterioration(config: dict[str, Any], registry: model_reg
         win_rate = wins / len(matching)
         if win_rate < MIN_ACCEPTABLE_WIN_RATE:
             reason = f"Real-world win rate {win_rate:.1%} over {len(matching)} resolved PAPER trades is below the {MIN_ACCEPTABLE_WIN_RATE:.0%} floor."
-            rolled_back = rollback_champion(registry, meta.model_id, reason, logger)
+            rolled_back = rollback_champion(registry, meta.model_id, reason, logger, config=config)
             flagged.append({"model_id": meta.model_id, "model_type": meta.model_type, "reason": reason, "rolled_back": rolled_back, "win_rate": win_rate, "sample_size": len(matching)})
 
     return flagged
@@ -138,6 +140,13 @@ def run_scheduled_retraining(config: dict[str, Any], logger: logging.Logger) -> 
             trained.append({"ticker": ticker, "model_type": model_type, "model_id": result["metadata"].model_id, "promoted": result.get("promoted", False)})
             if result.get("promoted"):
                 promoted.append(result["metadata"].model_id)
+                safe_run(
+                    logger, "model event log",
+                    lambda r=result: model_events.record_event(
+                        config, model_events.EVENT_PROMOTED, r["metadata"].model_id, model_type=r["metadata"].model_type,
+                        reason="; ".join(r.get("promotion_decision", {}).get("reasons", [])) or None,
+                    ),
+                )
 
     rollbacks = safe_run(logger, "champion deterioration check", lambda: check_for_champion_deterioration(config, registry, logger)) or []
 

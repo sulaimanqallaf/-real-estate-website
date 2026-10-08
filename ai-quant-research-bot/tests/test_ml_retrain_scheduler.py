@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.ml import decision_ledger, model_registry, retrain_scheduler
+from src.ml import decision_ledger, model_events, model_registry, retrain_scheduler
 from src.ml import models as ml_models
 
 LOGGER = logging.getLogger("test")
@@ -132,6 +132,9 @@ def test_deterioration_check_rolls_back_a_champion_with_a_losing_record(tmp_path
     assert flagged[0]["rolled_back"] is True
     assert registry.read_metadata(model_id).status == model_registry.STATUS_RETIRED
 
+    events = model_events.read_events(config)
+    assert any(e["event"] == model_events.EVENT_ROLLED_BACK and e["model_id"] == model_id for e in events)
+
 
 def test_deterioration_check_leaves_a_healthy_champion_alone(tmp_path):
     config = _config_with_ledger(tmp_path)
@@ -223,3 +226,7 @@ def test_run_scheduled_retraining_tracks_promotions(monkeypatch, tmp_path):
 
     assert len(summary["promoted"]) == len(ml_models.ALL_MODEL_TYPES)
     assert summary["errors"] == []
+
+    events = model_events.read_events(config)
+    assert len(events) == len(ml_models.ALL_MODEL_TYPES)
+    assert all(e["event"] == model_events.EVENT_PROMOTED for e in events)
