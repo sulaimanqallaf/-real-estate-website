@@ -68,11 +68,21 @@ def execute_approved_trade(
     if broker.connection_state() != "CONNECTED":
         reasons.append("BROKER_DISCONNECTED")
 
+    # GitHub Issue #1: reconciliation is only ever actually CHECKED by
+    # position_monitor.py's own tick - a SEPARATE process. Without
+    # reading its durably-recorded result here, a reconciliation failure
+    # it already found would be invisible to this entry path, which
+    # could keep submitting new orders into broker/local state
+    # position_monitor had already flagged as inconsistent.
+    reconciliation_ok, reconciliation_summary = circuit_breaker.read_reconciliation_status(config)
     breaker_result = circuit_breaker.check_all(
         config, account=account, connection_state=broker.connection_state(),
+        reconciliation_ok=reconciliation_ok,
         **circuit_breaker.live_risk_inputs(config),
     )
     reasons.extend(breaker_result.tripped)
+    if not reconciliation_ok and reconciliation_summary:
+        reasons.append(f"RECONCILIATION_SUMMARY: {reconciliation_summary}")
 
     hours_reason = pretrade_checks.check_trading_hours(now or _now_ny(), config)
     if hours_reason:

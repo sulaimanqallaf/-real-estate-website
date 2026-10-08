@@ -124,6 +124,67 @@ def status(config: dict[str, Any]) -> dict[str, Any]:
     return {"halted": halted, "reason": reason}
 
 
+# --- durable, cross-process reconciliation state (GitHub Issue #1 P0/P2) -----------
+#
+# position_monitor.py's own tick is the only place a reconciliation
+# discrepancy is actually detected, but it's a SEPARATE process from
+# whatever submits a NEW entry (main.py's daily run, approval_bridge's
+# manual-approval path) - without persisting the result somewhere every
+# process reads, a reconciliation failure flagged by position_monitor was
+# invisible to every other entry point, which could keep submitting new
+# orders into a broker/local state position_monitor had already found
+# inconsistent. This is what "never start a second entry session while
+# state unknown" actually requires.
+
+
+def _reconciliation_file_path(config: dict[str, Any]) -> Path:
+    """ALWAYS colocated with `data.journal_dir` - deliberately no
+    separate `execution.reconciliation_state_file`-style override (same
+    reasoning as `decision_ledger.resolve_db_path()`): a second,
+    independent path config is exactly what let a test loading the real
+    settings.yaml with only `journal_dir` overridden keep silently
+    writing into (and reading stale state back from) the real repo's
+    `data/runtime/` directory - caught and fixed during this same
+    change. Falls back to the literal default only when even
+    `data.journal_dir` is missing."""
+    from ..utils import resolve_path
+
+    journal_dir = config.get("data", {}).get("journal_dir")
+    if journal_dir:
+        return resolve_path(journal_dir) / "reconciliation_status.json"
+    return resolve_path("data/runtime/reconciliation_status.json")
+
+
+def record_reconciliation_status(config: dict[str, Any], ok: bool, summary: str | None = None) -> None:
+    """Called once per `position_monitor.run_one_tick()` - the durable
+    record every OTHER process's entry-time breaker check reads via
+    `read_reconciliation_status()`."""
+    path = _reconciliation_file_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"ok": ok, "summary": summary, "checked_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+
+
+def read_reconciliation_status(config: dict[str, Any]) -> tuple[bool, str | None]:
+    """No file yet (position_monitor has never ticked - e.g. execution
+    mode isn't IBKR_PAPER, or this is a fresh deployment) is treated as
+    OK: there is nothing on record to be inconsistent with, and the
+    account-mode/connection breakers already gate entries independently
+    either way. Never raises on a corrupt/unreadable file - treated the
+    same as "no record", since failing closed here would mean a
+    transient file-read glitch halts the whole system, which is worse
+    than the (already covered elsewhere) risk it would guard against."""
+    path = _reconciliation_file_path(config)
+    if not path.exists():
+        return True, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("ok", True)), data.get("summary")
+    except (OSError, ValueError):
+        return True, None
+
+
 # --- individual breaker checks ------------------------------------------------------
 
 

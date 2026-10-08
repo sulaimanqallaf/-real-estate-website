@@ -56,6 +56,12 @@ def run_one_tick(
     report = reconciliation.reconcile(broker, local_open_trades, local_open_orders)
     if not report.ok:
         logger.error("Position monitor: reconciliation discrepancies found:\n%s", report.summary())
+    # Durable, cross-process record - this is what lets main.py's daily
+    # run / approval_bridge's manual-approval path (separate processes)
+    # refuse a NEW entry while THIS tick's reconciliation failure is
+    # still outstanding. See circuit_breaker.record_reconciliation_status()'s
+    # docstring.
+    circuit_breaker.record_reconciliation_status(config, report.ok, report.summary() if not report.ok else None)
 
     live_inputs = circuit_breaker.live_risk_inputs(config)
     live_inputs["current_open_positions"] = len(broker.positions())  # the broker's own count is more authoritative here than paper_trades.csv's OPEN rows

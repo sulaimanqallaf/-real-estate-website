@@ -19,6 +19,19 @@ logger = logging.getLogger("test")
 PERMISSIVE_CONFIG = {"execution_risk": {"max_risk_per_trade_pct": 0.05}, "risk": {"account_equity": 10_000}}
 
 
+@pytest.fixture(autouse=True)
+def _isolate_reconciliation_status_file(tmp_path, monkeypatch):
+    """PERMISSIVE_CONFIG has no data.journal_dir - without this,
+    circuit_breaker.record_reconciliation_status() (called by every
+    run_one_tick() in this file) would fall back to its literal default
+    and write real state into the repo's own data/runtime/ directory,
+    leaking across test runs exactly like the decision-ledger pollution
+    bug this same change already fixed elsewhere."""
+    from src.execution import circuit_breaker
+
+    monkeypatch.setattr(circuit_breaker, "_reconciliation_file_path", lambda config: tmp_path / "reconciliation_status.json")
+
+
 def make_intent(**overrides):
     from datetime import datetime, timezone
 
