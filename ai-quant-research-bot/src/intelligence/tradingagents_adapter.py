@@ -244,6 +244,85 @@ def _cache_set(db_path: Path, key: str, result: dict[str, Any], now: datetime, t
         )
 
 
+def _cache_key_from_request_payload(payload: dict[str, Any]) -> str | None:
+    try:
+        ticker = payload["ticker"]
+        trade_date = payload["trade_date"]
+    except (KeyError, TypeError):
+        return None
+    selected_analysts = payload.get("selected_analysts") or ["market", "social", "news", "fundamentals"]
+    config_overrides = payload.get("config_overrides") or {}
+    return _cache_key(ticker, trade_date, selected_analysts, config_overrides)
+
+
+def recover_cache_metadata_from_request_files(config: dict[str, Any], logger: logging.Logger | None = None) -> dict[str, Any]:
+    """Backfills `ticker`/`report_date` for cache rows a pre-migration
+    database left `NULL` (GitHub Issue #1 follow-up), using the
+    `request.json` files `run_one()` already writes under
+    `resolve_work_dir()` for every real call it ever made.
+
+    **Never guesses.** A request file's own `(ticker, trade_date,
+    selected_analysts, config_overrides)` deterministically reproduces
+    the EXACT SAME `cache_key` `_cache_key()` computed for that call in
+    the first place - the two are cryptographically tied together by
+    construction, so a match here is a verified identification of which
+    call produced that cache row, never an inference from row order,
+    position, or the cached signal/content itself. A `NULL` row with no
+    matching request file anywhere under the work directory is left
+    exactly as it was - still `NULL`, still clearly "unknown" - never
+    filled in with a guess.
+
+    **Makes no new LLM API call and writes nothing to `result_json`,
+    `cached_at`, or `cache_key`** - only ever updates the `ticker`/
+    `report_date` columns of a row that is currently `NULL` in at least
+    one of them, on an exact cache_key match. Every existing cached
+    result and every existing cache key survives untouched.
+
+    Returns `{"recovered": int, "unmatched_rows": int, "checked_files": int}`.
+    Never raises - a missing database or work directory just means
+    nothing to recover."""
+    db_path = resolve_state_db_path(config)
+    if not Path(db_path).exists():
+        return {"recovered": 0, "unmatched_rows": 0, "checked_files": 0}
+
+    with _connect(db_path) as conn:
+        null_rows = conn.execute("SELECT cache_key FROM cache WHERE ticker IS NULL OR report_date IS NULL").fetchall()
+    null_keys = {row["cache_key"] for row in null_rows}
+    if not null_keys:
+        return {"recovered": 0, "unmatched_rows": 0, "checked_files": 0}
+
+    work_dir = resolve_work_dir(config)
+    recovered: dict[str, tuple[str, str]] = {}
+    checked_files = 0
+    if work_dir.exists():
+        for request_path in work_dir.glob("*/request.json"):
+            checked_files += 1
+            try:
+                payload = json.loads(request_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            key = _cache_key_from_request_payload(payload)
+            if key is None or key not in null_keys or key in recovered:
+                continue
+            ticker, trade_date = payload.get("ticker"), payload.get("trade_date")
+            if not ticker or not trade_date:
+                continue
+            recovered[key] = (str(ticker), str(trade_date))
+
+    if recovered:
+        with _connect(db_path) as conn:
+            for key, (ticker, trade_date) in recovered.items():
+                conn.execute(
+                    "UPDATE cache SET ticker = ?, report_date = ? WHERE cache_key = ? AND (ticker IS NULL OR report_date IS NULL)",
+                    (ticker, trade_date, key),
+                )
+
+    if logger is not None and recovered:
+        logger.info("TradingAgents adapter: recovered ticker/report_date for %d cached result(s) from request.json files.", len(recovered))
+
+    return {"recovered": len(recovered), "unmatched_rows": len(null_keys) - len(recovered), "checked_files": checked_files}
+
+
 def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """GitHub Issue #1 follow-up requirement 6: inspect every cached
     TradingAgents result WITHOUT making a new API call (no subprocess,
@@ -254,10 +333,23 @@ def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any]
     what turns a previously-`null` cost (e.g. from before gpt-6-sol/
     gpt-6-luna had pricing entries) into a real number once the pricing
     table is fixed, for a result that is already sitting in the cache.
+
+    Before reading, best-effort recovers any `NULL` ticker/report_date
+    left by a pre-migration database via `recover_cache_metadata_from_
+    request_files()` - see that function's docstring for why this is a
+    verified recovery, never a guess, and never an API call. A row that
+    cannot be recovered keeps `ticker`/`report_date` as `None` ("unknown"),
+    exactly as before.
+
     Returns `[]` for a missing database, never raises."""
     db_path = resolve_state_db_path(config)
     if not Path(db_path).exists():
         return []
+
+    try:
+        recover_cache_metadata_from_request_files(config)
+    except Exception:  # noqa: BLE001 - inspection must proceed even if recovery fails; rows simply keep whatever metadata they already had
+        pass
 
     table = pricing_table if pricing_table is not None else config.get("intelligence", {}).get("tradingagents", {}).get("pricing")
     with _connect(db_path) as conn:

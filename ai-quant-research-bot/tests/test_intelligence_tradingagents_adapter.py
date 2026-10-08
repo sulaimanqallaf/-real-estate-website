@@ -623,3 +623,139 @@ def test_cache_table_migrates_an_old_schema_missing_ticker_and_report_date_colum
         {"cache_key": "newkey", "ticker": "AMD", "report_date": "2026-09-09"},
         {"cache_key": "oldkey", "ticker": None, "report_date": None},
     ]
+
+
+# --- GitHub Issue #1 follow-up: recover ticker/report_date for legacy NULL rows --------
+
+
+def _write_old_schema_cache_row(db_path, cache_key, result, cached_at):
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE IF NOT EXISTS cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, cached_at TEXT NOT NULL)")
+    conn.execute("INSERT INTO cache (cache_key, result_json, cached_at) VALUES (?, ?, ?)", (cache_key, json.dumps(result), cached_at))
+    conn.commit()
+    conn.close()
+
+
+def _write_request_file(config, ticker, trade_date, selected_analysts=None, config_overrides=None):
+    selected_analysts = selected_analysts or ["market", "social", "news", "fundamentals"]
+    config_overrides = config_overrides or {}
+    work_dir = ta.resolve_work_dir(config) / f"{ticker}_{trade_date}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    request = {
+        "ticker": ticker, "trade_date": trade_date, "work_dir": str(work_dir),
+        "selected_analysts": selected_analysts, "config_overrides": config_overrides, "portfolio": None,
+    }
+    (work_dir / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    return ta._cache_key(ticker, trade_date, selected_analysts, config_overrides)
+
+
+def test_recover_cache_metadata_backfills_ticker_and_report_date_from_a_real_request_file(config):
+    db_path = ta.resolve_state_db_path(config)
+    key = _write_request_file(config, "AMD", "2026-09-09")
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    _write_old_schema_cache_row(db_path, key, {"ok": True, "final_rating": "Sell"}, now.isoformat())
+
+    result = ta.recover_cache_metadata_from_request_files(config)
+    assert result == {"recovered": 1, "unmatched_rows": 0, "checked_files": 1}
+
+    with ta._connect(db_path) as conn:
+        row = conn.execute("SELECT ticker, report_date FROM cache WHERE cache_key = ?", (key,)).fetchone()
+    assert row["ticker"] == "AMD"
+    assert row["report_date"] == "2026-09-09"
+
+
+def test_recover_cache_metadata_never_overwrites_a_row_that_already_has_metadata(config):
+    db_path = ta.resolve_state_db_path(config)
+    key = _write_request_file(config, "AMD", "2026-09-09")
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    with ta._connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO cache (cache_key, result_json, cached_at, ticker, report_date) VALUES (?, ?, ?, ?, ?)",
+            (key, json.dumps({"ok": True}), now.isoformat(), "SOMETHING_ELSE", "2020-01-01"),
+        )
+
+    ta.recover_cache_metadata_from_request_files(config)
+
+    with ta._connect(db_path) as conn:
+        row = conn.execute("SELECT ticker, report_date FROM cache WHERE cache_key = ?", (key,)).fetchone()
+    assert row["ticker"] == "SOMETHING_ELSE"  # untouched - only ever fills in a currently-NULL field
+    assert row["report_date"] == "2020-01-01"
+
+
+def test_recover_cache_metadata_leaves_a_row_null_with_no_matching_request_file(config):
+    db_path = ta.resolve_state_db_path(config)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    # A cache row whose request.json was never written (or was deleted) - no file anywhere to recover from.
+    _write_old_schema_cache_row(db_path, "some-orphan-cache-key", {"ok": True, "final_rating": "Buy"}, now.isoformat())
+
+    result = ta.recover_cache_metadata_from_request_files(config)
+    assert result == {"recovered": 0, "unmatched_rows": 1, "checked_files": 0}
+
+    with ta._connect(db_path) as conn:
+        row = conn.execute("SELECT ticker, report_date FROM cache WHERE cache_key = ?", ("some-orphan-cache-key",)).fetchone()
+    assert row["ticker"] is None  # retained as NULL - never guessed
+    assert row["report_date"] is None
+
+
+def test_recover_cache_metadata_never_matches_a_request_file_for_a_different_call(config):
+    """A request.json for a ticker/date/analysts/overrides combination
+    that was never actually cached (e.g. a call that failed before ever
+    writing to the cache) must never be mistaken for a match on an
+    unrelated orphan row - the cache_key hash has to agree exactly."""
+    db_path = ta.resolve_state_db_path(config)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    _write_old_schema_cache_row(db_path, "some-orphan-cache-key", {"ok": True}, now.isoformat())
+    _write_request_file(config, "NVDA", "2026-09-10")  # unrelated - different cache_key entirely
+
+    result = ta.recover_cache_metadata_from_request_files(config)
+    assert result == {"recovered": 0, "unmatched_rows": 1, "checked_files": 1}
+
+
+def test_recover_cache_metadata_handles_a_corrupt_request_file_without_crashing(config):
+    db_path = ta.resolve_state_db_path(config)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    _write_old_schema_cache_row(db_path, "some-orphan-cache-key", {"ok": True}, now.isoformat())
+    bad_dir = ta.resolve_work_dir(config) / "CORRUPT_2026-09-09"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "request.json").write_text("{not valid json", encoding="utf-8")
+
+    result = ta.recover_cache_metadata_from_request_files(config)
+    assert result["recovered"] == 0  # corrupt file skipped, never crashes
+
+
+def test_recover_cache_metadata_makes_no_api_call(config, monkeypatch):
+    db_path = ta.resolve_state_db_path(config)
+    key = _write_request_file(config, "AMD", "2026-09-09")
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    _write_old_schema_cache_row(db_path, key, {"ok": True}, now.isoformat())
+
+    def boom(*a, **k):
+        raise AssertionError("recovering cache metadata must never shell out to a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    ta.recover_cache_metadata_from_request_files(config)  # must not raise AssertionError
+
+
+def test_recover_cache_metadata_returns_zeroes_for_a_missing_database(tmp_path):
+    config = {"data": {"journal_dir": str(tmp_path)}}
+    assert ta.recover_cache_metadata_from_request_files(config) == {"recovered": 0, "unmatched_rows": 0, "checked_files": 0}
+
+
+def test_inspect_cached_results_recovers_legacy_null_metadata_automatically(config):
+    """The exact scenario reported: historical cache rows with ticker/
+    report_date showing as None after the first migration. inspect_
+    cached_results() must now recover them automatically, with zero new
+    API calls, from the request.json files already on disk."""
+    db_path = ta.resolve_state_db_path(config)
+    amd_key = _write_request_file(config, "AMD", "2026-09-09")
+    qqq_key = _write_request_file(config, "QQQ", "2026-09-09")
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    _write_old_schema_cache_row(db_path, amd_key, {"ok": True, "final_rating": "Sell"}, now.isoformat())
+    _write_old_schema_cache_row(db_path, qqq_key, {"ok": True, "final_rating": "Overweight"}, now.isoformat())
+
+    inspected = ta.inspect_cached_results(config)
+    by_key = {r["ticker"]: r for r in inspected}
+    assert set(by_key.keys()) == {"AMD", "QQQ"}
+    assert all(r["report_date"] == "2026-09-09" for r in inspected)
