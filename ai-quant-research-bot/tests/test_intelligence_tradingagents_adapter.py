@@ -493,3 +493,133 @@ def test_one_ticker_raising_never_blocks_the_next_ticker(config, monkeypatch):
 
     assert entries[0].get("tradingagents_assessment") is None  # AMD failed
     assert entries[1].get("tradingagents_assessment") is not None  # NVDA still processed
+
+
+# --- GitHub Issue #1 follow-up: pricing gaps, fail-closed spend, cache re-pricing --------
+
+
+_FAKE_RUNNER_UNPRICED_MODEL = textwrap.dedent("""
+    import json, sys
+    with open(sys.argv[1]) as f:
+        request = json.load(f)
+    print(json.dumps({
+        "ok": True, "signal": "Buy", "final_rating": "Buy",
+        "reports": {"market": "m"},
+        "token_usage": {"totally-unpriced-model": {"input_tokens": 1000000, "output_tokens": 0, "calls": 1}},
+    }))
+""")
+
+
+@pytest.fixture
+def fake_runner_unpriced(tmp_path):
+    script = tmp_path / "fake_runner_unpriced.py"
+    script.write_text(_FAKE_RUNNER_UNPRICED_MODEL)
+    return script
+
+
+def test_build_assessment_includes_a_token_usage_risk_note():
+    raw = {"final_rating": "Buy", "token_usage": {"gpt-6-sol": {"input_tokens": 1000, "output_tokens": 500, "cached_input_tokens": 200, "calls": 1}}}
+    assessment = ta.build_assessment("AMD", "2026-09-09", "2026-09-09T00:00:00+00:00", raw)
+    token_notes = [n for n in assessment.risk_notes if n.startswith("Token usage")]
+    assert len(token_notes) == 1
+    assert "gpt-6-sol" in token_notes[0]
+    assert "cached 200" in token_notes[0]
+
+
+def test_run_one_fails_closed_charging_the_full_reservation_for_an_unpriced_model(config, fake_runner_unpriced, monkeypatch, caplog):
+    import logging as logging_module
+
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_unpriced)
+    config["intelligence"]["tradingagents"]["max_cost_per_call_usd"] = 0.75
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging_module.WARNING):
+        result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+
+    assert result["estimated_cost_usd"]["total_usd"] is None  # genuinely unknown
+    spend_db = ta.tradingagents_spend.resolve_ledger_path(config)
+    totals = ta.tradingagents_spend.spent_today_and_month(spend_db, now)
+    assert totals["today_usd"] == 0.75  # the full conservative reservation, not $0 - fail closed
+    assert any("fail closed" in r.message.lower() or "no pricing entry" in r.message.lower() for r in caplog.records)
+
+
+def test_cache_hit_is_repriced_with_the_current_pricing_table_no_new_subprocess_call(config, fake_runner_unpriced, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_unpriced)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    first = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+    assert first["estimated_cost_usd"]["total_usd"] is None  # unpriced at call time
+
+    # Pricing is "fixed" after the fact, exactly like adding gpt-6-sol/
+    # gpt-6-luna was - no new subprocess call should be needed to see it.
+    config["intelligence"]["tradingagents"]["pricing"] = {"totally-unpriced-model": {"input": 1.00, "output": 1.00}}
+
+    def boom(*a, **k):
+        raise AssertionError("a cache hit must never shell out to the subprocess again")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    second = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now + timedelta(minutes=1))
+    assert second["estimated_cost_usd"]["total_usd"] == pytest.approx(1.00)  # 1M input tokens @ $1/M
+
+
+def test_cache_hit_never_fabricates_a_cost_for_an_entry_cached_before_token_tracking_existed(config, fake_runner_with_usage, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_with_usage)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+
+    # Simulate an old-format cached row with no "token_usage" key at all.
+    db_path = ta.resolve_state_db_path(config)
+    key = ta._cache_key("AMD", "2026-09-09", ["market", "social", "news", "fundamentals"], {})
+    with ta._connect(db_path) as conn:
+        conn.execute("UPDATE cache SET result_json = ? WHERE cache_key = ?", (json.dumps({"ok": True, "final_rating": "Buy"}), key))
+
+    result = ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now + timedelta(minutes=1))
+    assert "estimated_cost_usd" not in result  # never fabricated - left exactly as cached
+
+
+def test_inspect_cached_results_rereads_without_any_subprocess_call(config, fake_runner_unpriced, monkeypatch):
+    monkeypatch.setattr(ta, "resolve_python_executable", lambda cfg: Path(sys.executable))
+    monkeypatch.setattr(ta, "resolve_runner_script", lambda: fake_runner_unpriced)
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    ta.run_one("AMD", "2026-09-09", config, logger, portfolio_context={}, now=now)
+
+    def boom(*a, **k):
+        raise AssertionError("inspecting the cache must never shell out to a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+
+    inspected = ta.inspect_cached_results(config)
+    assert len(inspected) == 1
+    assert inspected[0]["ticker"] == "AMD"
+    assert inspected[0]["report_date"] == "2026-09-09"
+    assert inspected[0]["estimated_cost_usd"]["total_usd"] is None  # still unpriced with the default table
+
+    # Now inspect again with an override pricing table passed directly - still no subprocess call.
+    priced = ta.inspect_cached_results(config, pricing_table={"totally-unpriced-model": {"input": 2.00, "output": 2.00}})
+    assert priced[0]["estimated_cost_usd"]["total_usd"] == pytest.approx(2.00)
+
+
+def test_inspect_cached_results_returns_empty_list_for_a_missing_database(tmp_path):
+    config = {"data": {"journal_dir": str(tmp_path)}}
+    assert ta.inspect_cached_results(config) == []
+
+
+def test_cache_table_migrates_an_old_schema_missing_ticker_and_report_date_columns(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = __import__("sqlite3").connect(str(db_path))
+    conn.execute("CREATE TABLE cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, cached_at TEXT NOT NULL)")
+    conn.execute("INSERT INTO cache VALUES (?, ?, ?)", ("oldkey", json.dumps({"ok": True}), datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+
+    # Any _connect() call (e.g. via _cache_set) must migrate the table in place, not crash.
+    ta._cache_set(db_path, "newkey", {"ok": True, "final_rating": "Buy"}, datetime.now(timezone.utc), ticker="AMD", report_date="2026-09-09")
+    with ta._connect(db_path) as conn:
+        rows = conn.execute("SELECT cache_key, ticker, report_date FROM cache ORDER BY cache_key").fetchall()
+    assert [dict(r) for r in rows] == [
+        {"cache_key": "newkey", "ticker": "AMD", "report_date": "2026-09-09"},
+        {"cache_key": "oldkey", "ticker": None, "report_date": None},
+    ]

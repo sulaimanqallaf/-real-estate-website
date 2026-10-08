@@ -91,7 +91,7 @@ class _UsageTrackingCallbackHandler:
 
             def on_llm_end(self, response, *, run_id, **kwargs):
                 model = self._model_by_run_id.pop(str(run_id), "unknown")
-                entry = self.usage.setdefault(model, {"input_tokens": 0, "output_tokens": 0, "calls": 0})
+                entry = self.usage.setdefault(model, {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "calls": 0})
                 entry["calls"] += 1
                 for generation_list in response.generations:
                     for generation in generation_list:
@@ -100,6 +100,14 @@ class _UsageTrackingCallbackHandler:
                         if usage:
                             entry["input_tokens"] += usage.get("input_tokens", 0) or 0
                             entry["output_tokens"] += usage.get("output_tokens", 0) or 0
+                            # Tokens served from the provider's prompt cache
+                            # (GitHub Issue #1 follow-up requirement 3) - a
+                            # SUBSET of input_tokens above, not additional to
+                            # it; InputTokenDetails.cache_read is the
+                            # provider-agnostic field LangChain populates
+                            # for every integration that reports it.
+                            details = usage.get("input_token_details") or {}
+                            entry["cached_input_tokens"] += details.get("cache_read", 0) or 0
 
         return _Impl()
 

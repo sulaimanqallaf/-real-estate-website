@@ -178,13 +178,30 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
     cache_key TEXT PRIMARY KEY,
     result_json TEXT NOT NULL,
-    cached_at TEXT NOT NULL
+    cached_at TEXT NOT NULL,
+    ticker TEXT,
+    report_date TEXT
 );
 CREATE TABLE IF NOT EXISTS call_log (
     call_date TEXT PRIMARY KEY,
     count INTEGER NOT NULL
 );
 """
+
+
+def _migrate_cache_table(conn: sqlite3.Connection) -> None:
+    """Adds the `ticker`/`report_date` columns to a `cache` table created
+    by a version of this module before they existed (GitHub Issue #1
+    follow-up requirement 6 - inspecting cached results needs to know
+    which ticker/date each row belongs to). `CREATE TABLE IF NOT EXISTS`
+    alone never adds a column to an already-existing table, so a real
+    database written before this change (e.g. from an earlier real Mac
+    run) needs this explicit migration or every subsequent write would
+    fail with "table cache has no column named ticker"."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()}
+    for column in ("ticker", "report_date"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE cache ADD COLUMN {column} TEXT")
 
 
 @contextmanager
@@ -196,6 +213,7 @@ def _connect(db_path: str | Path) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(_SCHEMA)
+        _migrate_cache_table(conn)
         yield conn
         conn.commit()
     finally:
@@ -218,12 +236,50 @@ def _cache_get(db_path: Path, key: str, ttl_hours: float, now: datetime) -> dict
     return json.loads(row["result_json"])
 
 
-def _cache_set(db_path: Path, key: str, result: dict[str, Any], now: datetime) -> None:
+def _cache_set(db_path: Path, key: str, result: dict[str, Any], now: datetime, ticker: str | None = None, report_date: str | None = None) -> None:
     with _connect(db_path) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO cache (cache_key, result_json, cached_at) VALUES (?, ?, ?)",
-            (key, json.dumps(result), now.isoformat()),
+            "INSERT OR REPLACE INTO cache (cache_key, result_json, cached_at, ticker, report_date) VALUES (?, ?, ?, ?, ?)",
+            (key, json.dumps(result), now.isoformat(), ticker, report_date),
         )
+
+
+def inspect_cached_results(config: dict[str, Any], pricing_table: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """GitHub Issue #1 follow-up requirement 6: inspect every cached
+    TradingAgents result WITHOUT making a new API call (no subprocess,
+    no network - a pure SQLite read). Each row's `estimated_cost_usd` is
+    RE-COMPUTED with the CURRENT pricing table (the config override, or
+    `pricing.DEFAULT_PRICING_USD_PER_MILLION_TOKENS`) rather than
+    trusting whatever was baked in at cache-write time - this is exactly
+    what turns a previously-`null` cost (e.g. from before gpt-6-sol/
+    gpt-6-luna had pricing entries) into a real number once the pricing
+    table is fixed, for a result that is already sitting in the cache.
+    Returns `[]` for a missing database, never raises."""
+    db_path = resolve_state_db_path(config)
+    if not Path(db_path).exists():
+        return []
+
+    table = pricing_table if pricing_table is not None else config.get("intelligence", {}).get("tradingagents", {}).get("pricing")
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT ticker, report_date, cached_at, result_json FROM cache ORDER BY cached_at DESC").fetchall()
+
+    inspected = []
+    for row in rows:
+        try:
+            result = json.loads(row["result_json"])
+        except (ValueError, TypeError):
+            continue
+        token_usage = result.get("token_usage")
+        # Only re-price when usage was actually recorded - an entry from
+        # before token tracking existed keeps whatever (possibly absent/
+        # unknown) cost it already had, never a fabricated $0.00.
+        cost_info = pricing.estimate_cost_usd(token_usage, table) if "token_usage" in result else result.get("estimated_cost_usd")
+        inspected.append({
+            "ticker": row["ticker"], "report_date": row["report_date"], "cached_at": row["cached_at"],
+            "final_rating": result.get("final_rating") or result.get("signal"),
+            "token_usage": token_usage, "estimated_cost_usd": cost_info,
+        })
+    return inspected
 
 
 def _call_budget_remaining(db_path: Path, call_date: str, max_calls_per_day: int) -> int:
@@ -343,6 +399,17 @@ def run_one(
         cached = None
     if cached is not None:
         logger.info("TradingAgents adapter: cache hit for %s/%s.", ticker, report_date)
+        # Re-price with the CURRENT pricing table rather than trusting
+        # whatever was baked in when this was cached (GitHub Issue #1
+        # follow-up requirement 6) - no new API call, so a pricing-table
+        # fix (e.g. adding a previously-missing model) is reflected on
+        # the very next cache hit, not just on a fresh (billed) call.
+        # Only when `token_usage` was actually recorded - an entry cached
+        # before that field existed at all must keep whatever cost it
+        # already had (possibly None/unknown), never get a fabricated
+        # "$0.00" from re-pricing an absent usage dict as if it were zero.
+        if "token_usage" in cached:
+            cached["estimated_cost_usd"] = pricing.estimate_cost_usd(cached["token_usage"], ta_config.get("pricing"))
         return cached
 
     max_calls_per_day = ta_config.get("max_calls_per_day", DEFAULT_MAX_CALLS_PER_DAY)
@@ -457,6 +524,20 @@ def run_one(
         else:
             token_usage = (result or {}).get("token_usage")
             cost_info = pricing.estimate_cost_usd(token_usage, ta_config.get("pricing"))
+            if cost_info["total_usd"] is None:
+                # Fail CLOSED (GitHub Issue #1 follow-up requirement 2):
+                # an unpriced model never slips past the spend cap for
+                # free - the full conservative per-call reservation is
+                # charged against the daily/monthly ledger instead of a
+                # fabricated $0.00, so repeated calls on an unpriced
+                # model burn through the cap quickly rather than quietly
+                # bypassing it.
+                logger.warning(
+                    "TradingAgents adapter: no pricing entry for model(s) %s - charging the full $%.2f reservation "
+                    "against the spend cap (fail closed) instead of an unknown/zero cost. Add pricing for this "
+                    "model to intelligence.tradingagents.pricing or pricing.DEFAULT_PRICING_USD_PER_MILLION_TOKENS.",
+                    cost_info["unknown_models"], estimate_usd,
+                )
             actual_usd = cost_info["total_usd"] if cost_info["total_usd"] is not None else estimate_usd
             tradingagents_spend.commit(spend_db, entry_id, actual_usd)
     except Exception as exc:  # noqa: BLE001
@@ -475,7 +556,7 @@ def run_one(
     result["estimated_cost_usd"] = cost_info
 
     try:
-        _cache_set(state_db, key, result, now)
+        _cache_set(state_db, key, result, now, ticker=ticker, report_date=report_date)
     except Exception as exc:  # noqa: BLE001
         logger.warning("TradingAgents adapter: cache write failed for %s: %s", ticker, exc)
 
@@ -526,6 +607,15 @@ def build_assessment(
             risk_notes.append(f"Estimated cost: ${cost_info['total_usd']:.4f} (real token usage x configured pricing).")
         elif cost_info.get("unknown_models"):
             risk_notes.append(f"Estimated cost: unknown (no pricing entry for: {', '.join(cost_info['unknown_models'])}).")
+
+    token_usage = raw.get("token_usage")
+    if token_usage:
+        parts = []
+        for model, usage in token_usage.items():
+            cached = usage.get("cached_input_tokens", 0) or 0
+            cached_note = f" (cached {cached:,})" if cached else ""
+            parts.append(f"{model}: in={usage.get('input_tokens', 0):,}{cached_note} out={usage.get('output_tokens', 0):,}")
+        risk_notes.append("Token usage: " + " | ".join(parts))
 
     return AgentResearchAssessment(
         ticker=ticker, report_date=report_date, as_of=as_of, action=action, confidence=confidence,

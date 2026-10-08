@@ -205,7 +205,7 @@ def format_agent_research_section(ticker_results: list[dict[str, Any]], config: 
     agreeing = sum(
         1 for r in assessed
         if r.get("quant_assessment") is not None
-        and {"ELIGIBLE": "BUY", "WEAK": "HOLD", "NOT_ELIGIBLE": "SELL"}.get(r["quant_assessment"].decision) == r["agent_assessment"].action
+        and _QUANT_DECISION_TO_ACTION.get(r["quant_assessment"].decision) == r["agent_assessment"].action
     )
     comparable = sum(1 for r in assessed if r.get("quant_assessment") is not None)
 
@@ -219,17 +219,59 @@ def format_agent_research_section(ticker_results: list[dict[str, Any]], config: 
     return f"{header}\n\n" + "\n".join(lines)
 
 
+# Shared with format_agent_research_section() below and
+# format_tradingagents_context_line()'s quant-comparison line - the
+# deterministic engine's 3-tier action mapped from quant_agent.py's own
+# ELIGIBLE/WEAK/NOT_ELIGIBLE decision vocabulary.
+_QUANT_DECISION_TO_ACTION = {"ELIGIBLE": "BUY", "WEAK": "HOLD", "NOT_ELIGIBLE": "SELL"}
+
+
+def _truncate(text: str | None, limit: int) -> str | None:
+    if not text:
+        return None
+    return text[:limit] + "…" if len(text) > limit else text
+
+
 def format_tradingagents_context_line(entry: dict[str, Any]) -> str:
     """The OPTIONAL real upstream TradingAgents integration's per-candidate
-    line (GitHub Issue #1) - separate from `format_agent_research_context_
-    line()`'s deterministic-engine line above, since the two are stored
-    and evaluated separately (`src/intelligence/tradingagents_adapter.py`).
-    Empty string whenever `entry["tradingagents_assessment"]` was never set
-    - the default (`intelligence.tradingagents.enabled: false`)."""
+    block (GitHub Issue #1 follow-up: "show each ticker's AI recommendation,
+    Bull/Bear summary, Quant comparison, and token/cost estimate") -
+    separate from `format_agent_research_context_line()`'s deterministic-
+    engine line above, since the two are stored and evaluated separately
+    (`src/intelligence/tradingagents_adapter.py`). Empty string whenever
+    `entry["tradingagents_assessment"]` was never set - the default
+    (`intelligence.tradingagents.enabled: false`)."""
     assessment = entry.get("tradingagents_assessment")
     if assessment is None:
         return ""
-    return f"Upstream TradingAgents (SHADOW, not executed): {assessment.action} - {assessment.thesis[:160]}\n"
+
+    lines = [f"Upstream TradingAgents (SHADOW, not executed): {assessment.action} (confidence {assessment.confidence * 100:.0f}%)"]
+
+    bull = _truncate(assessment.bull_points[0], 200) if assessment.bull_points else None
+    bear = _truncate(assessment.bear_points[0], 200) if assessment.bear_points else None
+    if bull:
+        lines.append(f"  Bull case: {bull}")
+    if bear:
+        lines.append(f"  Bear case: {bear}")
+    if not bull and not bear:
+        lines.append("  Bull/Bear: no debate content returned.")
+
+    quant_decision = assessment.quant_agent_decision
+    if quant_decision:
+        mapped = _QUANT_DECISION_TO_ACTION.get(quant_decision)
+        if mapped is None:
+            comparison = "n/a"
+        else:
+            comparison = "agrees" if mapped == assessment.action else "disagrees"
+        lines.append(f"  Quant comparison: existing quant_agent said {quant_decision} ({comparison} with {assessment.action}).")
+    else:
+        lines.append("  Quant comparison: no quant_agent assessment available for this ticker.")
+
+    cost_and_token_notes = [n for n in assessment.risk_notes if n.lower().startswith(("estimated cost", "token usage"))]
+    for note in cost_and_token_notes:
+        lines.append(f"  {note}")
+
+    return "\n".join(lines) + "\n"
 
 
 def format_quant_agent_section(ticker_results: list[dict[str, Any]], config: dict[str, Any]) -> str:
