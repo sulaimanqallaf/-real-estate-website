@@ -3,10 +3,13 @@ poll loop itself, which isn't unit-testable - same precedent as main.run() vs.
 main.analyze_symbol elsewhere in this test suite)."""
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
 
 from src import approval_listener, paper_trades, telegram_bot
 from src.strategies.mean_reversion import STRATEGY_NAME_SAFE
@@ -143,3 +146,35 @@ def test_offset_persists_across_load_save(tmp_path):
     assert approval_listener._load_offset(config) == 0
     approval_listener._save_offset(config, 555)
     assert approval_listener._load_offset(config) == 555
+
+
+# --- singleton lock: exactly one approval_listener may poll Telegram at a time ------
+
+
+def test_singleton_lock_rejects_a_second_instance(tmp_path):
+    config = fresh_config(tmp_path)
+    first = approval_listener._acquire_singleton_lock(config)
+    try:
+        with pytest.raises(approval_listener.ApprovalListenerAlreadyRunningError, match="409"):
+            approval_listener._acquire_singleton_lock(config)
+    finally:
+        first.close()
+
+
+def test_singleton_lock_can_be_reacquired_after_release(tmp_path):
+    config = fresh_config(tmp_path)
+    first = approval_listener._acquire_singleton_lock(config)
+    first.close()
+
+    second = approval_listener._acquire_singleton_lock(config)
+    second.close()  # must not raise - the first holder released it cleanly
+
+
+def test_singleton_lock_writes_the_current_pid(tmp_path):
+    config = fresh_config(tmp_path)
+    lock_file = approval_listener._acquire_singleton_lock(config)
+    try:
+        recorded_pid = approval_listener._lock_path(config).read_text().strip()
+        assert recorded_pid == str(os.getpid())
+    finally:
+        lock_file.close()

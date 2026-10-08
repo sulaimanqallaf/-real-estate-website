@@ -8,6 +8,7 @@ paper_trades.py, which hands this module a plain `reply_markup` dict to send.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import requests
@@ -15,6 +16,17 @@ import requests
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_HARD_LIMIT_CHARS = 4096
 TELEGRAM_CALLBACK_ANSWER_MAX_CHARS = 200
+
+# Every Telegram API URL embeds the bot token as a path segment
+# (".../bot<token>/method"), and `requests.RequestException`'s own string
+# representation includes the full request URL - so logging an exception
+# object directly leaks the token into log files/terminal output. Every
+# `logger.error(...)` call below logs this redacted form instead.
+_TOKEN_IN_URL_RE = re.compile(r"/bot[^/]+/")
+
+
+def _redact_token(text: str) -> str:
+    return _TOKEN_IN_URL_RE.sub("/bot***REDACTED***/", text)
 
 
 def send_telegram_message(token: str, chat_id: str, text: str, logger: logging.Logger) -> bool:
@@ -30,7 +42,7 @@ def send_telegram_message(token: str, chat_id: str, text: str, logger: logging.L
         response.raise_for_status()
         return True
     except requests.RequestException as exc:
-        logger.error("Failed to send Telegram message: %s", exc)
+        logger.error("Failed to send Telegram message: %s", _redact_token(str(exc)))
         return False
 
 
@@ -87,7 +99,7 @@ def send_message_with_keyboard(
         response.raise_for_status()
         return response.json()["result"]["message_id"]
     except (requests.RequestException, KeyError, ValueError) as exc:
-        logger.error("Failed to send Telegram message with keyboard: %s", exc)
+        logger.error("Failed to send Telegram message with keyboard: %s", _redact_token(str(exc)))
         return None
 
 
@@ -100,7 +112,7 @@ def edit_message_text(token: str, chat_id: str, message_id: int, text: str, logg
         response.raise_for_status()
         return True
     except requests.RequestException as exc:
-        logger.error("Failed to edit Telegram message %s: %s", message_id, exc)
+        logger.error("Failed to edit Telegram message %s: %s", message_id, _redact_token(str(exc)))
         return False
 
 
@@ -114,7 +126,7 @@ def get_updates(token: str, offset: int, timeout: int, logger: logging.Logger) -
         response.raise_for_status()
         return response.json().get("result", [])
     except requests.RequestException as exc:
-        logger.error("Failed to poll Telegram getUpdates: %s", exc)
+        logger.error("Failed to poll Telegram getUpdates: %s", _redact_token(str(exc)))
         return []
 
 
@@ -128,5 +140,5 @@ def answer_callback_query(token: str, callback_query_id: str, text: str, logger:
         response.raise_for_status()
         return True
     except requests.RequestException as exc:
-        logger.error("Failed to answer Telegram callback query: %s", exc)
+        logger.error("Failed to answer Telegram callback query: %s", _redact_token(str(exc)))
         return False

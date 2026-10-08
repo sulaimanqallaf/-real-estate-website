@@ -364,6 +364,20 @@ and persists its Telegram update offset to
 double-records) old button presses. Stop it with Ctrl+C; there is nothing to
 clean up.
 
+**Only ONE approval_listener may poll Telegram at a time.** Telegram's
+`getUpdates` rejects a second simultaneous long-poll against the same bot
+token with HTTP 409 Conflict. `approval_listener.py` takes an exclusive file
+lock (`data/journal/approval_listener.lock`) for the life of the process -
+starting a second instance (e.g. a manual terminal run while the launchd
+agent below is also loaded) now fails immediately with a clear error
+instead of silently causing 409s. **If you see that error, don't just `kill`
+the other PID and retry** - if it's the launchd agent below (`KeepAlive`),
+launchd relaunches it within seconds and you're back to two pollers. Check
+`launchctl list | grep aiquantresearchbot` first; if it's loaded, either use
+only that one, or `launchctl unload
+~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist` before
+running it manually in a terminal.
+
 To keep it running in the background via launchd instead of a terminal tab,
 create `~/Library/LaunchAgents/com.aiquantresearchbot.approvals.plist`:
 
