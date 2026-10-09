@@ -1,0 +1,56 @@
+# AI Quant Trading Platform sprint, deliverable H - containerizes the
+# DASHBOARD only (backend + frontend). NOT deployed anywhere by this
+# sprint and NOT a replacement for the Mac launchd scheduler - see
+# docs/platform/DEPLOYMENT.md for exactly what is and isn't covered
+# here, and why the scheduled research/execution jobs are deliberately
+# NOT containerized yet.
+#
+# Usage (local only - this does not touch any cloud account):
+#   cd ai-quant-research-bot/deploy
+#   docker compose build
+#   docker compose up
+#   open http://localhost:8080
+#
+# The backend container mounts the ENTIRE repo read-only (`:ro`) - not
+# just for safety-by-convention, but as an infrastructure-level
+# enforcement of the same "completely read-only" guarantee
+# app/readonly.py's own structural tests already check at the source
+# level. A read-only bind mount means even a bug that somehow tried to
+# write to a bot-owned file would fail at the OS level, not just at the
+# Python level.
+services:
+  dashboard-backend:
+    build:
+      context: ..
+      dockerfile: dashboard/backend/Dockerfile
+    volumes:
+      - ..:/workspace/ai-quant-research-bot:ro
+    ports:
+      - "8800:8800"
+    environment:
+      # Opt-in only, same default as running it bare - set to "1"
+      # explicitly (e.g. via a .env file next to this compose file) if
+      # you want DEMO mode reachable from this container.
+      - DASHBOARD_ALLOW_DEMO=0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8800/api/modes', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard-frontend:
+    build:
+      context: ../dashboard/frontend
+      args:
+        # Points at the HOST's published backend port, not the
+        # container-internal one - the browser (not this container)
+        # is what actually calls this URL.
+        VITE_DASHBOARD_API_BASE: http://localhost:8800
+    ports:
+      - "8080:80"
+    depends_on:
+      dashboard-backend:
+        condition: service_healthy
+    restart: unless-stopped

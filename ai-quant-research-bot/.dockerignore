@@ -1,0 +1,15 @@
+# Backend image build context is the repo root (see dashboard/backend/
+# Dockerfile's comment) - keep it small and never ship local data/
+# secrets/caches into a build context, even though the Dockerfile only
+# COPYs two requirements.txt files from it.
+.venv/
+venv/
+.venvs/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+.env
+.git/
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
