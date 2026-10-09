@@ -2844,6 +2844,54 @@ summary = tradingagents_evaluation.compare_three_way(config)
 print(tradingagents_evaluation.format_three_way_report(summary))
 ```
 
+## OPTIONAL: open-source quant engineering integrations (QuantStats/VectorBT/CCXT)
+
+A second, separate isolated environment (`.venvs/oss_quant/`, never
+committed) adds three pinned, license-audited open-source packages -
+see `docs/platform/OSS_INTEGRATION_AUDIT.md` for the full audit of all
+12 projects evaluated, and `docs/platform/PHASE3_VECTORBT_CROSSCHECK.md`
+/ `docs/platform/PHASE4_LEAKAGE_DETECTION.md` / `docs/platform/
+BROKER_REFERENCE_REVIEW.md` for what each integration actually changed
+and found. Same subprocess-isolation pattern as the TradingAgents
+integration above: this project's own process never imports
+`quantstats`/`vectorbt`/`ccxt` directly, only shells out to
+`tools/oss_quant_runner.py` running inside the isolated venv.
+
+| Package | License | What it's used for |
+|---|---|---|
+| `quantstats` | Apache-2.0 | Sharpe/Sortino/max drawdown/profit factor/win rate on real closed-trade history (`src/analytics/performance_report.py`) |
+| `vectorbt` | Apache-2.0 WITH Commons Clause (internal/non-commercial use only - see audit doc) | Independent cross-check of `src/backtester.py`'s own stats, given byte-identical trades (`src/analytics/backtester_crosscheck.py`) - never generates its own trading signals |
+| `ccxt` | MIT | Real public (no API key needed) OHLCV data for `src/data_providers/crypto_provider.py` - data only, crypto TRADING stays fully disabled |
+
+### Setup - one command
+
+```bash
+./scripts/setup_oss_quant_env.sh
+```
+
+Creates (or reuses) the isolated environment, installs the three pinned
+packages, and verifies the install by importing each - safe to re-run
+any time. Nothing elsewhere in this project requires this venv to
+exist; every function that depends on it (`performance_report.py`,
+`backtester_crosscheck.py`, `crypto_provider.py`, the dashboard's
+Research & Performance Analytics / Data Provider Health panels)
+degrades to an honest "unavailable" result, never a fabricated one,
+when it hasn't been run.
+
+### What this does NOT do
+
+- Does not touch `src/execution/` order submission in any way (the one
+  change to `ibkr_client.py` from this sprint - detecting a dropped
+  TWS connection - has nothing to do with these three packages; see
+  `docs/platform/BROKER_REFERENCE_REVIEW.md`).
+- Does not enable crypto or forex TRADING - `crypto_provider.py` only
+  ever returns data; `execution/order_state.py`'s `OrderIntent` is
+  still hard-scoped to equity/ETF.
+- Does not auto-promote a research hypothesis (`src/research/
+  sandbox.py` + `hypothesis_ledger.py`, Phase 2's RD-Agent concept)
+  into a production strategy - there is no `promote()` function
+  anywhere in that package by design.
+
 ## Disclaimer
 
 Research and educational tool only. Not financial advice. No trades are placed -
