@@ -17,7 +17,7 @@ import sys
 import time
 from typing import Any
 
-from . import circuit_breaker, learning_feedback, order_manager, reconciliation
+from . import circuit_breaker, learning_feedback, order_manager, reconciliation, watchdog
 from .broker import Broker, CONNECTION_CONNECTED, CONNECTION_DISCONNECTED, CONNECTION_HALTED
 from .process_lock import ProcessAlreadyRunningError, acquire_singleton_lock
 
@@ -36,6 +36,13 @@ def run_one_tick(
     breakers. Returns a structured tick summary - never raises; every
     sub-step is isolated so one failing ticker's poll never stops the rest."""
     from ..utils import safe_run
+
+    # Unconditional, BEFORE the connection check below - a liveness
+    # signal for the PROCESS itself (Sprint 3's watchdog), independent
+    # of whether the broker happens to be reachable this tick. See
+    # watchdog.py's module docstring for why this is recorded here
+    # rather than only on a successful connected tick.
+    watchdog.record_heartbeat(config)
 
     state = broker.connection_state()
     if state != CONNECTION_CONNECTED:

@@ -810,6 +810,35 @@ up - that's the singleton lock working as intended, not a bug; find and
 stop the duplicate (`ps aux | grep <module name>`) rather than ignoring
 the error.
 
+**Watchdog (Sprint 3, optional, recommended)**: `KeepAlive` above makes
+launchd restart `position_monitor` if it crashes, but nothing tells
+YOU that happened unless you're watching `launchctl list` yourself.
+`position_monitor` now writes a small heartbeat file every tick
+(`src/execution/watchdog.py`) - `python -m src.execution.run_health`
+already shows it ("position_monitor heartbeat: OK/STALE/never
+recorded"). To get a Telegram alert automatically when it goes stale,
+schedule `python -m src.execution.watchdog` periodically (e.g. every 5
+minutes) the same way as the other two agents - a `StartInterval` job
+rather than `KeepAlive`/`StartCalendarInterval`:
+
+```xml
+<key>Label</key>
+<string>com.aiquantresearchbot.watchdog</string>
+<key>ProgramArguments</key>
+<array>
+    <string>/full/path/to/ai-quant-research-bot/.venv/bin/python</string>
+    <string>-m</string>
+    <string>src.execution.watchdog</string>
+</array>
+<key>WorkingDirectory</key>
+<string>/full/path/to/ai-quant-research-bot</string>
+<key>StartInterval</key>
+<integer>300</integer>
+```
+
+This is read-only monitoring - it never touches a broker, never places
+an order, and has no effect on `position_monitor` itself either way.
+
 ---
 
 ## 7. How to read the reports

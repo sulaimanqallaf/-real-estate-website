@@ -27,9 +27,13 @@ def _isolate_reconciliation_status_file(tmp_path, monkeypatch):
     and write real state into the repo's own data/runtime/ directory,
     leaking across test runs exactly like the decision-ledger pollution
     bug this same change already fixed elsewhere."""
-    from src.execution import circuit_breaker
+    from src.execution import circuit_breaker, watchdog
 
     monkeypatch.setattr(circuit_breaker, "_reconciliation_file_path", lambda config: tmp_path / "reconciliation_status.json")
+    # Same reasoning, same fix, for Sprint 3's heartbeat file - every
+    # run_one_tick() in this file now also calls watchdog.record_
+    # heartbeat() unconditionally.
+    monkeypatch.setattr(watchdog, "_heartbeat_path", lambda config: tmp_path / "position_monitor_heartbeat.json")
 
 
 def make_intent(**overrides):
@@ -123,6 +127,24 @@ def test_run_one_tick_disconnected_freezes_new_entries():
     tick = position_monitor.run_one_tick(broker, manager, PERMISSIVE_CONFIG, [], logger)
     assert tick["new_entries_allowed"] is False
     assert tick["connection_state"] == CONNECTION_DISCONNECTED
+
+
+def test_run_one_tick_records_a_heartbeat_even_while_disconnected():
+    """Sprint 3's watchdog: the heartbeat is a liveness signal for the
+    PROCESS, not the broker connection - it must be recorded even on a
+    tick that immediately freezes new entries due to a disconnect."""
+    from src.execution import watchdog
+
+    broker = FakeBroker()  # never connected
+    manager = order_manager.OrderManager(broker, PERMISSIVE_CONFIG)
+    status_before = watchdog.heartbeat_status(PERMISSIVE_CONFIG)
+    assert status_before["never_started"] is True
+
+    position_monitor.run_one_tick(broker, manager, PERMISSIVE_CONFIG, [], logger)
+
+    status_after = watchdog.heartbeat_status(PERMISSIVE_CONFIG)
+    assert status_after["never_started"] is False
+    assert status_after["stale"] is False
 
 
 def test_run_one_tick_polls_fills_for_in_flight_orders_and_syncs_protection():

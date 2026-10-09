@@ -417,9 +417,11 @@ def build_health_report(config: dict[str, Any], logger: logging.Logger, now: dat
     file, next scheduled run (plus whether launchd is actually
     installed - both the plain daily job AND the NYSE-calendar-aware
     after-close wrapper), recent vs historical log errors, committed/
-    reserved TradingAgents spend, and cached-data freshness (including
-    any tickers whose freshness check itself failed)."""
-    from . import circuit_breaker
+    reserved TradingAgents spend, cached-data freshness (including any
+    tickers whose freshness check itself failed), and - Sprint 3 -
+    whether position_monitor.py's continuous loop is actually alive
+    and ticking (see watchdog.py)."""
+    from . import circuit_breaker, watchdog
 
     reference = now or datetime.now(timezone.utc)
     next_market_aware = compute_next_market_aware_run(config, reference)
@@ -433,6 +435,7 @@ def build_health_report(config: dict[str, Any], logger: logging.Logger, now: dat
         "spend": spend_report(config, reference),
         "data_staleness": data_staleness_report(config, logger, reference),
         "circuit_breaker": circuit_breaker.status(config),
+        "position_monitor_heartbeat": watchdog.heartbeat_status(config, now=reference),
     }
 
 
@@ -506,6 +509,14 @@ def format_health_text(report: dict[str, Any]) -> str:
 
     cb = report["circuit_breaker"]
     lines.append(f"Circuit breaker halted: {cb['halted']}" + (f" ({cb['reason']})" if cb.get("reason") else ""))
+
+    heartbeat = report["position_monitor_heartbeat"]
+    if heartbeat["never_started"]:
+        lines.append("position_monitor heartbeat: never recorded (not running, or not yet reached its first tick)")
+    elif heartbeat["stale"]:
+        lines.append(f"position_monitor heartbeat: STALE - last seen {heartbeat['last_heartbeat_at']} ({heartbeat['age_seconds']}s ago)")
+    else:
+        lines.append(f"position_monitor heartbeat: OK - last seen {heartbeat['last_heartbeat_at']} ({heartbeat['age_seconds']}s ago)")
 
     errors = report["errors"]
     if errors["since_last_run_started"]:

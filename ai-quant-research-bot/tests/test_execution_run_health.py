@@ -412,6 +412,7 @@ def test_format_health_text_distinguishes_check_failed_from_genuinely_clean():
         "spend": None,
         "data_staleness": {"stale": [], "check_failed": ["AMD", "QQQ"], "ok": []},
         "circuit_breaker": {"halted": False, "reason": None},
+        "position_monitor_heartbeat": {"last_heartbeat_at": None, "age_seconds": None, "stale": False, "never_started": True},
     }
     text = run_health.format_health_text(report_check_failed)
     assert "CHECK FAILED" in text
