@@ -20,7 +20,6 @@ _FORBIDDEN_TOKENS = [
     "order_manager",
     "execution_policy",
     "Broker(",
-    "subprocess",
     "tradingagents_adapter",
 ]
 
@@ -28,6 +27,27 @@ _FORBIDDEN_TOKENS = [
 @pytest.mark.parametrize("token", _FORBIDDEN_TOKENS)
 def test_run_health_never_mentions_execution_or_llm_subprocess_code(token):
     assert token not in RUN_HEALTH_SOURCE
+
+
+def test_run_health_s_only_subprocess_call_is_the_read_only_launchctl_status_check():
+    """`run_health.py` is allowed exactly one `subprocess` use - the local,
+    read-only `launchctl list <label>` status check in `check_launchd_
+    status()`. This asserts that's still the ONLY subprocess invocation
+    in the file (never a Python interpreter, never anything that could
+    reach an LLM provider or a broker), rather than just trusting the
+    docstring's claim."""
+    import ast
+
+    tree = ast.parse(RUN_HEALTH_SOURCE)
+    run_calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "run":
+            if node.args and isinstance(node.args[0], ast.List):
+                elts = node.args[0].elts
+                if elts and isinstance(elts[0], ast.Constant):
+                    run_calls.append(elts[0].value)
+
+    assert run_calls == ["launchctl"]
 
 
 def test_run_health_never_imports_the_broker_module():

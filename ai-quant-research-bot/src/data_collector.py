@@ -92,39 +92,81 @@ def fetch_current_price(symbol: str, logger: logging.Logger) -> float | None:
         return None
 
 
-def latest_bar_age_days(symbol: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> int | None:
+def bar_freshness(symbol: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> dict[str, Any]:
     """Age in days of the most recent cached daily bar for `symbol`
     (`data/raw/{symbol}_daily.csv`, written by `fetch_symbol_history()`),
     for `circuit_breaker.check_all()`'s `latest_bar_age_days` input -
-    GitHub Issue #1: "never assume delayed market data is real-time."
-    yfinance daily bars are themselves end-of-day, not streaming, so this
-    is a genuine, separate staleness signal from `fetch_current_price()`'s
-    best-effort last trade price - it catches the case where the daily
-    research pipeline itself ran on stale/cached history (a failed
-    refresh, a stalled data provider), not just intraday price movement.
-    Returns `None` ("unknown", never fabricated as fresh) when the file
-    is missing or empty, exactly like every other "Data Unavailable"
-    source in this codebase."""
+    GitHub Issue #1: "never assume delayed market data is real-time" -
+    plus a `status` field so callers (notably `execution/run_health.py`'s
+    health command) can tell "no cached data yet" apart from "a parsing
+    problem means we genuinely don't know" instead of both collapsing
+    into the same `None` and being treated as indistinguishable from
+    "fresh."
+
+    Returns `{"age_days": int | None, "status": "ok" | "no_data" |
+    "invalid_timestamp", "detail": str | None}`. `age_days` is only ever
+    a real number when `status == "ok"` - never fabricated as fresh on
+    `no_data`/`invalid_timestamp`.
+
+    **Deliberately does NOT use `pandas.read_csv(..., parse_dates=True)`
+    on the whole index column.** yfinance's cached index is in the
+    EXCHANGE timezone (e.g. `America/New_York`), so a cache file whose
+    history spans a DST transition has rows with two different UTC
+    offsets (`-04:00` then `-05:00`). pandas silently gives up turning a
+    mixed-offset column like that into a `DatetimeIndex` and leaves it as
+    plain Python strings instead - with NO error raised at read time -
+    which is exactly what produced the `'str' object has no attribute
+    'tzinfo'` failure seen on every ticker once the real cache crossed a
+    DST boundary. Parsing only the single value actually needed, with
+    `pandas.to_datetime(..., errors="coerce")`, sidesteps that column-wide
+    inference (and its silent-fallback failure mode) entirely, and also
+    correctly handles a plain date-only value (`2026-10-08`, no time or
+    offset at all - treated as already being that calendar date, since
+    there is no timezone on record to convert) alongside a genuinely
+    unparseable value (NaT -> `invalid_timestamp`, never swallowed into a
+    fabricated age)."""
     from datetime import datetime, timezone
 
     raw_dir = config.get("data", {}).get("raw_dir")
     if not raw_dir:
-        return None
+        return {"age_days": None, "status": "no_data", "detail": "data.raw_dir not configured"}
     raw_path = resolve_path(raw_dir) / f"{symbol}_daily.csv"
     if not raw_path.exists():
-        return None
+        return {"age_days": None, "status": "no_data", "detail": "no cached file"}
+
     try:
-        df = pd.read_csv(raw_path, index_col=0, parse_dates=True)
-        if df.empty:
-            return None
-        last_bar_date = df.index[-1]
-        if last_bar_date.tzinfo is None:
-            last_bar_date = last_bar_date.tz_localize("UTC")
-        reference = now or datetime.now(timezone.utc)
-        return (reference.date() - last_bar_date.date()).days
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not determine latest bar age for %s: %s", symbol, exc)
-        return None
+        df = pd.read_csv(raw_path, index_col=0)
+    except Exception as exc:  # noqa: BLE001 - an unreadable cache file is a real, reportable problem, not "fresh"
+        logger.warning("Could not read cached bars for %s: %s", symbol, exc)
+        return {"age_days": None, "status": "invalid_timestamp", "detail": f"unreadable cache file: {exc}"}
+
+    if df.empty:
+        return {"age_days": None, "status": "no_data", "detail": "cached file is empty"}
+
+    raw_value = df.index[-1]
+    parsed = pd.to_datetime(raw_value, errors="coerce")
+    if parsed is None or pd.isna(parsed):
+        logger.warning("Could not parse latest bar timestamp for %s: %r", symbol, raw_value)
+        return {"age_days": None, "status": "invalid_timestamp", "detail": f"unparseable timestamp: {raw_value!r}"}
+
+    reference = now or datetime.now(timezone.utc)
+    if parsed.tzinfo is not None:
+        bar_date = parsed.tz_convert("UTC").date()
+    else:
+        bar_date = parsed.date()  # naive/date-only value: no timezone on record to convert, used as-is
+
+    return {"age_days": (reference.date() - bar_date).days, "status": "ok", "detail": None}
+
+
+def latest_bar_age_days(symbol: str, config: dict[str, Any], logger: logging.Logger, now: Any = None) -> int | None:
+    """Thin `age_days`-only view of `bar_freshness()`, kept for existing
+    callers (`circuit_breaker.check_all()`, `execution/approval_bridge.py`,
+    `main.py`) that only ever treated `None` as "unknown, fail open" and
+    have no use for the richer status - `None` here now means EITHER
+    `no_data` OR `invalid_timestamp`; callers that need to tell those
+    apart (see `execution/run_health.py`'s stale-data check) should call
+    `bar_freshness()` directly instead."""
+    return bar_freshness(symbol, config, logger, now=now)["age_days"]
 
 
 def fetch_raw_option_chain(symbol: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:

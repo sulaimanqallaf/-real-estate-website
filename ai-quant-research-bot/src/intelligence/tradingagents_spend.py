@@ -160,10 +160,61 @@ def release(db_path: str | Path, entry_id: str) -> None:
 
 
 def spent_today_and_month(db_path: str | Path, now: datetime) -> dict[str, float]:
+    """The CAP-ENFORCEMENT total - committed (actual) spend PLUS any
+    still-outstanding reservation, exactly what `reserve()` itself checks
+    against `daily_limit_usd`/`monthly_limit_usd`. This number is
+    deliberately conservative (it's what keeps the cap honest against an
+    in-flight call whose real cost isn't known yet) and must NOT be
+    read as "actual dollars billed so far" - see `spend_breakdown()`
+    below for the committed/reserved split a health report needs to
+    report that distinction honestly."""
     call_date = now.strftime("%Y-%m-%d")
     call_month = now.strftime("%Y-%m")
     with _connect_immediate(db_path) as conn:
         return {
             "today_usd": round(_committed_or_reserved_total(conn, "call_date", call_date), 6),
             "month_usd": round(_committed_or_reserved_total(conn, "call_month", call_month), 6),
+        }
+
+
+def _committed_total(conn: sqlite3.Connection, column: str, value: str) -> float:
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(actual_usd), 0) AS total FROM spend_ledger "
+        f"WHERE {column} = ? AND status = 'committed'",
+        (value,),
+    ).fetchone()
+    return row["total"]
+
+
+def _reserved_total(conn: sqlite3.Connection, column: str, value: str) -> float:
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(reserved_usd), 0) AS total FROM spend_ledger "
+        f"WHERE {column} = ? AND status = 'reserved'",
+        (value,),
+    ).fetchone()
+    return row["total"]
+
+
+def spend_breakdown(db_path: str | Path, now: datetime) -> dict[str, float]:
+    """Health-report-facing view: committed (actual, real `actual_usd`
+    from a call that finished and had its real cost recorded via
+    `commit()`) kept SEPARATE from reserved (the conservative ceiling of
+    a call that is still in flight, or - see `outstanding_reservation_
+    count` below - never got `commit()`ted or `release()`d, e.g. because
+    the process crashed mid-call). Never blends the two into one number
+    presented as "actual spend" - that blended number exists (`spent_
+    today_and_month()`) specifically for cap enforcement, which needs to
+    be conservative, not for reporting what was actually billed."""
+    call_date = now.strftime("%Y-%m-%d")
+    call_month = now.strftime("%Y-%m")
+    with _connect_immediate(db_path) as conn:
+        outstanding_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM spend_ledger WHERE status = 'reserved'"
+        ).fetchone()
+        return {
+            "committed_today_usd": round(_committed_total(conn, "call_date", call_date), 6),
+            "committed_month_usd": round(_committed_total(conn, "call_month", call_month), 6),
+            "reserved_today_usd": round(_reserved_total(conn, "call_date", call_date), 6),
+            "reserved_month_usd": round(_reserved_total(conn, "call_month", call_month), 6),
+            "outstanding_reservation_count": outstanding_row["n"],
         }

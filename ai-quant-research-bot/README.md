@@ -553,15 +553,33 @@ cd /full/path/to/ai-quant-research-bot
 .venv/bin/python -m src.execution.run_health
 ```
 
-Prints: last run started/finished, last run result, last run summary,
-last success, next scheduled run (from the optional `schedule.daily.hour`/
-`minute` config keys - keep these in sync with the plist above, or it
-honestly reports "unknown" rather than guessing), approximate TradingAgents
-spend today/this month (from the existing spend ledger -
-`intelligence/tradingagents_spend.py` - read-only here), stale cached
-tickers, circuit breaker halt state, and the tail of recent `[ERROR]` log
-lines. Makes zero network/LLM/broker calls itself - see
+Prints: last TRACKED run started/finished/result (explicitly labeled
+"TRACKED" - see below), most recent report FILE on disk (a separate,
+historical-only signal, never confused with a tracked success), whether
+the launchd daily job is actually `installed`/`loaded` (via a read-only
+`launchctl list`, macOS only) alongside the next scheduled run computed
+from `schedule.daily.hour`/`minute` config (a plain calculation, not a
+launchd confirmation - the two are shown together so one is never
+mistaken for the other), TradingAgents spend split into COMMITTED
+(actual, billed) vs RESERVED (conservative, not yet billed - never
+blended into one misleading "approximate spend" number), per-ticker
+cached-data freshness (`stale`, `check_failed` when the freshness check
+itself couldn't determine an age - never silently reported as clean -
+or `ok`), circuit breaker halt state, and recent `[ERROR]` log lines
+split into "active" (since the last tracked run started) vs
+"historical" (older, shown for context only). Makes zero network/LLM/
+broker calls itself other than the local `launchctl` status check - see
 `tests/test_execution_run_health_safety.py`.
+
+**Known limitation fixed after the first Mac health check**: the
+original version crashed on every ticker's staleness check once the
+cache spanned a DST transition (yfinance's exchange-timezone index
+mixes UTC offsets across the boundary, which pandas silently turns into
+plain strings instead of raising) and, because of how that exception
+was swallowed, reported "Stale cached data: none" instead of flagging
+the failure. See `data_collector.bar_freshness()` and
+`tests/test_execution_run_health.py`'s DST-spanning regression test for
+the fix.
 
 ### Running it fully autonomously: the canonical services
 

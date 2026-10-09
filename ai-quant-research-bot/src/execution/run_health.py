@@ -2,11 +2,13 @@
 tracking for the scheduled daily run (`src/main.py`'s `run()`), plus the
 Telegram failure-alert sender used when a run aborts or raises.
 
-**Read-only / monitoring only - never touches execution, a broker, or an
-LLM provider.** This module only ever reads log files, a small JSON
-status marker it writes itself, and the existing TradingAgents spend
-ledger (`intelligence/tradingagents_spend.py`, read-only here via
-`spent_today_and_month()`). See
+**Read-only / monitoring only - never touches a broker or an LLM
+provider, and never places an order or makes a billed API call.** This
+module only ever reads log files, a small JSON status marker it writes
+itself, the existing TradingAgents spend ledger (`intelligence/
+tradingagents_spend.py`, read-only here), and - for `check_launchd_
+status()` only - runs the local, read-only `launchctl list` command
+(never anything LLM/broker-related). See
 `tests/test_execution_run_health_safety.py`'s grep-based guardrail.
 
 The status marker is colocated with `data.journal_dir` - same convention
@@ -14,12 +16,41 @@ as `execution/circuit_breaker.py`'s reconciliation-state file and
 `intelligence/tradingagents_spend.py`'s ledger: deliberately no separate,
 independently-configurable path key (see those modules' docstrings for
 the test-pollution footgun that convention avoids).
+
+**Mac health-check follow-up (GitHub Issue #1 follow-up):** the first
+version of this module shipped with five real correctness bugs, found
+against a real Mac's cached data/logs rather than synthetic test
+fixtures:
+1. `data_collector.latest_bar_age_days()` crashed on every ticker once
+   the cache spanned a DST transition (`'str' object has no attribute
+   'tzinfo'`) - fixed in `data_collector.bar_freshness()`, see its
+   docstring. This module's stale-data check now also distinguishes a
+   genuine parse/read FAILURE from "no data yet" from "fresh", instead
+   of letting an exception collapse into "stale data: none."
+2. "Last run: never" was indistinguishable from "a run happened before
+   this health-tracking code existed" - `read_status()` now also
+   surfaces `most_recent_report_file_date` (from `data.reports_dir`'s
+   own filenames) as an explicitly separate, historical-only field.
+3. "Approximate spend" blended committed (actual, billed) dollars with
+   still-outstanding conservative reservations into one number -
+   `spend_report()` now reports them separately and never claims the
+   blended, cap-enforcement number is "actual spend."
+4. The log tail showed old, already-resolved errors with no way to tell
+   them apart from a problem in the CURRENT run - `tail_recent_errors()`
+   now splits errors into "since the last run started" vs "older/
+   historical", using each line's own logged timestamp.
+5. "Next scheduled run" was computed purely from config and looked like
+   a confirmed schedule even when launchd was never installed -
+   `check_launchd_status()` now checks (best-effort, macOS-only) whether
+   the job is actually loaded, and the text report labels the computed
+   time accordingly.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +59,14 @@ from ..utils import redact_secrets, resolve_path
 
 _STATUS_FILENAME = "run_health_status.json"
 _LOCK_FILENAME = "main_daily_run.lock"
+
+# Matches `utils.setup_logging()`'s `logging.Formatter("%(asctime)s
+# [%(levelname)s] %(message)s")` - `%(asctime)s` defaults to
+# "YYYY-MM-DD HH:MM:SS,mmm". Used to tell a recent log error apart from a
+# historical one (requirement: "distinguish historical log errors from
+# active failures") instead of presenting every error the log file has
+# ever recorded as if it just happened.
+_LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
 def _journal_dir(config: dict[str, Any]) -> Path:
@@ -102,10 +141,40 @@ def record_run_result(
     _write_raw_status(config, data)
 
 
+def most_recent_report_file_date(config: dict[str, Any]) -> str | None:
+    """Best-effort, purely informational: the newest `report_YYYY-MM-DD.
+    json` date in `data.reports_dir` (written by `report_writer.save_
+    reports()` on every run, long before this health-tracking milestone
+    existed). This is NEVER treated as - or merged into - `last_success_
+    at`: a report file only proves a run got far enough to write a
+    report, not that nothing failed, and conflating "a report file from
+    before health tracking existed" with "a tracked success" is exactly
+    the kind of invented success record this field exists to avoid.
+    Returns `None` when `data.reports_dir` is missing/empty - never a
+    guessed date."""
+    reports_dir_config = config.get("data", {}).get("reports_dir")
+    if not reports_dir_config:
+        return None
+    reports_dir = resolve_path(reports_dir_config)
+    if not reports_dir.exists():
+        return None
+    dates = []
+    for path in reports_dir.glob("report_*.json"):
+        match = re.match(r"report_(\d{4}-\d{2}-\d{2})\.json$", path.name)
+        if match:
+            dates.append(match.group(1))
+    return max(dates) if dates else None
+
+
 def read_status(config: dict[str, Any]) -> dict[str, Any]:
-    """Read-only snapshot of the persisted run history. Every field is
-    `None` ("unknown" - e.g. the bot has never run, or the file predates
-    this milestone) rather than a fabricated zero/empty default."""
+    """Read-only snapshot of the persisted run history. Every tracked
+    field is `None` ("unknown to health tracking") rather than a
+    fabricated zero/empty default - including when the bot has genuinely
+    never run AND when it ran before this health-tracking code existed
+    (those two cases are NOT distinguishable from `last_run_started_at`
+    alone, which is exactly why `most_recent_report_file_date` is
+    surfaced as its own, separately-labeled field instead of being
+    folded into - or mistaken for - a tracked run record)."""
     data = _read_raw_status(config)
     return {
         "last_run_started_at": data.get("last_run_started_at"),
@@ -114,20 +183,26 @@ def read_status(config: dict[str, Any]) -> dict[str, Any]:
         "last_run_summary": data.get("last_run_summary"),
         "last_run_failed_symbols": data.get("last_run_failed_symbols", []),
         "last_success_at": data.get("last_success_at"),
+        "most_recent_report_file_date": most_recent_report_file_date(config),
     }
 
 
 def already_succeeded_today(config: dict[str, Any], now: datetime | None = None) -> bool:
-    """True if the daily run has already recorded a success (`last_
-    success_at`) on the SAME calendar date as `now`. Backs `main.run()`'s
-    reboot/`RunAtLoad` safety: launchd's `StartCalendarInterval` does not
-    retroactively fire a run that was entirely missed while the Mac was
-    off or asleep through the scheduled time, so the plist also sets
-    `RunAtLoad` to catch that case on the next boot/login - but
-    `RunAtLoad` ALSO fires on every ordinary login, not only after a
-    missed run, so without this guard a normal day with two logins would
-    silently run the whole pipeline twice. Set `FORCE_RERUN=1` to bypass
-    this guard deliberately (e.g. for manual testing)."""
+    """True if the daily run has already recorded a TRACKED success
+    (`last_success_at`) on the SAME calendar date as `now`. Backs
+    `main.run()`'s reboot/`RunAtLoad` safety: launchd's
+    `StartCalendarInterval` does not retroactively fire a run that was
+    entirely missed while the Mac was off or asleep through the
+    scheduled time, so the plist also sets `RunAtLoad` to catch that
+    case on the next boot/login - but `RunAtLoad` ALSO fires on every
+    ordinary login, not only after a missed run, so without this guard a
+    normal day with two logins would silently run the whole pipeline
+    twice. Deliberately does NOT consider `most_recent_report_file_date`
+    (a historical, pre-tracking signal) here - only a run THIS code
+    itself tracked counts, so a freshly-added health-tracking install
+    never silently skips its first real run of the day. Set
+    `FORCE_RERUN=1` to bypass this guard deliberately (e.g. for manual
+    testing)."""
     last_success = read_status(config)["last_success_at"]
     if not last_success:
         return False
@@ -144,9 +219,10 @@ def compute_next_scheduled_run(config: dict[str, Any], now: datetime | None = No
     `schedule.daily.hour`/`schedule.daily.minute` config keys (meant to be
     kept in sync with the actual launchd plist - see README section 6).
     Returns `None` ("unknown", not "midnight") when that schedule isn't
-    configured, since launchd's own schedule isn't otherwise introspectable
-    from Python without shelling out to `launchctl` (fragile, Mac-only,
-    and not something this read-only module should depend on)."""
+    configured. This is PURELY a config calculation - it has no way to
+    know whether launchd was ever actually told about this schedule; see
+    `check_launchd_status()` for that, and never present this value
+    without it alongside."""
     daily = config.get("schedule", {}).get("daily", {})
     hour = daily.get("hour")
     minute = daily.get("minute", 0)
@@ -160,31 +236,107 @@ def compute_next_scheduled_run(config: dict[str, Any], now: datetime | None = No
     return candidate.isoformat()
 
 
-def tail_recent_errors(config: dict[str, Any], max_lines: int = 10, log_filename: str = "app.log") -> list[str]:
-    """Last `max_lines` ERROR-level lines from the main log file (see
-    `utils.setup_logging()`'s `log_dir`/`log_filename` convention).
-    Returns `[]` when the log file doesn't exist yet - never raises, this
-    is read-only diagnostics, not something that should ever crash the
-    health command itself."""
+def check_launchd_status(label: str = "com.aiquantresearchbot.daily") -> dict[str, Any]:
+    """Best-effort, macOS-only, READ-ONLY check of whether the daily
+    launchd job is actually loaded (`launchctl list <label>`) - the only
+    subprocess call anywhere in this module, and never anything other
+    than this local OS status query (no LLM, no broker, nothing
+    network-facing). Distinct from `compute_next_scheduled_run()`, which
+    only echoes back whatever `schedule.daily` says in config and has no
+    way to know if launchd was ever told about it at all.
+
+    Returns `{"installed": True|False|None, "detail": str}` - `None`
+    ("unknown") when not on macOS or `launchctl` itself couldn't be run;
+    never raises."""
+    import platform
+    import subprocess
+
+    if platform.system() != "Darwin":
+        return {"installed": None, "detail": "not macOS - launchctl check not applicable"}
+
+    try:
+        result = subprocess.run(
+            ["launchctl", "list", label], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"installed": None, "detail": f"could not run launchctl: {exc}"}
+
+    if result.returncode != 0:
+        return {"installed": False, "detail": f"not loaded (launchctl list exit code {result.returncode})"}
+    return {"installed": True, "detail": "loaded"}
+
+
+def tail_recent_errors(
+    config: dict[str, Any], max_lines: int = 10, log_filename: str = "app.log", now: datetime | None = None
+) -> dict[str, list[str]]:
+    """ERROR-level lines from the main log file (see `utils.setup_
+    logging()`'s `log_dir`/`log_filename` convention), split into
+    `"since_last_run_started"` (at or after `read_status()`'s own
+    `last_run_started_at` - i.e. plausibly from the CURRENT/most recent
+    attempt) and `"historical"` (everything older, or everything when
+    there's no tracked run to compare against) - a health report that
+    shows old, already-resolved errors with no visual distinction from a
+    live failure is actively misleading. Each list independently capped
+    at `max_lines`, most-recent-first within the cap. Returns `{"since_
+    last_run_started": [], "historical": []}` when the log file doesn't
+    exist yet - never raises."""
+    empty = {"since_last_run_started": [], "historical": []}
     log_dir = config.get("logging", {}).get("log_dir", "data/reports")
     log_path = resolve_path(log_dir) / log_filename
     if not log_path.exists():
-        return []
+        return empty
     try:
         with open(log_path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except OSError:
-        return []
-    error_lines = [line.rstrip("\n") for line in lines if "[ERROR]" in line]
-    return [redact_secrets(line) for line in error_lines[-max_lines:]]
+        return empty
+
+    last_run_started_at = read_status(config)["last_run_started_at"]
+    cutoff: datetime | None = None
+    if last_run_started_at:
+        try:
+            cutoff = datetime.fromisoformat(last_run_started_at)
+        except ValueError:
+            cutoff = None
+
+    since_last_run: list[str] = []
+    historical: list[str] = []
+    for raw_line in lines:
+        if "[ERROR]" not in raw_line:
+            continue
+        line = redact_secrets(raw_line.rstrip("\n"))
+        match = _LOG_TIMESTAMP_RE.match(line)
+        line_dt = None
+        if match:
+            try:
+                line_dt = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                line_dt = None
+        if cutoff is not None and line_dt is not None:
+            # last_run_started_at is UTC-aware; the log line is naive
+            # local-clock text - compare on naive wall-clock terms only
+            # (good enough for "is this from the run we just tracked",
+            # never used for anything that needs real precision).
+            is_recent = line_dt >= cutoff.replace(tzinfo=None)
+        else:
+            is_recent = False
+        (since_last_run if is_recent else historical).append(line)
+
+    return {
+        "since_last_run_started": since_last_run[-max_lines:],
+        "historical": historical[-max_lines:],
+    }
 
 
-def approximate_spend(config: dict[str, Any], now: datetime | None = None) -> dict[str, float] | None:
-    """Today/this-month TradingAgents spend from the existing ledger
-    (`intelligence/tradingagents_spend.py`) - read-only, same reserve+
-    commit totals the spend-cap enforcement itself uses. Returns `None`
-    (never a fabricated 0.0) when TradingAgents is disabled or the ledger
-    has never been created."""
+def spend_report(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any] | None:
+    """TradingAgents spend from the existing ledger (`intelligence/
+    tradingagents_spend.py`), reported as the committed (actual, billed)
+    total kept SEPARATE from any still-outstanding reservation - see
+    `tradingagents_spend.spend_breakdown()`'s docstring for why blending
+    them (as `spent_today_and_month()` deliberately does, for cap
+    enforcement) must never be presented as "actual spend." Returns
+    `None` (never a fabricated $0.00) when TradingAgents is disabled or
+    the ledger has never been created."""
     if not config.get("intelligence", {}).get("tradingagents", {}).get("enabled", False):
         return None
     from ..intelligence import tradingagents_spend
@@ -193,43 +345,58 @@ def approximate_spend(config: dict[str, Any], now: datetime | None = None) -> di
     if not db_path.exists():
         return None
     try:
-        return tradingagents_spend.spent_today_and_month(db_path, now or datetime.now(timezone.utc))
+        return tradingagents_spend.spend_breakdown(db_path, now or datetime.now(timezone.utc))
     except Exception:  # noqa: BLE001 - this is best-effort diagnostics, never allowed to crash the health command
         return None
 
 
-def stale_tickers(config: dict[str, Any], logger: logging.Logger, now: datetime | None = None) -> list[str]:
-    """Tickers whose most recently cached daily bar is older than
-    `data.max_bar_age_days_warning` (default 3 calendar days - generous
-    enough to span an ordinary weekend without a false alarm on Monday
-    morning, before that day's run has fetched fresh data yet). Reuses
-    `data_collector.latest_bar_age_days()` - the same staleness signal
-    `circuit_breaker.check_all()` already uses - read-only, no network
-    call."""
+def data_staleness_report(config: dict[str, Any], logger: logging.Logger, now: datetime | None = None) -> dict[str, list[str]]:
+    """Per-ticker cached-data freshness, using `data_collector.bar_
+    freshness()` - split into `"stale"` (readable, but older than `data.
+    max_bar_age_days_warning`), `"check_failed"` (the freshness check
+    itself could not determine an age because of a genuine PARSE/READ
+    problem on an existing file - never silently read as "fresh" or
+    dropped from the report), `"ok"`, and (not reported as a problem -
+    there is nothing to check yet, same "unknown, not stale" convention
+    as every other "Data Unavailable" source in this codebase) tickers
+    with no cached file at all are simply omitted from all three lists.
+    Never collapses `check_failed` into `stale`'s "none" - a failed
+    check is reported as failed, not as clean, so the affected tickers
+    are always visible."""
     from .. import data_collector
 
     threshold = config.get("data", {}).get("max_bar_age_days_warning", 3)
-    stale: list[str] = []
+    result: dict[str, list[str]] = {"stale": [], "check_failed": [], "ok": []}
     for symbol in config.get("tickers", []):
-        age = data_collector.latest_bar_age_days(symbol, config, logger, now=now)
-        if age is not None and age > threshold:
-            stale.append(symbol)
-    return stale
+        freshness = data_collector.bar_freshness(symbol, config, logger, now=now)
+        if freshness["status"] == "no_data":
+            continue  # no cached file yet - "unknown", not a check failure
+        if freshness["status"] != "ok":
+            result["check_failed"].append(symbol)
+        elif freshness["age_days"] > threshold:
+            result["stale"].append(symbol)
+        else:
+            result["ok"].append(symbol)
+    return result
 
 
 def build_health_report(config: dict[str, Any], logger: logging.Logger, now: datetime | None = None) -> dict[str, Any]:
-    """Everything the read-only health/status command reports: last run,
-    last success, next scheduled run, latest errors, approximate spend,
-    and any tickers whose cached data has gone stale."""
+    """Everything the read-only health/status command reports: last
+    tracked run, last tracked success, most recent historical report
+    file, next scheduled run (plus whether launchd is actually
+    installed), recent vs historical log errors, committed/reserved
+    TradingAgents spend, and cached-data freshness (including any
+    tickers whose freshness check itself failed)."""
     from . import circuit_breaker
 
     reference = now or datetime.now(timezone.utc)
     return {
         "status": read_status(config),
         "next_scheduled_run": compute_next_scheduled_run(config, reference),
-        "latest_errors": tail_recent_errors(config),
-        "approximate_spend_usd": approximate_spend(config, reference),
-        "stale_tickers": stale_tickers(config, logger, reference),
+        "launchd": check_launchd_status(),
+        "errors": tail_recent_errors(config, now=reference),
+        "spend": spend_report(config, reference),
+        "data_staleness": data_staleness_report(config, logger, reference),
         "circuit_breaker": circuit_breaker.status(config),
     }
 
@@ -238,37 +405,69 @@ def format_health_text(report: dict[str, Any]) -> str:
     status = report["status"]
     lines = [
         "AI Quant Research Bot - health status",
-        f"Last run started:  {status['last_run_started_at'] or 'never'}",
-        f"Last run finished: {status['last_run_finished_at'] or 'never'}",
-        f"Last run result:   {'OK' if status['last_run_ok'] else ('FAILED' if status['last_run_ok'] is not None else 'unknown')}",
+        f"Last TRACKED run started:  {status['last_run_started_at'] or 'never'}",
+        f"Last TRACKED run finished: {status['last_run_finished_at'] or 'never'}",
+        f"Last TRACKED run result:   {'OK' if status['last_run_ok'] else ('FAILED' if status['last_run_ok'] is not None else 'unknown')}",
     ]
     if status["last_run_summary"]:
         lines.append(f"Last run summary:  {status['last_run_summary']}")
     if status["last_run_failed_symbols"]:
         lines.append(f"Last run failed symbols: {', '.join(status['last_run_failed_symbols'])}")
-    lines.append(f"Last success:       {status['last_success_at'] or 'never'}")
-    lines.append(f"Next scheduled run: {report['next_scheduled_run'] or 'unknown (schedule.daily not configured)'}")
+    lines.append(f"Last TRACKED success:      {status['last_success_at'] or 'never'}")
+    if status["most_recent_report_file_date"]:
+        lines.append(
+            f"Most recent report FILE on disk: {status['most_recent_report_file_date']} "
+            "(historical signal only - may predate health tracking, NOT a confirmed successful run)"
+        )
+    else:
+        lines.append("Most recent report file on disk: none found")
 
-    spend = report["approximate_spend_usd"]
+    launchd = report["launchd"]
+    if launchd["installed"] is True:
+        launchd_line = "INSTALLED/LOADED"
+    elif launchd["installed"] is False:
+        launchd_line = "NOT INSTALLED - the next-scheduled-run time below is only a config calculation, not a confirmed schedule"
+    else:
+        launchd_line = f"unknown ({launchd['detail']})"
+    lines.append(f"launchd daily job: {launchd_line}")
+    lines.append(f"Next scheduled run (from config, NOT a launchd confirmation): {report['next_scheduled_run'] or 'unknown (schedule.daily not configured)'}")
+
+    spend = report["spend"]
     if spend is None:
-        lines.append("Approximate TradingAgents spend: unavailable (disabled, or no calls made yet)")
+        lines.append("TradingAgents spend: unavailable (disabled, or no calls made yet)")
     else:
-        lines.append(f"Approximate TradingAgents spend: ${spend['today_usd']:.4f} today / ${spend['month_usd']:.4f} this month")
+        lines.append(
+            f"TradingAgents spend - COMMITTED (actual, billed): ${spend['committed_today_usd']:.4f} today / "
+            f"${spend['committed_month_usd']:.4f} this month"
+        )
+        lines.append(
+            f"TradingAgents spend - RESERVED (conservative, not yet billed): ${spend['reserved_today_usd']:.4f} today / "
+            f"${spend['reserved_month_usd']:.4f} this month"
+            + (f" ({spend['outstanding_reservation_count']} outstanding reservation(s))" if spend["outstanding_reservation_count"] else "")
+        )
 
-    if report["stale_tickers"]:
-        lines.append(f"Stale cached data (> warning threshold): {', '.join(report['stale_tickers'])}")
-    else:
-        lines.append("Stale cached data: none")
+    staleness = report["data_staleness"]
+    if staleness["check_failed"]:
+        lines.append(f"Stale-data CHECK FAILED for: {', '.join(staleness['check_failed'])} (age unknown - treat as a problem, not as fresh)")
+    if staleness["stale"]:
+        lines.append(f"Stale cached data: {', '.join(staleness['stale'])}")
+    if not staleness["check_failed"] and not staleness["stale"]:
+        lines.append("Stale cached data: none (all freshness checks succeeded)")
 
     cb = report["circuit_breaker"]
     lines.append(f"Circuit breaker halted: {cb['halted']}" + (f" ({cb['reason']})" if cb.get("reason") else ""))
 
-    if report["latest_errors"]:
+    errors = report["errors"]
+    if errors["since_last_run_started"]:
         lines.append("")
-        lines.append("Latest errors:")
-        lines.extend(f"  {line}" for line in report["latest_errors"])
+        lines.append("ACTIVE errors (since the last tracked run started):")
+        lines.extend(f"  {line}" for line in errors["since_last_run_started"])
     else:
-        lines.append("Latest errors: none")
+        lines.append("Active errors: none")
+    if errors["historical"]:
+        lines.append("")
+        lines.append("Historical errors (older - for context only, not necessarily still relevant):")
+        lines.extend(f"  {line}" for line in errors["historical"])
 
     return "\n".join(lines) + "\n"
 
@@ -300,8 +499,9 @@ def send_failure_alert(config: dict[str, Any], logger: logging.Logger, label: st
 
 def main() -> int:
     """`python -m src.execution.run_health` - prints the health report.
-    Read-only: no network call other than none (Telegram is only ever
-    touched by `send_failure_alert()`, not by this CLI)."""
+    The only subprocess this ever invokes is the read-only `launchctl
+    list` status check (`check_launchd_status()`) - no LLM call, no
+    broker call, no order."""
     from ..utils import load_config, load_env, setup_logging
 
     load_env()
