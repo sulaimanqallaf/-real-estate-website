@@ -161,7 +161,11 @@ list:
 - [x] **This sprint**: Dockerfiles for dashboard backend/frontend +
   `docker-compose.yml`, `docs/platform/DEPLOYMENT.md` (process supervision,
   secrets, health checks, logging, single-active-executor guarantee, broker
-  reconnect strategy).
+  reconnect strategy). **Build- and run-verified locally** in this sandbox
+  (not just written): both images built, both containers ran, the backend
+  served real data over HTTP, and a deliberate write attempt against the
+  read-only bind mount failed with a real OS-level error - see
+  `DEPLOYMENT.md`'s "What was actually verified" section.
 - [ ] Containerizing the bot's OWN scheduled jobs (main.py/after_close.py/
   position_monitor.py) — documented as a plan in `DEPLOYMENT.md`, not
   containerized this sprint (the user's existing Mac launchd setup is working
