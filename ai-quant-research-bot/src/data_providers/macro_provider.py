@@ -17,14 +17,18 @@ known - see `fetch_series_latest()`.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from .. import reliability
 from . import base
 
 SOURCE_FRED = "fred"
+
+_LOGGER = logging.getLogger(__name__)
 
 FRED_SERIES_URL = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -111,7 +115,8 @@ def fetch_series_latest(series_id: str, api_key: str | None = None, timeout: int
 
     import requests
 
-    try:
+    @reliability.retrying(_LOGGER)
+    def _do_fetch() -> requests.Response:
         resp = requests.get(
             FRED_SERIES_URL,
             params={
@@ -124,7 +129,10 @@ def fetch_series_latest(series_id: str, api_key: str | None = None, timeout: int
             timeout=timeout,
         )
         resp.raise_for_status()
-        payload = resp.json()
+        return resp
+
+    try:
+        payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
         return base.provider_error(SOURCE_FRED, f"failed to fetch FRED series {series_id}: {exc}")
 

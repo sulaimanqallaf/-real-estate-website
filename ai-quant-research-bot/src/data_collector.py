@@ -21,7 +21,23 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+from . import reliability
 from .utils import resolve_path
+
+
+def _fetch_history_with_retry(symbol: str, period: str, interval: str, logger: logging.Logger) -> pd.DataFrame:
+    """Isolated so ONLY the network call itself is retried (Sprint 3:
+    "test internet outages... use Tenacity where beneficial") - a
+    transient ConnectionError/Timeout gets up to 3 attempts with
+    backoff; the empty-dataframe check below (a legitimate "no data
+    for this symbol" result, not a network blip) is deliberately
+    OUTSIDE this retried call and never retried."""
+
+    @reliability.retrying(logger)
+    def _do_fetch() -> pd.DataFrame:
+        return yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
+
+    return _do_fetch()
 
 
 def fetch_symbol_history(symbol: str, config: dict[str, Any], logger: logging.Logger) -> pd.DataFrame:
@@ -30,8 +46,7 @@ def fetch_symbol_history(symbol: str, config: dict[str, Any], logger: logging.Lo
     interval = config["data"]["interval"]
 
     logger.info("Fetching daily history for %s (%s, %s)", symbol, period, interval)
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval, auto_adjust=False)
+    df = _fetch_history_with_retry(symbol, period, interval, logger)
 
     if df is None or df.empty:
         raise ValueError(f"yfinance returned no price data for {symbol}")

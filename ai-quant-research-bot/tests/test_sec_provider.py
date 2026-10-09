@@ -283,3 +283,51 @@ def test_sec_identity_configured_reflects_env(monkeypatch):
     assert sp.sec_identity_configured() is False
     monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
     assert sp.sec_identity_configured() is True
+
+
+def test_fetch_recent_filings_network_failure_returns_provider_error(monkeypatch):
+    """Retry disabled here (not what this test is about - see
+    reliability.py's own tests) so a persistently-failing mock doesn't
+    pay the real multi-second backoff on every run."""
+    from src import reliability
+
+    monkeypatch.setattr(reliability, "retrying", lambda *a, **k: (lambda f: f))
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("simulated outage")))
+    result = sp.fetch_recent_filings("0001234567")
+    assert result.status == base.STATUS_ERROR
+    assert "simulated outage" in result.error
+
+
+def test_fetch_recent_filings_recovers_after_a_transient_failure(monkeypatch):
+    """Proves the real Sprint 3 retry wiring, not just reliability.py's
+    abstract decorator tests - uses the real default backoff, so this
+    one test genuinely sleeps briefly."""
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+
+    import requests
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"filings": {"recent": {"form": ["13F-HR"], "filingDate": ["2026-01-01"], "accessionNumber": ["0001"], "primaryDocument": ["doc.xml"]}}}
+
+    calls = {"count": 0}
+
+    def _flaky_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionError("transient blip")
+        return _FakeResponse()
+
+    monkeypatch.setattr(requests, "get", _flaky_get)
+    result = sp.fetch_recent_filings("0001234567")
+
+    assert result.status == base.STATUS_OK
+    assert calls["count"] == 2
+    assert result.data[0]["form"] == "13F-HR"

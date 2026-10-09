@@ -26,16 +26,20 @@ in this codebase - places an order; this only ever reads public filings.
 
 from __future__ import annotations
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from .. import reliability
 from . import base
 
 SOURCE_13F = "sec_13f"
 SOURCE_FORM4 = "sec_form4"
+
+_LOGGER = logging.getLogger(__name__)
 
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/index.json"
@@ -553,11 +557,15 @@ def fetch_recent_filings(
 
     import requests
 
-    try:
+    @reliability.retrying(_LOGGER)
+    def _do_fetch() -> requests.Response:
         cik_padded = str(cik).zfill(10)
         resp = requests.get(SEC_SUBMISSIONS_URL.format(cik=cik_padded), headers=headers, timeout=timeout)
         resp.raise_for_status()
-        payload = resp.json()
+        return resp
+
+    try:
+        payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
         return base.provider_error(SOURCE_13F, f"failed to fetch SEC submissions for CIK {cik}: {exc}")
 
@@ -590,12 +598,18 @@ def fetch_filing_document(cik: str, accession_number: str, filename: str, timeou
 
     import requests
 
-    try:
-        accession_nodash = accession_number.replace("-", "")
-        url = SEC_ARCHIVES_FILE_URL.format(cik=str(cik).lstrip("0") or "0", accession_nodash=accession_nodash, filename=filename)
+    accession_nodash = accession_number.replace("-", "")
+    url = SEC_ARCHIVES_FILE_URL.format(cik=str(cik).lstrip("0") or "0", accession_nodash=accession_nodash, filename=filename)
+
+    @reliability.retrying(_LOGGER)
+    def _do_fetch() -> requests.Response:
         resp = requests.get(url, headers=headers, timeout=timeout)
         resp.raise_for_status()
+        return resp
+
+    try:
+        content = _do_fetch().content
     except Exception as exc:  # noqa: BLE001
         return base.provider_error(SOURCE_13F, f"failed to fetch filing document {filename}: {exc}")
 
-    return base.ok(SOURCE_13F, resp.content, available_at=base.utcnow(), freshness="live")
+    return base.ok(SOURCE_13F, content, available_at=base.utcnow(), freshness="live")

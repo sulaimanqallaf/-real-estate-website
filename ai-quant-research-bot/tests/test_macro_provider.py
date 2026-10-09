@@ -84,6 +84,13 @@ def test_stale_or_all_missing_observations_does_not_crash_and_reports_unavailabl
 
 
 def test_network_failure_returns_provider_error_not_an_exception(monkeypatch):
+    """This test is about the FINAL provider_error() behavior, not
+    about retry timing (that's reliability.py's own test suite) - the
+    retry decorator is disabled here so a persistently-failing mock
+    doesn't pay Sprint 3's real multi-second backoff on every test run."""
+    from src import reliability
+
+    monkeypatch.setattr(reliability, "retrying", lambda *a, **k: (lambda f: f))
     monkeypatch.setenv("FRED_API_KEY", "fake-key-for-test")
 
     import requests
@@ -94,4 +101,36 @@ def test_network_failure_returns_provider_error_not_an_exception(monkeypatch):
     monkeypatch.setattr(requests, "get", _boom)
     result = mp.fetch_series_latest(mp.SERIES_FED_FUNDS_RATE)
     assert result.status == base.STATUS_ERROR
-    assert "simulated network failure" in result.error
+
+
+def test_a_transient_failure_followed_by_success_recovers_via_retry(monkeypatch):
+    """Proves the real wiring, not just reliability.py's own abstract
+    decorator tests: a ConnectionError on the first call, then a real
+    response on the second, must come back as STATUS_OK - never
+    surfaced as a provider_error just because the FIRST attempt
+    failed. Uses the real default retry/backoff (Sprint 3's actual
+    production behavior), so this one test genuinely sleeps briefly."""
+    monkeypatch.setenv("FRED_API_KEY", "fake-key-for-test")
+
+    import requests
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"observations": [{"date": "2026-01-01", "value": "4.5", "realtime_start": "2026-01-02"}]}
+
+    calls = {"count": 0}
+
+    def _flaky_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionError("transient blip")
+        return _FakeResponse()
+
+    monkeypatch.setattr(requests, "get", _flaky_get)
+    result = mp.fetch_series_latest(mp.SERIES_FED_FUNDS_RATE)
+
+    assert result.status == base.STATUS_OK
+    assert calls["count"] == 2

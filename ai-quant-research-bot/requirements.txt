@@ -8,6 +8,15 @@ pytest>=7.4.0
 pyarrow>=14.0.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
+# Sprint 3 (Reliability milestone): retry/backoff policy for transient
+# network failures (src/reliability.py) - never a core dependency of
+# the decision pipeline itself, just how outbound HTTP calls behave.
+tenacity>=8.2.0
+
+# Sprint 3 (Reliability milestone): property-based tests for critical
+# invariants (circuit breaker, decision ledger, risk sizing) - a test-only
+# dependency, never imported by src/ at runtime.
+hypothesis>=6.100.0
 # NYSE holiday/early-close calendar for the after-close launchd wrapper
 # (execution/market_calendar.py) - a maintained data source, not a
 # hand-rolled holiday list that goes stale every year.
