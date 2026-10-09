@@ -979,3 +979,68 @@ def test_parse_ibkr_execution_time_falls_back_to_now_on_garbage_input():
     parsed = ibkr_client._parse_ibkr_execution_time("not-a-real-timestamp")
     after = ibkr_client.datetime.now(ibkr_client.timezone.utc)
     assert before <= parsed <= after
+
+
+# --- connection-loss detection (docs/platform/BROKER_REFERENCE_REVIEW.md) ---------------
+#
+# Offline-only: _on_connection_closed() is a pure state transition with no
+# ibapi dependency, called directly here exactly as ibapi's real
+# connectionClosed() callback would call it through the closure in
+# _build_app() - these tests never touch a socket or import ibapi.
+
+
+def test_on_connection_closed_transitions_connected_to_disconnected():
+    from src.execution.broker import CONNECTION_CONNECTED, CONNECTION_DISCONNECTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_CONNECTED
+    client._verified_account = object()
+
+    client._on_connection_closed()
+
+    assert client.connection_state() == CONNECTION_DISCONNECTED
+    assert client._verified_account is None
+
+
+def test_on_connection_closed_feeds_the_broker_disconnected_breaker():
+    """Ties the fix directly to the safety mechanism it exists for:
+    once _on_connection_closed() fires, circuit_breaker.check_broker_
+    connection() must actually trip - this is the real-world
+    consequence of the gap found reviewing LumiBot/LEAN (see
+    docs/platform/BROKER_REFERENCE_REVIEW.md)."""
+    from src.execution import circuit_breaker
+    from src.execution.broker import CONNECTION_CONNECTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_CONNECTED
+    assert circuit_breaker.check_broker_connection(client.connection_state()) is None
+
+    client._on_connection_closed()
+
+    assert circuit_breaker.check_broker_connection(client.connection_state()) == circuit_breaker.BREAKER_BROKER_DISCONNECTED
+
+
+def test_on_connection_closed_never_overrides_a_halted_state():
+    """A hard breaker (e.g. LIVE_ACCOUNT_BLOCKED) must stay HALTED even
+    if the socket also happens to close - HALTED is deliberately never
+    auto-cleared by anything, including this."""
+    from src.execution.broker import CONNECTION_HALTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_HALTED
+
+    client._on_connection_closed()
+
+    assert client.connection_state() == CONNECTION_HALTED
+
+
+def test_on_connection_closed_is_idempotent_when_already_disconnected():
+    from src.execution.broker import CONNECTION_DISCONNECTED
+
+    client = ibkr_client.IBKRClient(ibkr_client.IBKRConfig(host="127.0.0.1", port=7497, client_id=1, account_id=None))
+    client._state = CONNECTION_DISCONNECTED
+
+    client._on_connection_closed()
+    client._on_connection_closed()
+
+    assert client.connection_state() == CONNECTION_DISCONNECTED

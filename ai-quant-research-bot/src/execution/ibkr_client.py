@@ -276,11 +276,31 @@ class IBKRClient:
     everything above it never needs to know whether it's talking to this
     or to `FakeBroker`.
 
-    Connection health states (Part C): CONNECTING -> CONNECTED, or
-    DEGRADED (heartbeat missed, reconnecting) -> DISCONNECTED (gave up) ->
+    Connection health states (Part C): CONNECTING -> CONNECTED ->
+    DISCONNECTED (TWS closed the socket, detected via `ibapi`'s
+    `connectionClosed()` callback - see `_on_connection_closed()`) or
     HALTED (a hard breaker fired, e.g. LIVE_ACCOUNT_BLOCKED - deliberately
     NOT auto-reconnected). No order is ever submitted while `state()` is
-    anything other than CONNECTED.
+    anything other than CONNECTED - `circuit_breaker.check_broker_connection()`
+    is what actually freezes new entries on this, every tick
+    (`position_monitor.run_one_tick()`).
+
+    **`DEGRADED` (heartbeat-based, with an active reconnect loop) is
+    defined in `broker.py` but deliberately NOT implemented here** - an
+    earlier version of this docstring described it as if it were,
+    which was never true: nothing in this class ever set `_state` to
+    `DEGRADED`, and before `_on_connection_closed()` existed, nothing
+    set it to `DISCONNECTED` on a live drop either, so a dead socket
+    could leave `_state` wrongly stuck at `CONNECTED` indefinitely
+    (found via `docs/platform/BROKER_REFERENCE_REVIEW.md`'s comparison
+    against LumiBot's/LEAN's own IBKR brokers - LEAN runs an active
+    heartbeat thread with a bounded reconnect-with-backoff loop; that
+    is real, non-trivial, hard-to-offline-test behavior this project
+    deliberately has NOT copied - see that doc for why). What exists
+    today is strictly passive and fails closed: detect the drop, stop
+    allowing new entries, and require the SAME manual recovery
+    (`position_monitor` must be restarted, which already replays the
+    journal - see `main()`'s docstring) as any other disconnect.
     """
 
     # Seconds to wait for TWS's connection handshake (nextValidId) and for
@@ -309,6 +329,24 @@ class IBKRClient:
 
     def connection_state(self) -> str:
         return self._state
+
+    def _on_connection_closed(self) -> None:
+        """Called from `_IBWrapper.connectionClosed()` (real `ibapi`
+        callback, fired when TWS closes the socket) - also called
+        directly in `tests/test_execution_ibkr_client.py`'s offline
+        tests, which is exactly why this is its own small, pure,
+        ibapi-free method rather than inline logic inside the wrapper
+        closure. Never flips OUT of `CONNECTION_HALTED` (a hard
+        breaker like `LIVE_ACCOUNT_BLOCKED` must stay halted even if
+        the socket also happened to close) - every other state
+        degrades to `CONNECTION_DISCONNECTED`, which
+        `circuit_breaker.check_broker_connection()` already treats as
+        "freeze new entries."
+        """
+        if self._state == CONNECTION_HALTED:
+            return
+        self._state = CONNECTION_DISCONNECTED
+        self._verified_account = None
 
     def connect(self) -> None:
         """Connects, then IMMEDIATELY verifies the account is PAPER before
@@ -356,6 +394,8 @@ class IBKRClient:
         from ibapi.client import EClient
         from ibapi.wrapper import EWrapper
 
+        client = self  # captured by closure - see connectionClosed() below
+
         class _IBWrapper(EWrapper):
             def __init__(self) -> None:
                 EWrapper.__init__(self)
@@ -392,6 +432,17 @@ class IBKRClient:
             def nextValidId(self, orderId: int) -> None:  # noqa: N802 - ibapi's own callback name
                 self.next_order_id = orderId
                 self.connected_event.set()
+
+            def connectionClosed(self) -> None:  # noqa: N802 - ibapi's own callback name
+                # Real evidence this detection was MISSING before (see
+                # docs/platform/BROKER_REFERENCE_REVIEW.md): without
+                # this override, a live TWS/Gateway disconnect left
+                # `client._state` wrongly stuck at CONNECTED forever,
+                # since nothing else in this class ever re-evaluates
+                # it asynchronously - `client` is the enclosing
+                # IBKRClient instance, captured by closure in
+                # _build_app() above.
+                client._on_connection_closed()
 
             def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
                 self.managed_accounts = [a for a in accountsList.split(",") if a]
