@@ -1,0 +1,18 @@
+# Pinned dependencies for the OPTIONAL open-source quant engineering
+# integrations (AI Quant Trading Platform sprint - see
+# docs/platform/OSS_INTEGRATION_AUDIT.md). Installed ONLY into the
+# isolated .venvs/oss_quant/ environment via scripts/setup_oss_quant_env.sh
+# - NEVER into this project's own requirements.txt/environment, same
+# isolation discipline as requirements-tradingagents.txt and for the same
+# reason: vectorbt alone requires pandas>=3.0.3 and numpy>=2.4.6, both
+# major-version bumps past what this project's own code (and its tests)
+# are written and verified against - letting that leak into the main
+# environment could silently break main.py/execution/ in ways no test
+# here would catch until a real production run hit it.
+#
+# All three were individually verified (real PyPI metadata, real LICENSE
+# files, real import/execution in a throwaway venv) in
+# docs/platform/OSS_INTEGRATION_AUDIT.md before being pinned here.
+quantstats==0.0.86   # Apache-2.0
+vectorbt==1.1.1       # Apache-2.0 WITH Commons Clause - internal/non-commercial use only, see audit doc
+ccxt==4.5.85          # MIT
