@@ -21,7 +21,7 @@ export const ZONE_POSITIONS: Record<ZoneId, { x: number; y: number; label: strin
   learning_desk: { x: 780, y: 460, label: "Learning Desk" },
 };
 
-const DEBATE_OFFSET = 35;
+const DEBATE_OFFSET = 46; // wide enough apart that the two name labels never collide
 
 export const AGENTS: AgentDef[] = [
   { id: "market_scout", label: "Market Scout", color: 0x4fd1c5, home: ZONE_POSITIONS.scout_desk },
