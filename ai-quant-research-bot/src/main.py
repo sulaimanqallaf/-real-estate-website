@@ -28,6 +28,7 @@ from . import (
     risk_manager,
     signal_scorer,
     strategy_memory,
+    universe,
 )
 from .data_providers import macro_provider, options_flow_provider
 from .execution import execution_policy, order_manager, process_lock, run_health
@@ -639,9 +640,10 @@ def run(config_path: str | None = None) -> int:
 def _execute(config: dict[str, Any], logger: logging.Logger) -> int:
     logger.info("Starting AI Quant Research Bot run (research/alerts only, no trading)")
 
-    symbols = config["tickers"]
+    symbols = universe.resolve_universe(config, logger)
     price_data = data_collector.fetch_all_price_history(symbols, config, logger)
     failed_symbols = [s for s in symbols if s not in price_data]
+    universe.record_fetch_outcomes(config, symbols, failed_symbols)
 
     if not price_data:
         logger.error("No symbols could be fetched. Aborting run.")

@@ -60,6 +60,26 @@ strategy_universe:
   momentum_breakout: [VOO, VGT, SMH, AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN]
   trend_following: [SPY, QQQ, VOO, VGT, SMH, AAPL, MSFT, NVDA, AMD, META, TSLA, GOOGL, AMZN, GLD, USO]
 
+# AI Quant Trading Platform sprint, deliverable A: configurable, screened
+# symbol universe (src/universe.py). DISABLED BY DEFAULT - when `enabled` is
+# false (or this whole section is removed), `tickers:` above is used exactly
+# as it always has been; nothing about today's 15-symbol deployment changes
+# until you deliberately opt in. When enabled, `tickers:` above is replaced
+# (for data-fetch/scoring purposes only) by `candidate_pool` screened down to
+# `max_symbols` by cached price/liquidity - see src/universe.py's docstring
+# for exactly how. Expanding past the original 15 means `strategy_universe`/
+# `sector_map` above won't have entries for the new symbols; they'll still be
+# fetched, scored, and reported, just without a strategy-specific candidate
+# (the same graceful fallback an unassigned ticker already gets today) until
+# you extend those maps too.
+universe:
+  enabled: false
+  max_symbols: 100
+  min_price: 5.0
+  min_avg_dollar_volume: 10000000   # $10M/day average - a basic liquidity floor
+  max_consecutive_failures_before_exclusion: 5
+  # candidate_pool: [ ... ]   # omit to use src/universe.py's DEFAULT_CANDIDATE_POOL (~110 liquid US equities/ETFs)
+
 data:
   history_period: "2y"      # yfinance period for daily download (need 200D MA + 1y backtest)
   interval: "1d"             # Version 1 daily bars for indicators/strategies/backtest.
