@@ -31,15 +31,32 @@ Alpaca Data, etc.), get an API key, and implement one more
 `data_providers/*_provider.py` against the existing `ProviderResult`
 contract — the interface is already there and doesn't need to change.
 
-## 3. Forex/crypto feed and broker support
-**Blocks**: any REAL forex/crypto functionality (today: interface stubs only,
-honestly `STATUS_UNAVAILABLE`).
-**What you'd need to do**: pick a feed/broker for each asset class; IBKR
-itself supports both, so `ibkr_client.py` could eventually be extended rather
-than replaced — but `order_state.py`'s `OrderIntent` is currently hard-scoped
-to equity/ETF by design (a deliberate safety boundary, not an oversight) and
-widening it is real work that deserves its own reviewed milestone, not a
-drive-by change buried in this sprint.
+## 3. Forex feed and broker support; crypto broker support (data is now real)
+**Blocks**: forex functionality (still an interface stub, honestly
+`STATUS_UNAVAILABLE` - no free public forex OHLCV vendor is wired up) and
+ANY crypto/forex TRADING (by design - `order_state.py`'s `OrderIntent` is
+hard-scoped to equity/ETF, a deliberate safety boundary, not an oversight).
+
+**Crypto DATA is no longer blocked by missing code** (Phase 6, AI Quant
+Trading Platform sprint): `data_providers/crypto_provider.py` now makes a
+real CCXT `fetch_ohlcv` call (rate-limited, no API key required for public
+OHLCV) via the isolated `.venvs/oss_quant/` environment - see
+`docs/platform/OSS_INTEGRATION_AUDIT.md` item 8. What's genuinely still
+blocked is verifying a real exchange response from THIS sandbox: its egress
+proxy returns a `403 Forbidden organization policy` CONNECT-tunnel
+rejection on every crypto-exchange host tried (`api.binance.com`,
+`api.coinbase.com`) - confirmed directly, not assumed. On a deployment with
+real outbound network access, `crypto_provider.fetch_ohlcv()` should return
+real `STATUS_OK` candles with no further code changes.
+
+**What you'd need to do** (to broker-verify crypto trading, which is NOT
+enabled by the above): pick a broker for each asset class; IBKR itself
+supports both forex and crypto, so `ibkr_client.py` could eventually be
+extended rather than replaced — but widening `OrderIntent` past equity/ETF
+is real work that deserves its own reviewed milestone, not a drive-by
+change buried in this sprint. For forex DATA specifically, you'd also need
+to pick and wire up a vendor the same way `data_providers/*_provider.py`'s
+existing `ProviderResult` contract already supports.
 
 ## 4. Real copyrighted books/research for the RAG knowledge library
 **Blocks**: the knowledge library having anything indexed beyond the

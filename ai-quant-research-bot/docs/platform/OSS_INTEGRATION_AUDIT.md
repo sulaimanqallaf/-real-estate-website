@@ -265,7 +265,7 @@ further action needed here.
 | 5 | QuantStats | **INTEGRATE** | Yes (isolated venv, optional) |
 | 6 | Freqtrade/FreqAI | CONCEPT | No (GPL-3.0) |
 | 7 | FinRL | REJECT | No |
-| 8 | CCXT | **INTEGRATE** (code) | Yes (isolated venv, optional) — live network unverified in sandbox |
+| 8 | CCXT | **INTEGRATE** (code) | Yes (isolated venv, optional) — `data_providers/crypto_provider.py` now real (Phase 6); live network in this sandbox still blocked, tested via mocked fixtures |
 | 9 | Jesse | REJECT | No |
 | 10 | LEAN | REFERENCE | No |
 | 11 | ml4t/data | REJECT | No (Python 3.12+ required) |

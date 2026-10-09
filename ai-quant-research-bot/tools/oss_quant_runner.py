@@ -267,7 +267,11 @@ def _run_ccxt_ohlcv(request: dict[str, Any]) -> dict[str, Any]:
     if not hasattr(ccxt, exchange_id):
         return {"ok": False, "error": f"unknown ccxt exchange id: {exchange_id!r}", "error_type": "ValueError"}
 
-    exchange = getattr(ccxt, exchange_id)()
+    # enableRateLimit=True makes ccxt sleep between calls to stay under
+    # the exchange's own published rate limit - required by the sprint
+    # rule "enforce real provider rate limits" and by basic courtesy to
+    # a free public endpoint; ccxt defaults this to False if omitted.
+    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     except Exception as exc:  # noqa: BLE001 - a real network/exchange error, reported honestly, never fabricated as data
