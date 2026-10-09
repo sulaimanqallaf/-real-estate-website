@@ -176,9 +176,20 @@ list:
 
 ## I. No-Terminal User Experience
 
-- [x] **This sprint**: `mac_launcher/AI Quant Dashboard.command` — double-
-  click launcher, dependency check, start/stop dashboard services, opens
-  browser, local status page, read-only launchd status check.
+- [x] **This sprint**: `mac_launcher/` — 4 double-clickable scripts (Start,
+  Stop, Status, Check for Updates). Dependency check + install, start/stop
+  the dashboard's own two services, open the browser, read-only launchd
+  status check, git-based update check with a confirmation prompt and an
+  automatic rollback tag. **Process-management logic was repeatedly run
+  and verified** (not just written) in this sandbox across full start/
+  stop cycles - this caught and fixed a real bug where `Stop` only killed
+  the tracked top-level PID and left `npm run dev`'s actual `vite` child
+  process running; fixed with a recursive process-tree kill, confirmed
+  clean afterward. The macOS-specific pieces (Gatekeeper's unsigned-script
+  warning, the `open` browser command, double-click behavior itself)
+  could NOT be verified from this non-Mac sandbox - see the launcher's own
+  README "Verified, not just written" section for the precise line
+  between the two.
 - [blocked] Signed/notarized `.app` bundle — no Apple Developer signing
   identity is available in this environment; the `.command` launcher is the
   honest unsigned alternative, documented as such (macOS Gatekeeper will warn

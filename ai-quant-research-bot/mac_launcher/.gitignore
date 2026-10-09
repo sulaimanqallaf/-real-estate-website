@@ -1,0 +1,3 @@
+# PID files and logs for the currently-running dashboard - purely local
+# runtime state, never meaningful to commit.
+.run/
