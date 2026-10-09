@@ -81,6 +81,7 @@ def walk_forward_folds(
     step_rows: int | None = None,
     expanding: bool = True,
     timestamp_col: str = "timestamp",
+    embargo_rows: int = 0,
 ) -> list[WalkForwardFold]:
     """Rolling (`expanding=False`) or expanding (`expanding=True`, default)
     walk-forward folds over the GLOBAL chronological order - see module
@@ -88,7 +89,23 @@ def walk_forward_folds(
     window begins (no gap, no overlap): fold `k`'s validation rows are never
     part of fold `k`'s (or any earlier fold's) training rows. `step_rows`
     (default `validation_rows`) controls how far the window advances between
-    folds."""
+    folds.
+
+    `embargo_rows` (default 0, fully backward compatible) drops the LAST
+    `embargo_rows` rows of each fold's train slice before returning it - the
+    "purged" half of purged/embargoed walk-forward CV (a technique this
+    codebase's forward-return labels specifically need: a label at row T is
+    `forward_{horizon}d_return`, built from price data up to T+horizon, so
+    with no gap a train row near the tail of the window carries a label that
+    was computed FROM price action inside the very validation window being
+    used to judge the model - the model would be scored partly on data it
+    implicitly trained on. Callers evaluating an N-day-forward-return label
+    should pass `embargo_rows=N`; see `tests/test_ml_leakage_detection.py`
+    for a reproduction with and without it, and `validator.py`'s
+    `run_walk_forward_evaluation`, which now sets it to the horizon being
+    evaluated). The fold boundary used to decide `validation_start` and the
+    next fold's step is unaffected - only which train rows are included
+    shrinks, so fold cadence/count stays identical to `embargo_rows=0`."""
     step = step_rows or validation_rows
     sorted_df = df.sort_values(timestamp_col).reset_index(drop=True)
     n = len(sorted_df)
@@ -102,22 +119,24 @@ def walk_forward_folds(
         val_start = train_end
         val_end = train_end + validation_rows
 
-        train_slice = sorted_df.iloc[train_start:train_end]
+        purged_train_end = max(train_start, train_end - embargo_rows)
+        train_slice = sorted_df.iloc[train_start:purged_train_end]
         val_slice = sorted_df.iloc[val_start:val_end]
 
-        folds.append(
-            WalkForwardFold(
-                fold_index=fold_index,
-                train=train_slice,
-                validation=val_slice,
-                train_start=train_slice[timestamp_col].iloc[0],
-                train_end=train_slice[timestamp_col].iloc[-1],
-                validation_start=val_slice[timestamp_col].iloc[0],
-                validation_end=val_slice[timestamp_col].iloc[-1],
+        if not train_slice.empty:
+            folds.append(
+                WalkForwardFold(
+                    fold_index=fold_index,
+                    train=train_slice,
+                    validation=val_slice,
+                    train_start=train_slice[timestamp_col].iloc[0],
+                    train_end=train_slice[timestamp_col].iloc[-1],
+                    validation_start=val_slice[timestamp_col].iloc[0],
+                    validation_end=val_slice[timestamp_col].iloc[-1],
+                )
             )
-        )
+            fold_index += 1
 
-        fold_index += 1
         train_end += step
         if not expanding:
             train_start += step

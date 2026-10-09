@@ -218,7 +218,10 @@ def run_walk_forward_evaluation(
     from . import splits as ml_splits
 
     names = feature_names or ml_features.FEATURE_WHITELIST
-    folds = ml_splits.walk_forward_folds(df, min_train_rows, validation_rows, expanding=expanding)
+    # embargo_rows=horizon: a forward_{horizon}d_return label near the tail
+    # of a fold's train slice is built from price data reaching into that
+    # same fold's validation window - see walk_forward_folds' docstring.
+    folds = ml_splits.walk_forward_folds(df, min_train_rows, validation_rows, expanding=expanding, embargo_rows=horizon)
     if not folds:
         return {"folds": [], "aggregated": None, "reason": "not enough rows for even one walk-forward fold."}
 
