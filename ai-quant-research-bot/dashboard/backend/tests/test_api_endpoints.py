@@ -28,6 +28,8 @@ def client(monkeypatch):
     monkeypatch.setattr(readonly, "backtest_performance", lambda: None)
     monkeypatch.setattr(readonly, "learning_experiments", lambda limit=20: {"models": [], "events": []})
     monkeypatch.setattr(readonly, "market_scanner", lambda limit=100: None)
+    monkeypatch.setattr(readonly, "research_analytics", lambda hypothesis_limit=20: {"performance_report": None, "monte_carlo": None, "regime_breakdown": None, "hypotheses": []})
+    monkeypatch.setattr(readonly, "data_provider_health", lambda: {"providers": []})
     return TestClient(main.app)
 
 
@@ -100,3 +102,21 @@ def test_learning_experiments_endpoint(client):
 def test_market_scanner_endpoint_returns_null_when_none_exists(client):
     response = client.get("/api/market-scanner")
     assert response.json() is None
+
+
+def test_research_analytics_endpoint(client):
+    response = client.get("/api/research-analytics")
+    assert response.status_code == 200
+    assert response.json() == {"performance_report": None, "monte_carlo": None, "regime_breakdown": None, "hypotheses": []}
+
+
+def test_research_analytics_endpoint_respects_hypothesis_limit_param(client, monkeypatch):
+    monkeypatch.setattr(readonly, "research_analytics", lambda hypothesis_limit=20: {"hypothesis_limit_received": hypothesis_limit})
+    response = client.get("/api/research-analytics?hypothesis_limit=5")
+    assert response.json() == {"hypothesis_limit_received": 5}
+
+
+def test_data_provider_health_endpoint(client):
+    response = client.get("/api/data-provider-health")
+    assert response.status_code == 200
+    assert response.json() == {"providers": []}

@@ -282,3 +282,75 @@ def _diagnostics_logger():
     import logging
 
     return logging.getLogger("dashboard.readonly")
+
+
+def research_analytics(hypothesis_limit: int = 20) -> dict[str, Any]:
+    """Phase 7 (AI Quant Trading Platform OSS integration sprint):
+    QuantStats-powered paper-trading performance (Sharpe/Sortino/max
+    drawdown/profit factor/transaction costs), a native Monte Carlo
+    bootstrap stress test over the same real closed trades, a
+    market-regime performance breakdown, and the research-sandbox
+    hypothesis ledger (Phase 2's RD-Agent concept - results only,
+    nothing here can promote a hypothesis into production). Every
+    sub-field is independently `None`/empty (never fabricated) when
+    its own source has nothing yet - `build_performance_report()` and
+    `build_regime_breakdown()` already return `None` rather than a
+    zeroed report, and this function passes that straight through."""
+    from src.analytics import monte_carlo, performance_report, regime_breakdown, trade_history
+    from src.research import hypothesis_ledger
+
+    config = get_config()
+    logger = _diagnostics_logger()
+
+    try:
+        performance = performance_report.build_performance_report(config, logger)
+    except Exception:  # noqa: BLE001 - dashboard diagnostics must never crash on a missing/misconfigured OSS quant venv
+        performance = None
+
+    try:
+        regime = regime_breakdown.build_regime_breakdown(config, logger)
+    except Exception:  # noqa: BLE001
+        regime = None
+
+    mc = None
+    try:
+        closed = trade_history.closed_trade_rows(config)
+        returns_pct = [float(r["pnl_pct"]) for r in closed if r.get("pnl_pct") is not None]
+        if returns_pct:
+            mc = monte_carlo.run_monte_carlo_stress_test(returns_pct)
+    except Exception:  # noqa: BLE001
+        mc = None
+
+    try:
+        db_path = hypothesis_ledger.default_db_path(config)
+        hypotheses = hypothesis_ledger.query_results(db_path)[-hypothesis_limit:]
+    except Exception:  # noqa: BLE001
+        hypotheses = []
+
+    return _redact_deep({
+        "performance_report": performance,
+        "monte_carlo": mc,
+        "regime_breakdown": regime,
+        "hypotheses": hypotheses,
+    })
+
+
+def data_provider_health() -> dict[str, Any]:
+    """Whether each OPTIONAL data provider is configured - a pure
+    `is_configured()`-style check for every one (env var present, or
+    for crypto, whether the isolated oss_quant venv exists), never a
+    real network call. `market_provider.py` (yfinance) isn't included:
+    it's the main pipeline's primary, always-on provider, not one of
+    the optional add-ons this panel is about."""
+    from src.data_providers import crypto_provider, forex_provider, macro_provider, options_flow_provider, sec_provider
+
+    config = get_config()
+    options_flow = options_flow_provider.get_default_provider(config)
+    providers = [
+        {"name": "sec_13f_form4", "configured": sec_provider.sec_identity_configured()},
+        {"name": "fred_macro", "configured": macro_provider.fred_configured()},
+        {"name": "options_flow", "configured": options_flow.is_configured()},
+        {"name": "forex", "configured": forex_provider.forex_configured()},
+        {"name": "crypto", "configured": crypto_provider.crypto_configured(config)},
+    ]
+    return _redact_deep({"providers": providers})

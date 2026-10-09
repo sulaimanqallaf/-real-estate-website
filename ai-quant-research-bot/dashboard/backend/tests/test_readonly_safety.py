@@ -55,6 +55,17 @@ def test_readonly_module_only_imports_the_allow_listed_src_modules():
         "src.ml.decision_ledger", "src.ml.model_registry", "src.ml.model_events",
         "src.utils.load_config", "src.utils.redact_secrets", "src.utils.resolve_path",
         "src.intelligence.tradingagents_adapter", "src.paper_trades", "src.universe",
+        # AI Quant Trading Platform OSS integration sprint, Phase 7: all
+        # read-only, subprocess-isolated analytics (no broker/execution
+        # access - see src/analytics/oss_quant_adapter.py and
+        # src/research/sandbox.py's own safety boundaries) plus
+        # is_configured()-only data-provider checks (no network call).
+        "src.analytics.monte_carlo", "src.analytics.performance_report",
+        "src.analytics.regime_breakdown", "src.analytics.trade_history",
+        "src.research.hypothesis_ledger",
+        "src.data_providers.crypto_provider", "src.data_providers.forex_provider",
+        "src.data_providers.macro_provider", "src.data_providers.options_flow_provider",
+        "src.data_providers.sec_provider",
     }
     tree = ast.parse((BACKEND_ROOT / "app" / "readonly.py").read_text(encoding="utf-8"))
     found = set()

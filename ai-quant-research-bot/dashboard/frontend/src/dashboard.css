@@ -131,6 +131,20 @@ html, body, #root {
 .panel-row-label { color: var(--text-dim); }
 .panel-row-value { color: var(--text); font-family: monospace; }
 
+.panel-subsection-title {
+  margin: 10px 0 4px 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.panel-subsection-title:first-child { border-top: none; padding-top: 0; }
+
+.status-ok { color: var(--ok); }
+.status-unconfigured { color: var(--text-dim); }
+
 .timeline-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
 
 .timeline-item {

@@ -1,7 +1,7 @@
 import type {
-  BacktestPerformance, DecisionRow, HealthReport, LearningExperiments, MarketScanner,
-  ModesAvailability, PaperPnlSummary, PositionsAndOrders, RiskStatus, RunStatus,
-  SpendSummary, TradingAgentsResult,
+  BacktestPerformance, DataProviderHealth, DecisionRow, HealthReport, LearningExperiments,
+  MarketScanner, ModesAvailability, PaperPnlSummary, PositionsAndOrders, ResearchAnalytics,
+  RiskStatus, RunStatus, SpendSummary, TradingAgentsResult,
 } from "./types";
 
 export const API_BASE = import.meta.env.VITE_DASHBOARD_API_BASE ?? "http://localhost:8800";
@@ -26,4 +26,6 @@ export const api = {
   backtestPerformance: () => getJson<BacktestPerformance | null>("/api/backtest-performance"),
   learningExperiments: (limit = 20) => getJson<LearningExperiments>(`/api/learning-experiments?limit=${limit}`),
   marketScanner: (limit = 100) => getJson<MarketScanner | null>(`/api/market-scanner?limit=${limit}`),
+  researchAnalytics: (hypothesisLimit = 20) => getJson<ResearchAnalytics>(`/api/research-analytics?hypothesis_limit=${hypothesisLimit}`),
+  dataProviderHealth: () => getJson<DataProviderHealth>("/api/data-provider-health"),
 };

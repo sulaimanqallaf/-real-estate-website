@@ -171,3 +171,83 @@ export interface MarketScanner {
   tickers: ScannerTicker[];
   universe_size: number;
 }
+
+// AI Quant Trading Platform OSS integration sprint (Phase 7): QuantStats/
+// Monte Carlo/regime/hypothesis-ledger analytics - see
+// dashboard/backend/app/readonly.py's research_analytics().
+
+export interface PerformanceReport {
+  basis: string;
+  trade_count: number;
+  sharpe: number | null;
+  sortino: number | null;
+  max_drawdown: number | null;
+  profit_factor: number | null;
+  win_rate: number | null;
+  exposure: number | null;
+  total_commission_usd: number | null;
+  avg_slippage_pct: number | null;
+  [key: string]: unknown;
+}
+
+export interface MonteCarloPercentiles {
+  p5: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p95: number;
+}
+
+export interface MonteCarloStressTest {
+  n_trades: number;
+  n_simulations: number;
+  observed_total_return_pct: number;
+  observed_max_drawdown_pct: number;
+  simulated_total_return_pct: MonteCarloPercentiles;
+  simulated_max_drawdown_pct: MonteCarloPercentiles;
+  probability_of_loss: number;
+  worst_case_drawdown_pct: number;
+}
+
+export interface RegimeBreakdownRow {
+  regime: string;
+  trade_count: number;
+  win_rate_pct: number;
+  avg_pnl_pct: number;
+  total_pnl_dollars: number | null;
+}
+
+export interface RegimeBreakdown {
+  rows: RegimeBreakdownRow[];
+  total_closed_trades: number;
+  excluded_insufficient_sample: number;
+  min_trades_per_regime_row: number;
+}
+
+export interface HypothesisResultRow {
+  hypothesis_id: string;
+  description?: string | null;
+  strategy_name: string;
+  symbol: string;
+  data_provenance: string;
+  trade_count: number | null;
+  stats: Record<string, unknown> | null;
+  recorded_at: string;
+  [key: string]: unknown;
+}
+
+export interface ResearchAnalytics {
+  performance_report: PerformanceReport | null;
+  monte_carlo: MonteCarloStressTest | null;
+  regime_breakdown: RegimeBreakdown | null;
+  hypotheses: HypothesisResultRow[];
+}
+
+export interface DataProviderStatus {
+  name: string;
+  configured: boolean;
+}
+
+export interface DataProviderHealth {
+  providers: DataProviderStatus[];
+}

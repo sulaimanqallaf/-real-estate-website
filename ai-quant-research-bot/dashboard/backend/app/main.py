@@ -109,6 +109,16 @@ def api_market_scanner(limit: int = 100) -> dict | None:
     return readonly.market_scanner(limit=limit)
 
 
+@app.get("/api/research-analytics")
+def api_research_analytics(hypothesis_limit: int = 20) -> dict:
+    return readonly.research_analytics(hypothesis_limit=hypothesis_limit)
+
+
+@app.get("/api/data-provider-health")
+def api_data_provider_health() -> dict:
+    return readonly.data_provider_health()
+
+
 @app.get("/api/modes")
 def api_modes() -> dict:
     return {"live": True, "replay": True, "demo": _demo_mode_allowed()}
