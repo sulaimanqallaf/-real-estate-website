@@ -147,6 +147,32 @@ def test_run_one_tick_records_a_heartbeat_even_while_disconnected():
     assert status_after["stale"] is False
 
 
+def test_run_one_tick_fails_closed_when_broker_disconnects_mid_tick(monkeypatch):
+    """Sprint 3: the connection_state() check at the TOP of run_one_tick
+    only proves the broker was reachable then - reconcile() itself
+    calls broker.positions()/open_orders() LATER in the same tick,
+    which can raise if the connection drops in between. Before the
+    fix, this exception propagated out of run_one_tick() entirely
+    (contradicting its own "never raises" docstring); the real
+    behavior must be failing closed via a reported RECONCILIATION_
+    CHECK_FAILED discrepancy, not a crash."""
+    broker = FakeBroker()
+    broker.connect()
+    manager = order_manager.OrderManager(broker, PERMISSIVE_CONFIG)
+
+    def _disconnect_then_raise():
+        raise ConnectionError("simulated mid-tick broker disconnect")
+
+    monkeypatch.setattr(broker, "positions", _disconnect_then_raise)
+
+    tick = position_monitor.run_one_tick(broker, manager, PERMISSIVE_CONFIG, [], logger)  # must not raise
+
+    assert tick["reconciliation"].ok is False
+    assert any(d.kind == reconciliation.DISCREPANCY_CHECK_FAILED for d in tick["reconciliation"].discrepancies)
+    assert tick["new_entries_allowed"] is False
+    assert tick["breakers"].blocked is True
+
+
 def test_run_one_tick_polls_fills_for_in_flight_orders_and_syncs_protection():
     broker = FakeBroker()
     broker.connect()

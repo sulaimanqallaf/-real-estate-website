@@ -187,35 +187,47 @@ def record_outcome(
     overwritten, so a duplicate exit-fill poll can never corrupt an
     already-recorded real outcome with a second, possibly different,
     value). Returns True if a row was updated, False if no matching
-    (outcome-less) row exists for this trade_id - never raises; a ledger
-    write failing must never block the actual trade closure it's
-    recording."""
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT decision_id, signal_entry_price FROM decisions WHERE trade_id = ? AND outcome_status IS NULL ORDER BY as_of DESC LIMIT 1",
-            (trade_id,),
-        ).fetchone()
-        if row is None:
-            return False
+    (outcome-less) row exists for this trade_id OR if the write itself
+    failed (e.g. `sqlite3.OperationalError: database is locked`,
+    verified directly under Sprint 3's fault-injection tests) - never
+    raises; a ledger write failing must never block the actual trade
+    closure it's recording. A caller sees the identical `False` either
+    way and should treat it the same: the trade still closed
+    correctly elsewhere (`paper_trades.close_trade_with_actual_fill()`
+    already ran first - see `execution/learning_feedback.py`'s call
+    order), this ledger row just didn't get its outcome recorded this
+    attempt and will be retried the next time this trade_id's exit is
+    polled.
+    """
+    try:
+        with _connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT decision_id, signal_entry_price FROM decisions WHERE trade_id = ? AND outcome_status IS NULL ORDER BY as_of DESC LIMIT 1",
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return False
 
-        signal_entry_price = row["signal_entry_price"]
-        slippage_pct = None
-        if actual_entry_price is not None and signal_entry_price:
-            slippage_pct = (actual_entry_price - signal_entry_price) / signal_entry_price
+            signal_entry_price = row["signal_entry_price"]
+            slippage_pct = None
+            if actual_entry_price is not None and signal_entry_price:
+                slippage_pct = (actual_entry_price - signal_entry_price) / signal_entry_price
 
-        conn.execute(
-            """UPDATE decisions SET
-                outcome_status = ?, exit_reason = ?, exited_at = ?, pnl_dollars = ?, pnl_pct = ?,
-                actual_entry_price = ?, actual_exit_price = ?, commission = ?, provenance = ?,
-                slippage_pct = ?, outcome_recorded_at = ?
-            WHERE decision_id = ?""",
-            (
-                outcome_status, exit_reason, exited_at, pnl_dollars, pnl_pct,
-                actual_entry_price, actual_exit_price, commission, provenance,
-                slippage_pct, as_of or _now_iso(), row["decision_id"],
-            ),
-        )
-    return True
+            conn.execute(
+                """UPDATE decisions SET
+                    outcome_status = ?, exit_reason = ?, exited_at = ?, pnl_dollars = ?, pnl_pct = ?,
+                    actual_entry_price = ?, actual_exit_price = ?, commission = ?, provenance = ?,
+                    slippage_pct = ?, outcome_recorded_at = ?
+                WHERE decision_id = ?""",
+                (
+                    outcome_status, exit_reason, exited_at, pnl_dollars, pnl_pct,
+                    actual_entry_price, actual_exit_price, commission, provenance,
+                    slippage_pct, as_of or _now_iso(), row["decision_id"],
+                ),
+            )
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def query_decisions(

@@ -19,6 +19,13 @@ DISCREPANCY_BROKER_POSITION_LOCAL_MISSING = "BROKER_POSITION_LOCAL_MISSING"
 DISCREPANCY_UNKNOWN_ORDER = "UNKNOWN_ORDER"
 DISCREPANCY_QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
 DISCREPANCY_FILL_MISMATCH = "FILL_MISMATCH"
+# Sprint 3 (Reliability milestone: "test broker disconnections... make
+# all trading safety checks fail closed"): a real broker call
+# (reconcile() itself calls broker.positions()/open_orders()) can raise
+# if the connection drops MID-TICK, after position_monitor.run_one_
+# tick()'s own top-of-tick connection_state() check already passed.
+# Never silently treated as "clean" - see run_one_tick()'s use of this.
+DISCREPANCY_CHECK_FAILED = "RECONCILIATION_CHECK_FAILED"
 
 
 @dataclass(frozen=True)

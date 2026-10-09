@@ -6,6 +6,12 @@ venv/
 # scripts/setup_tradingagents_env.sh from the pinned commit in
 # requirements-tradingagents.txt.
 .venvs/
+
+# Downloaded toxiproxy-server binary (Sprint 3, Reliability milestone -
+# scripts/setup_toxiproxy.sh) - never committed, same discipline as
+# .venvs/ above.
+.bin/
+
 __pycache__/
 *.pyc
 .pytest_cache/

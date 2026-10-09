@@ -60,7 +60,25 @@ def run_one_tick(
         for m in manager.all_managed()
         if m.entry_broker_order_id and m.state not in ("CANCELLED", "REJECTED", "CLOSED", "ERROR")
     ]
-    report = reconciliation.reconcile(broker, local_open_trades, local_open_orders)
+    # Sprint 3 (Reliability: "test broker disconnections... make all
+    # trading safety checks fail closed"): the connection_state() check
+    # above only proves the broker was reachable at the TOP of this
+    # tick - reconcile() itself calls broker.positions()/open_orders(),
+    # which CAN raise if the connection drops mid-tick (a real,
+    # previously-unguarded gap: this function's own docstring claims
+    # "never raises," which wasn't actually true before this fix).
+    # safe_run() turns that into a real, visible RECONCILIATION_CHECK_
+    # FAILED discrepancy - fails closed (blocks new entries) via the
+    # EXISTING circuit_breaker.check_reconciliation() path, rather than
+    # letting the exception propagate out of run_one_tick() and crash
+    # the whole process (not unsafe either way - launchd's KeepAlive
+    # would restart it - but far more disruptive than necessary for
+    # what may be a momentary blip).
+    report = safe_run(logger, "reconciliation", lambda: reconciliation.reconcile(broker, local_open_trades, local_open_orders))
+    if report is None:
+        report = reconciliation.ReconciliationReport(
+            discrepancies=[reconciliation.Discrepancy(reconciliation.DISCREPANCY_CHECK_FAILED, None, "reconciliation itself raised - see log for the real exception; treating as a failure, not as clean")]
+        )
     if not report.ok:
         logger.error("Position monitor: reconciliation discrepancies found:\n%s", report.summary())
     # Durable, cross-process record - this is what lets main.py's daily
@@ -71,7 +89,14 @@ def run_one_tick(
     circuit_breaker.record_reconciliation_status(config, report.ok, report.summary() if not report.ok else None)
 
     live_inputs = circuit_breaker.live_risk_inputs(config)
-    live_inputs["current_open_positions"] = len(broker.positions())  # the broker's own count is more authoritative here than paper_trades.csv's OPEN rows
+    # The broker's own count is normally more authoritative than
+    # paper_trades.csv's OPEN rows - but if THIS call also fails (same
+    # underlying disconnect that may have just failed reconciliation
+    # above), fall back to the local count rather than letting the
+    # exception propagate; the reconciliation failure recorded above
+    # already fails closed regardless of which number lands here.
+    broker_position_count = safe_run(logger, "broker.positions() count", lambda: len(broker.positions()))
+    live_inputs["current_open_positions"] = broker_position_count if broker_position_count is not None else len(local_open_trades)
     breaker_result = circuit_breaker.check_all(
         config,
         account=safe_run(logger, "account_summary", broker.account_summary),
