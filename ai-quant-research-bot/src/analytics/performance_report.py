@@ -34,25 +34,13 @@ import logging
 from typing import Any
 
 from . import oss_quant_adapter
+from .trade_history import closed_trade_rows
 
 MIN_TRADES_FOR_REPORT = 5
 
 
-def _closed_trade_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
-    from ..ml import decision_ledger
-
-    db_path = decision_ledger.resolve_db_path(config)
-    rows = decision_ledger.query_decisions(db_path, only_with_outcome=True)
-    return [
-        r for r in rows
-        if r.get("outcome_status") not in (None, decision_ledger.OUTCOME_NOT_TRADED)
-        and r.get("pnl_pct") is not None
-        and r.get("exited_at") is not None
-    ]
-
-
 def build_performance_report(config: dict[str, Any], logger: logging.Logger) -> dict[str, Any] | None:
-    closed = _closed_trade_rows(config)
+    closed = closed_trade_rows(config)
     if len(closed) < MIN_TRADES_FOR_REPORT:
         logger.info(
             "Performance report unavailable: %d closed trade(s) with a recorded outcome, need at least %d.",
