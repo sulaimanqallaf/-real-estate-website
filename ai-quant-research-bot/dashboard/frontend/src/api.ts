@@ -1,5 +1,6 @@
 import type {
-  DecisionRow, HealthReport, ModesAvailability, PaperPnlSummary, RunStatus,
+  BacktestPerformance, DecisionRow, HealthReport, LearningExperiments, MarketScanner,
+  ModesAvailability, PaperPnlSummary, PositionsAndOrders, RiskStatus, RunStatus,
   SpendSummary, TradingAgentsResult,
 } from "./types";
 
@@ -20,4 +21,9 @@ export const api = {
   spend: () => getJson<SpendSummary | null>("/api/spend"),
   paperPnl: () => getJson<PaperPnlSummary | null>("/api/paper-pnl"),
   modes: () => getJson<ModesAvailability>("/api/modes"),
+  positionsAndOrders: (limit = 50) => getJson<PositionsAndOrders>(`/api/positions-orders?limit=${limit}`),
+  risk: () => getJson<RiskStatus>("/api/risk"),
+  backtestPerformance: () => getJson<BacktestPerformance | null>("/api/backtest-performance"),
+  learningExperiments: (limit = 20) => getJson<LearningExperiments>(`/api/learning-experiments?limit=${limit}`),
+  marketScanner: (limit = 100) => getJson<MarketScanner | null>(`/api/market-scanner?limit=${limit}`),
 };

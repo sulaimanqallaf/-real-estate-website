@@ -108,3 +108,66 @@ export interface ModesAvailability {
   replay: boolean;
   demo: boolean;
 }
+
+export interface JournalRow {
+  event?: string;
+  type?: string;
+  ticker?: string | null;
+  trade_id?: string | null;
+  state?: string;
+  filled_quantity?: number | null;
+  avg_fill_price?: number | null;
+  rejection_reason?: string | null;
+  [key: string]: unknown;
+}
+
+export interface PositionsAndOrders {
+  rows: JournalRow[];
+  total_count: number;
+}
+
+export interface RiskStatus {
+  breaker: { halted: boolean; reason: string | null };
+  limits: Record<string, number>;
+}
+
+export interface BacktestPerformance {
+  report_date: string;
+  rows: Record<string, unknown>[];
+}
+
+export interface ModelMetadataRow {
+  model_id: string;
+  model_type?: string;
+  task?: string;
+  target?: string;
+  horizon?: number;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export interface ModelEventRow {
+  event: string;
+  model_id: string;
+  model_type?: string | null;
+  reason?: string | null;
+  recorded_at?: string;
+  [key: string]: unknown;
+}
+
+export interface LearningExperiments {
+  models: ModelMetadataRow[];
+  events: ModelEventRow[];
+}
+
+export interface ScannerTicker {
+  symbol?: string;
+  score?: number;
+  [key: string]: unknown;
+}
+
+export interface MarketScanner {
+  report_date: string | null;
+  tickers: ScannerTicker[];
+  universe_size: number;
+}

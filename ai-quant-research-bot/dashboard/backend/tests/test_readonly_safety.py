@@ -52,8 +52,9 @@ def test_readonly_module_only_imports_the_allow_listed_src_modules():
     allow-list so a future edit can't quietly widen it."""
     allowed = {
         "src.execution.circuit_breaker", "src.execution.run_health",
-        "src.ml.decision_ledger", "src.utils.load_config", "src.utils.redact_secrets",
-        "src.intelligence.tradingagents_adapter", "src.paper_trades",
+        "src.ml.decision_ledger", "src.ml.model_registry", "src.ml.model_events",
+        "src.utils.load_config", "src.utils.redact_secrets", "src.utils.resolve_path",
+        "src.intelligence.tradingagents_adapter", "src.paper_trades", "src.universe",
     }
     tree = ast.parse((BACKEND_ROOT / "app" / "readonly.py").read_text(encoding="utf-8"))
     found = set()

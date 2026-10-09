@@ -84,6 +84,31 @@ def api_paper_pnl() -> dict | None:
     return readonly.paper_pnl_summary()
 
 
+@app.get("/api/positions-orders")
+def api_positions_orders(limit: int = 50) -> dict:
+    return readonly.positions_and_orders(limit=limit)
+
+
+@app.get("/api/risk")
+def api_risk() -> dict:
+    return readonly.risk_status()
+
+
+@app.get("/api/backtest-performance")
+def api_backtest_performance() -> dict | None:
+    return readonly.backtest_performance()
+
+
+@app.get("/api/learning-experiments")
+def api_learning_experiments(limit: int = 20) -> dict:
+    return readonly.learning_experiments(limit=limit)
+
+
+@app.get("/api/market-scanner")
+def api_market_scanner(limit: int = 100) -> dict | None:
+    return readonly.market_scanner(limit=limit)
+
+
 @app.get("/api/modes")
 def api_modes() -> dict:
     return {"live": True, "replay": True, "demo": _demo_mode_allowed()}

@@ -23,6 +23,11 @@ def client(monkeypatch):
     monkeypatch.setattr(readonly, "tradingagents_outputs", lambda limit=10: [])
     monkeypatch.setattr(readonly, "spend_summary", lambda: None)
     monkeypatch.setattr(readonly, "paper_pnl_summary", lambda: None)
+    monkeypatch.setattr(readonly, "positions_and_orders", lambda limit=50: {"rows": [], "total_count": 0})
+    monkeypatch.setattr(readonly, "risk_status", lambda: {"breaker": {"halted": False}, "limits": {}})
+    monkeypatch.setattr(readonly, "backtest_performance", lambda: None)
+    monkeypatch.setattr(readonly, "learning_experiments", lambda limit=20: {"models": [], "events": []})
+    monkeypatch.setattr(readonly, "market_scanner", lambda limit=100: None)
     return TestClient(main.app)
 
 
@@ -67,3 +72,31 @@ def test_modes_endpoint_reports_demo_enabled_when_env_var_set(client, monkeypatc
     monkeypatch.setenv("DASHBOARD_ALLOW_DEMO", "1")
     response = client.get("/api/modes")
     assert response.json()["demo"] is True
+
+
+def test_positions_orders_endpoint(client):
+    response = client.get("/api/positions-orders")
+    assert response.status_code == 200
+    assert response.json() == {"rows": [], "total_count": 0}
+
+
+def test_risk_endpoint(client):
+    response = client.get("/api/risk")
+    assert response.status_code == 200
+    assert response.json()["breaker"]["halted"] is False
+
+
+def test_backtest_performance_endpoint_returns_null_when_none_exists(client):
+    response = client.get("/api/backtest-performance")
+    assert response.json() is None
+
+
+def test_learning_experiments_endpoint(client):
+    response = client.get("/api/learning-experiments")
+    assert response.status_code == 200
+    assert response.json() == {"models": [], "events": []}
+
+
+def test_market_scanner_endpoint_returns_null_when_none_exists(client):
+    response = client.get("/api/market-scanner")
+    assert response.json() is None
