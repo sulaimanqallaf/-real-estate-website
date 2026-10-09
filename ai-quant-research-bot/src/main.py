@@ -30,7 +30,7 @@ from . import (
     strategy_memory,
 )
 from .data_providers import macro_provider, options_flow_provider
-from .execution import execution_policy, order_manager
+from .execution import execution_policy, order_manager, process_lock, run_health
 from .execution.broker import Broker
 from .ml import decision_ledger
 from .ml import model_registry as ml_model_registry
@@ -585,10 +585,58 @@ def _send_paper_trade_exit_notifications(
 
 
 def run(config_path: str | None = None) -> int:
+    """Public entry point (`python -m src.main`, and the daily launchd
+    job - see README section 6). Daily Reliability & Safe Automation
+    milestone: acquires a singleton lock so two overlapping copies of the
+    daily run can never race each other (same mechanism already used by
+    `position_monitor.py`/`approval_listener.py` - see
+    `execution/process_lock.py`), records start/finish status for the
+    read-only health command (`python -m src.execution.run_health`), and
+    sends a redacted Telegram failure alert if the run raises. None of
+    this changes execution.mode/TradingAgents shadow-mode behavior - it
+    wraps the existing, unmodified pipeline in `_execute()` below."""
     load_env()
     config = load_config(config_path)
     logger = setup_logging(config)
 
+    lock_path = run_health.resolve_lock_path(config)
+    try:
+        lock_file = process_lock.acquire_singleton_lock(
+            lock_path, "daily research run", extra_hint="Skipping this invocation rather than racing it."
+        )
+    except process_lock.ProcessAlreadyRunningError as exc:
+        logger.error(str(exc))
+        return 1
+
+    import os
+
+    try:
+        if os.environ.get("FORCE_RERUN") != "1" and run_health.already_succeeded_today(config):
+            logger.info(
+                "Daily research run already succeeded today - skipping (RunAtLoad likely fired on an "
+                "ordinary login/reboot, not a missed scheduled run; set FORCE_RERUN=1 to override)."
+            )
+            return 0
+        run_health.record_run_start(config)
+        try:
+            exit_code = _execute(config, logger)
+        except Exception as exc:  # noqa: BLE001 - this is the top-level failure boundary the health/alert system exists for; run() must still return cleanly, never propagate
+            summary = f"Unhandled exception: {exc}"
+            logger.error(summary, exc_info=True)
+            run_health.record_run_result(config, ok=False, summary=summary)
+            run_health.send_failure_alert(config, logger, "Daily research run", summary)
+            return 1
+        run_health.record_run_result(
+            config, ok=(exit_code == 0), summary=f"Exit code {exit_code}",
+        )
+        if exit_code != 0:
+            run_health.send_failure_alert(config, logger, "Daily research run", f"Run returned exit code {exit_code} (see logs).")
+        return exit_code
+    finally:
+        lock_file.close()
+
+
+def _execute(config: dict[str, Any], logger: logging.Logger) -> int:
     logger.info("Starting AI Quant Research Bot run (research/alerts only, no trading)")
 
     symbols = config["tickers"]

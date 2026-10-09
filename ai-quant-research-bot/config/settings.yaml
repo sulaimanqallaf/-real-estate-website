@@ -72,6 +72,24 @@ data:
   processed_dir: "data/processed"
   reports_dir: "data/reports"
   journal_dir: "data/journal"
+  # Daily Reliability & Safe Automation milestone: how many calendar days
+  # old the most recently cached daily bar for a ticker can be before
+  # `execution.run_health`'s health/status command flags it as stale (a
+  # weekend spans 2 days with no new bar - 3 gives a little slack before a
+  # Monday-morning false alarm, without hiding a genuinely stalled feed).
+  max_bar_age_days_warning: 3
+
+# Daily Reliability & Safe Automation milestone: purely declarative - kept
+# in sync BY YOU with whatever the real launchd `StartCalendarInterval`
+# plist says (see README section 6), so `execution.run_health`'s "next
+# scheduled run" can report something concrete. Omit this whole section
+# (or `schedule.daily.hour`) to have the health command honestly report
+# "unknown" instead of guessing - this process cannot introspect launchd's
+# own schedule.
+schedule:
+  daily:
+    hour: 17
+    minute: 0
 
 indicators:
   sma_windows: [20, 50, 200]

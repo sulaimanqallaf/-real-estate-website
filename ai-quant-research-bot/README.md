@@ -457,6 +457,8 @@ Create `~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`:
         <key>Minute</key>
         <integer>0</integer>
     </dict>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>/full/path/to/ai-quant-research-bot/data/reports/launchd.out.log</string>
     <key>StandardErrorPath</key>
@@ -469,7 +471,97 @@ Create `~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`:
 launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist
 ```
 
-Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`.
+Verify it's loaded and see when it last ran/will next run:
+
+```bash
+launchctl list | grep aiquantresearchbot
+launchctl list com.aiquantresearchbot.daily   # "LastExitStatus" after at least one run
+```
+
+Stop it with `launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`. To
+remove it entirely: unload it, then `rm ~/Library/LaunchAgents/com.aiquantresearchbot.daily.plist`.
+
+#### What `StartCalendarInterval`/`RunAtLoad` actually do about sleep and reboot
+
+This matters more than it looks, and macOS's real behavior is easy to get
+wrong by assumption:
+
+- **Mac asleep at 17:00, wakes up later the same day:** launchd fires the
+  missed `StartCalendarInterval` job once, shortly after wake. No action
+  needed.
+- **Mac fully off (shut down, not asleep) through 17:00, or the user logs
+  out and back in later:** `StartCalendarInterval` does **not**
+  retroactively fire - launchd only evaluates calendar triggers while the
+  daemon itself is running. This is why the plist above also sets
+  `RunAtLoad` - it runs the job once at every boot/login, so a day that
+  was otherwise completely missed still gets a run once the Mac comes
+  back.
+- **The consequence of adding `RunAtLoad`:** it also fires on a perfectly
+  ordinary boot/login, not only after a missed run - so without a guard,
+  logging out and back in on a normal day would re-run the whole pipeline
+  a second time. `src/main.py`'s `run()` guards against exactly this: it
+  checks `execution/run_health.already_succeeded_today()` and skips
+  the pipeline (logging why, returning exit code 0) if today's run
+  already succeeded, unless you set `FORCE_RERUN=1` in the environment.
+  See `tests/test_main_scheduler_lock.py` for the behavior under test.
+- **Network/API outage at run time:** unaffected by either setting -
+  that's a within-run failure, not a scheduling one. See "Failure
+  monitoring and alerts" below.
+
+#### Overlapping runs can never race each other
+
+`run()` acquires the same kind of exclusive, non-blocking singleton lock
+(`execution/process_lock.py`) already used by the approval listener and
+position monitor, colocated with `data.journal_dir`
+(`main_daily_run.lock`). If a previous invocation is still running (a
+slow day, or a `RunAtLoad` firing while a `StartCalendarInterval` run is
+still in flight) a second invocation logs "Another daily research run is
+already running" and exits immediately with code 1 - it never fetches
+data, never calls an LLM, never touches a broker. See
+`tests/test_main_scheduler_lock.py::test_run_refuses_to_start_a_second_overlapping_copy_without_fetching_anything`.
+
+#### Failure monitoring and alerts
+
+Three independent signals, all surfaced by the health command below and
+(for the first one) a Telegram alert:
+
+1. **The run itself fails** - an unhandled exception, or a non-zero exit
+   code (e.g. "No symbols could be fetched/analyzed"). `run()` catches
+   this at the top level, records it (`execution/run_health.record_run_
+   result()`), and sends ONE Telegram message via
+   `execution/run_health.send_failure_alert()` - the exact same
+   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env vars as the daily report,
+   with the error text run through `utils.redact_secrets()` first (the
+   same pattern `intelligence/tradingagents_adapter.py` already uses for
+   the TradingAgents subprocess's own error text) - an API key or bot
+   token can never appear in the alert.
+2. **Stale cached market data** - `execution/run_health.stale_tickers()`
+   flags any ticker whose most recent cached daily bar
+   (`data_collector.latest_bar_age_days()` - the same signal
+   `circuit_breaker.check_all()` already uses) is older than
+   `data.max_bar_age_days_warning` (default 3 days).
+3. **Individual API timeouts/connectivity errors** - these are already
+   caught and logged per-step by `utils.safe_run()` (one bad symbol/step
+   never kills the whole run) and surfaced by the health command's
+   "Latest errors" tail of `data/reports/app.log`'s `[ERROR]` lines
+   (also redacted).
+
+#### Read-only health/status command
+
+```bash
+cd /full/path/to/ai-quant-research-bot
+.venv/bin/python -m src.execution.run_health
+```
+
+Prints: last run started/finished, last run result, last run summary,
+last success, next scheduled run (from the optional `schedule.daily.hour`/
+`minute` config keys - keep these in sync with the plist above, or it
+honestly reports "unknown" rather than guessing), approximate TradingAgents
+spend today/this month (from the existing spend ledger -
+`intelligence/tradingagents_spend.py` - read-only here), stale cached
+tickers, circuit breaker halt state, and the tail of recent `[ERROR]` log
+lines. Makes zero network/LLM/broker calls itself - see
+`tests/test_execution_run_health_safety.py`.
 
 ### Running it fully autonomously: the canonical services
 

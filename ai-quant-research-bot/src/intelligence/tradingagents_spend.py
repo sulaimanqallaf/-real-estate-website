@@ -21,7 +21,9 @@ never actually ran (e.g. it could not even start the subprocess).
 
 from __future__ import annotations
 
+import random
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -55,20 +57,59 @@ def resolve_ledger_path(config: dict[str, Any]) -> Path:
     return resolve_path("data/ml/tradingagents_spend_ledger.db")
 
 
+# Retry budget for the connect+PRAGMA+schema-init+BEGIN IMMEDIATE sequence
+# below. Root cause of the previously-observed flaky "database is locked"
+# (sqlite3.OperationalError from inside `PRAGMA journal_mode=WAL`): on a
+# brand-new ledger file, converting to WAL mode itself briefly requires an
+# exclusive filesystem lock, and two processes/threads opening the SAME
+# not-yet-WAL file for the first time at the same instant can race for
+# that conversion in a way `connect(timeout=...)`'s busy-wait does not
+# fully absorb (that timeout governs waiting on the normal SQLITE_BUSY
+# path once the DB is already in WAL mode, not this one-time conversion).
+# A bounded retry-with-backoff on a FRESH connection (the failed
+# connection cannot be reused - its pragma/schema state is undefined)
+# makes this self-healing instead of occasionally propagating a spurious
+# failure up through `reserve()`/`commit()`/`release()`.
+_MAX_LOCK_RETRY_ATTEMPTS = 8
+_RETRY_BASE_DELAY_SECONDS = 0.05
+
+
+def _is_lock_contention_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 @contextmanager
 def _connect_immediate(db_path: str | Path) -> Iterator[sqlite3.Connection]:
     """A connection that opens an explicit `BEGIN IMMEDIATE` transaction -
     see module docstring. Schema creation happens BEFORE the transaction
     starts (DDL inside a manually-managed transaction is needlessly
     fragile across sqlite3 driver versions, and offers no concurrency
-    benefit here)."""
+    benefit here). Retries the whole connect+PRAGMA+schema+BEGIN sequence
+    with jittered backoff on lock contention - see `_MAX_LOCK_RETRY_
+    ATTEMPTS`'s comment above for why this is needed even with a
+    connection-level `timeout`."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
-    conn.execute("BEGIN IMMEDIATE")
+
+    conn: sqlite3.Connection | None = None
+    for attempt in range(_MAX_LOCK_RETRY_ATTEMPTS):
+        conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            conn.close()
+            conn = None
+            is_last_attempt = attempt == _MAX_LOCK_RETRY_ATTEMPTS - 1
+            if not _is_lock_contention_error(exc) or is_last_attempt:
+                raise
+            time.sleep(_RETRY_BASE_DELAY_SECONDS * (2**attempt) + random.uniform(0, 0.02))
+
+    assert conn is not None  # loop above either `break`s with conn set, or raises
     try:
         yield conn
         conn.execute("COMMIT")

@@ -87,3 +87,35 @@ def test_concurrent_reservations_never_jointly_exceed_the_daily_cap(tmp_path):
     t2.join()
 
     assert sorted(results.values()) == [False, True]  # exactly one succeeded, never both
+
+
+def test_many_concurrent_first_time_opens_never_raise_database_is_locked(tmp_path):
+    """Regression test for the flaky `sqlite3.OperationalError: database
+    is locked` previously observed from inside `PRAGMA journal_mode=WAL`
+    during `_connect_immediate()`'s first-ever open of a brand-new ledger
+    file: that conversion briefly needs an exclusive lock, and enough
+    threads racing to open the SAME not-yet-WAL file at once could win
+    that race before the retry-with-backoff fix. 16 threads against a
+    single fresh file is a much harder stress case than the 2-thread test
+    above - this must complete with no thread raising, and the running
+    total across every accepted reservation must still never exceed the
+    daily cap."""
+    db = tmp_path / "ledger.db"
+    now = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    results: dict[str, bool] = {}
+    errors: list[BaseException] = []
+
+    def attempt(entry_id):
+        try:
+            results[entry_id] = spend.reserve(db, entry_id, 1.00, daily_limit_usd=5.00, monthly_limit_usd=50.00, now=now)
+        except BaseException as exc:  # noqa: BLE001 - capturing to fail the test with a clear assertion, not a thread-crash traceback
+            errors.append(exc)
+
+    threads = [threading.Thread(target=attempt, args=(f"e{i}",)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert sum(1 for ok in results.values() if ok) == 5  # exactly 5 of 16 $1 reservations fit the $5 cap

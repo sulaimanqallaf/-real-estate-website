@@ -71,3 +71,15 @@ def format_circuit_breaker_notice(newly_tripped: list[str]) -> str:
 
 def format_reconciliation_failure_notice(summary: str) -> str:
     return f"🚨 RECONCILIATION FAILURE (requires attention) - new entries blocked\n{summary}"
+
+
+def format_run_failure_notice(label: str, summary: str) -> str:
+    """Daily Reliability & Safe Automation milestone: a Telegram alert for
+    a failed scheduled run (an unhandled exception, or the whole run
+    aborting with no symbols analyzed) - distinct from the per-symbol
+    `safe_run()` isolation in `main.py`, which already logs and continues.
+    `summary` must already be redacted (see `utils.redact_secrets()`) by
+    the caller - this is pure formatting and never redacts on its own, so
+    it never hides a caller's redaction bug behind a false sense of
+    safety."""
+    return f"🚨 {label} FAILED - needs attention\n{summary}\nCheck the health status command and recent logs for detail."

@@ -74,6 +74,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from ..utils import redact_secrets as _redact
 from . import pricing, tradingagents_spend
 from .schemas import ACTION_BUY, ACTION_HOLD, ACTION_SELL, AgentOpinion, AgentResearchAssessment
 
@@ -107,23 +108,11 @@ _RATING_TO_ACTION = {
 # instruction this session, about the Telegram bot token leaking through
 # HTTP error logs, applies equally here): a provider SDK's own exception
 # text occasionally echoes the key it rejected. Never assume upstream's
-# error strings are already safe to log verbatim.
-_SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
-    re.compile(r"AIza[A-Za-z0-9_-]{10,}"),
-    re.compile(r"(?i)bearer\s+\S+"),
-    re.compile(r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*\S+"),
-]
-
-
-def _redact(text: str | None) -> str:
-    if not text:
-        return ""
-    redacted = text
-    for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
-    return redacted
+# error strings are already safe to log verbatim. `_redact` is now just
+# the shared `utils.redact_secrets()` (promoted there so `execution/
+# run_health.py`'s Telegram failure alert gets the identical protection) -
+# kept as a module-level alias here since existing tests reference
+# `ta._redact` directly.
 
 
 def _repo_root() -> Path:

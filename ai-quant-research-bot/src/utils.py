@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -13,6 +14,30 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 T = TypeVar("T")
+
+# Shared secret-redaction patterns - originally lived only in
+# `intelligence/tradingagents_adapter.py` (an upstream LLM provider's
+# error text occasionally echoes the key it rejected), promoted here so
+# any other module that must log/alert on an arbitrary exception string
+# (e.g. `execution/run_health.py`'s Telegram failure alert) gets the same
+# protection instead of re-inventing or forgetting it. Never assume any
+# upstream or internal error string is already safe to log/send verbatim.
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"AIza[A-Za-z0-9_-]{10,}"),
+    re.compile(r"(?i)bearer\s+\S+"),
+    re.compile(r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*\S+"),
+]
+
+
+def redact_secrets(text: str | None) -> str:
+    if not text:
+        return ""
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
 
 # The ONLY two execution modes this codebase supports, anywhere - see
 # _apply_execution_mode_override() below. There is no IBKR_LIVE mode, and
