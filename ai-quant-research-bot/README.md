@@ -581,6 +581,156 @@ the failure. See `data_collector.bar_freshness()` and
 `tests/test_execution_run_health.py`'s DST-spanning regression test for
 the fix.
 
+#### Production-safe daily scheduling: the NYSE-calendar-aware after-close wrapper
+
+"Final production-safe daily scheduling setup" follow-up: the plain
+`StartCalendarInterval Hour=17 Minute=0` schedule above has a real bug
+that's easy to miss - launchd fires it at 17:00 in whatever timezone the
+Mac's SYSTEM CLOCK is set to, not 16:30 America/New_York. Even on a Mac
+whose system timezone IS US-Eastern, UK and US daylight-saving
+transitions land on different Sundays (UK: last Sunday of March/
+October; US: second Sunday of March / first Sunday of November), so any
+scheme that derives the trigger time from "local clock + fixed offset"
+silently drifts by up to an hour for the 1-2 week mismatch window every
+spring and fall. `execution/market_calendar.py` and `execution/
+after_close.py` fix this by never asking launchd to encode a timezone at
+all - see below.
+
+**How it works:**
+
+1. `com.aiquantresearchbot.afterclose.plist` (below) uses `StartInterval`
+   (fire every 5 minutes, continuously, all day - NOT `StartCalendarInterval`
+   with a fixed hour, and deliberately NO `RunAtLoad`, see point 5 below).
+2. Every 5 minutes, `python -m src.execution.after_close` runs
+   `execution/market_calendar.py`'s `decide_after_close_run()` - pure
+   datetime/calendar math, zero network/LLM/broker calls - which:
+   - Converts "now" to REAL `America/New_York` time via `zoneinfo`
+     (IANA tzdata), independent of the host OS's own timezone setting.
+   - Looks up TODAY in the real NYSE calendar (`pandas_market_calendars`,
+     a maintained data source - never a hand-rolled holiday list).
+     Not a trading day (weekend/holiday) -> skip.
+   - **Early-close policy (explicit, as requested)**: the target run
+     time is always `market_close + 30 minutes` for THAT SPECIFIC DAY,
+     never a fixed 16:30 - so on an early close (e.g. the day after
+     Thanksgiving, 13:00 ET close) it runs at 13:30 ET, not 16:30.
+   - Before the target time -> skip ("too early"). At/after it, AND not
+     already recorded as succeeded today -> proceed to `main.run()`.
+     There is deliberately no upper bound on how late this can still
+     fire: if the Mac was asleep/off through the whole target window and
+     only wakes at 22:00 ET, it still runs once (a late same-day catch-
+     up) rather than silently losing the day - see the module's
+     docstring.
+3. `main.run()` (called only once the decision is "run") is completely
+   unchanged by this milestone - it still owns the singleton lock,
+   same-day-already-succeeded guard, health bookkeeping, and Telegram
+   failure alert from the "Daily Reliability & Safe Automation"
+   milestone above. This is the point under test in
+   `tests/test_execution_after_close.py`.
+
+**Duplicate-run protection (requirement: "across launchd, sleep/wake,
+and manual invocation")** - layered, not reinvented:
+- `after_close.py` itself checks `run_health.already_succeeded_today()`
+  BEFORE deciding to run, so a second `StartInterval` tick 5 minutes
+  after a successful run, a tick right after sleep/wake, and a manual
+  `python -m src.execution.after_close` invocation (no flags) all
+  correctly skip once today's run has already succeeded.
+- `main.run()`'s own singleton lock (`execution/process_lock.py`) is the
+  same-MOMENT guard - if two ticks somehow overlap in time (e.g. a slow
+  run still in flight when the next tick fires), the second one is
+  refused immediately, never double-submits anything.
+
+**Safe `--simulate`/`--dry-run` command** - checks the scheduling
+decision only. Structurally incapable of reaching `src.main` (and
+therefore OpenAI/Telegram/IBKR) - see
+`tests/test_execution_after_close_safety.py`'s AST-based guardrail:
+
+```bash
+cd /full/path/to/ai-quant-research-bot
+.venv/bin/python -m src.execution.after_close --simulate
+# or: --dry-run (identical)
+```
+
+```
+Decision: SKIP - before today's target run time (16:30 EDT - market close + 30min)
+(--simulate: no data fetch, no LLM call, no Telegram message, no IBKR order - src.main was never imported)
+```
+
+**5. Loading/installing never itself triggers a live run**: the plist
+below has NO `RunAtLoad` - `launchctl load` only registers the
+`StartInterval` timer; it does not fire immediately. (Unlike the plain
+daily job's plist above, which deliberately DOES use `RunAtLoad` for its
+different "catch up after a missed calendar day" need - this wrapper's
+own late-catch-up logic, point 2 above, already covers that case without
+needing `RunAtLoad`, so adding it here would risk a live run as a side
+effect of installing, which is exactly what requirement 5 asks to
+avoid.)
+
+Create `~/Library/LaunchAgents/com.aiquantresearchbot.afterclose.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiquantresearchbot.afterclose</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/full/path/to/ai-quant-research-bot/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.execution.after_close</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/full/path/to/ai-quant-research-bot</string>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/afterclose.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/full/path/to/ai-quant-research-bot/data/reports/afterclose.err.log</string>
+</dict>
+</plist>
+```
+
+**Install:**
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.aiquantresearchbot.afterclose.plist
+```
+
+**Verify** (both that launchd actually loaded it AND that the scheduling
+logic itself is sound):
+
+```bash
+launchctl list | grep aiquantresearchbot
+launchctl list com.aiquantresearchbot.afterclose
+cd /full/path/to/ai-quant-research-bot && .venv/bin/python -m src.execution.after_close --simulate
+.venv/bin/python -m src.execution.run_health   # now also reports the after-close job's launchd status and the real NYSE-calendar-aware next run
+```
+
+**Activate** (nothing further needed - once loaded, `StartInterval`
+fires every 5 minutes on its own; there is no separate "activate" step.
+If you want to confirm it fires a REAL run once, without waiting for the
+actual window, temporarily set `FORCE_RERUN=1` in your `.env` and run
+`python -m src.execution.after_close` by hand - it still goes through
+the full `main.run()` path including any configured OpenAI/Telegram
+calls, so only do this when you intend a real run).
+
+**Uninstall:**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.aiquantresearchbot.afterclose.plist
+rm ~/Library/LaunchAgents/com.aiquantresearchbot.afterclose.plist
+```
+
+Use EITHER this after-close wrapper OR the plain `StartCalendarInterval`
+daily job above - not both, or you risk two independent schedules both
+eventually triggering the same day (harmless thanks to the same-day
+guard, but redundant). The after-close wrapper is the recommended,
+production-safe choice; the plain daily job remains documented above for
+a simpler setup that accepts the DST-timezone caveat explained at the top
+of this section.
+
 ### Running it fully autonomously: the canonical services
 
 Once `execution.mode` is `IBKR_PAPER` (and, when you've decided you're

@@ -8,6 +8,10 @@ pytest>=7.4.0
 pyarrow>=14.0.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
+# NYSE holiday/early-close calendar for the after-close launchd wrapper
+# (execution/market_calendar.py) - a maintained data source, not a
+# hand-rolled holiday list that goes stale every year.
+pandas_market_calendars>=5.0.0
 
 # Phase 7 (IBKR Paper execution) - OPTIONAL, only needed to actually run
 # src/execution/ibkr_client.py against a real TWS/IB Gateway Paper session.

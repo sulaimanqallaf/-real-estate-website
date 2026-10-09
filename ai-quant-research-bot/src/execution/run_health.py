@@ -236,7 +236,10 @@ def compute_next_scheduled_run(config: dict[str, Any], now: datetime | None = No
     return candidate.isoformat()
 
 
-def check_launchd_status(label: str = "com.aiquantresearchbot.daily") -> dict[str, Any]:
+DAILY_LAUNCHD_LABEL = "com.aiquantresearchbot.daily"
+
+
+def check_launchd_status(label: str = DAILY_LAUNCHD_LABEL) -> dict[str, Any]:
     """Best-effort, macOS-only, READ-ONLY check of whether the daily
     launchd job is actually loaded (`launchctl list <label>`) - the only
     subprocess call anywhere in this module, and never anything other
@@ -264,6 +267,34 @@ def check_launchd_status(label: str = "com.aiquantresearchbot.daily") -> dict[st
     if result.returncode != 0:
         return {"installed": False, "detail": f"not loaded (launchctl list exit code {result.returncode})"}
     return {"installed": True, "detail": "loaded"}
+
+
+AFTER_CLOSE_LAUNCHD_LABEL = "com.aiquantresearchbot.afterclose"
+
+
+def compute_next_market_aware_run(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any] | None:
+    """The REAL next scheduled run for the `execution/after_close.py`
+    wrapper - unlike `compute_next_scheduled_run()` (a fixed `schedule.
+    daily.hour`/`minute`), this walks forward through the actual NYSE
+    calendar (`market_calendar.py`) to find the next trading day's
+    `market_close + 30min` target, correctly skipping weekends/holidays
+    and reporting an early-close day's earlier target - exactly what
+    `after_close.py` itself will decide. Returns `None` only if no
+    trading day is found within the search horizon (should never happen
+    in practice; a defensive bound, not an expected outcome)."""
+    from . import market_calendar
+
+    reference = now or datetime.now(timezone.utc)
+    for offset in range(14):
+        candidate_date = (reference + timedelta(days=offset)).astimezone(market_calendar.NY_TZ).strftime("%Y-%m-%d")
+        day = market_calendar.market_day(candidate_date)
+        if not day.is_trading_day:
+            continue
+        target = day.market_close_utc + timedelta(minutes=market_calendar.RUN_AFTER_CLOSE_MINUTES)
+        if target <= reference:
+            continue  # today's target already passed - keep looking forward
+        return {"target_run_utc": target.isoformat(), "is_early_close": day.is_early_close}
+    return None
 
 
 def tail_recent_errors(
@@ -384,16 +415,20 @@ def build_health_report(config: dict[str, Any], logger: logging.Logger, now: dat
     """Everything the read-only health/status command reports: last
     tracked run, last tracked success, most recent historical report
     file, next scheduled run (plus whether launchd is actually
-    installed), recent vs historical log errors, committed/reserved
-    TradingAgents spend, and cached-data freshness (including any
-    tickers whose freshness check itself failed)."""
+    installed - both the plain daily job AND the NYSE-calendar-aware
+    after-close wrapper), recent vs historical log errors, committed/
+    reserved TradingAgents spend, and cached-data freshness (including
+    any tickers whose freshness check itself failed)."""
     from . import circuit_breaker
 
     reference = now or datetime.now(timezone.utc)
+    next_market_aware = compute_next_market_aware_run(config, reference)
     return {
         "status": read_status(config),
         "next_scheduled_run": compute_next_scheduled_run(config, reference),
         "launchd": check_launchd_status(),
+        "next_market_aware_run": next_market_aware,
+        "launchd_after_close": check_launchd_status(AFTER_CLOSE_LAUNCHD_LABEL),
         "errors": tail_recent_errors(config, now=reference),
         "spend": spend_report(config, reference),
         "data_staleness": data_staleness_report(config, logger, reference),
@@ -429,8 +464,23 @@ def format_health_text(report: dict[str, Any]) -> str:
         launchd_line = "NOT INSTALLED - the next-scheduled-run time below is only a config calculation, not a confirmed schedule"
     else:
         launchd_line = f"unknown ({launchd['detail']})"
-    lines.append(f"launchd daily job: {launchd_line}")
+    lines.append(f"launchd daily job ({DAILY_LAUNCHD_LABEL}): {launchd_line}")
     lines.append(f"Next scheduled run (from config, NOT a launchd confirmation): {report['next_scheduled_run'] or 'unknown (schedule.daily not configured)'}")
+
+    after_close_launchd = report["launchd_after_close"]
+    if after_close_launchd["installed"] is True:
+        after_close_line = "INSTALLED/LOADED"
+    elif after_close_launchd["installed"] is False:
+        after_close_line = "NOT INSTALLED - the market-aware next run below is only a calendar calculation, not a confirmed schedule"
+    else:
+        after_close_line = f"unknown ({after_close_launchd['detail']})"
+    lines.append(f"launchd after-close wrapper job ({AFTER_CLOSE_LAUNCHD_LABEL}): {after_close_line}")
+    next_market_aware = report["next_market_aware_run"]
+    if next_market_aware:
+        early_note = " (early-close day)" if next_market_aware["is_early_close"] else ""
+        lines.append(f"Next NYSE-calendar-aware run (market close + 30min{early_note}): {next_market_aware['target_run_utc']}")
+    else:
+        lines.append("Next NYSE-calendar-aware run: unknown (no trading day found in the search horizon)")
 
     spend = report["spend"]
     if spend is None:

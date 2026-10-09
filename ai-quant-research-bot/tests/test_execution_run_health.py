@@ -184,6 +184,53 @@ def test_check_launchd_status_never_raises_when_launchctl_is_missing(monkeypatch
     assert status["installed"] is None
 
 
+def test_check_launchd_status_checks_the_label_it_is_given_not_always_the_daily_one(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    seen_labels = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen_labels.append(argv[-1])
+        return FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_health.check_launchd_status(run_health.AFTER_CLOSE_LAUNCHD_LABEL)
+    assert seen_labels == [run_health.AFTER_CLOSE_LAUNCHD_LABEL]
+
+
+# --- market-aware next run (NYSE-calendar-aware after-close wrapper) --------
+
+
+def test_compute_next_market_aware_run_skips_weekends_and_holidays_to_find_the_next_trading_day(tmp_path):
+    config = make_config(tmp_path)
+    # Friday 2026-12-25 is Christmas (holiday); next trading day is Mon 2026-12-28.
+    now = datetime(2026, 12, 24, 23, 0, tzinfo=timezone.utc)  # after Dec 24's own early-close target already passed
+    result = run_health.compute_next_market_aware_run(config, now=now)
+    assert result is not None
+    assert result["target_run_utc"].startswith("2026-12-28")
+
+
+def test_compute_next_market_aware_run_reports_an_early_close_day_correctly(tmp_path):
+    config = make_config(tmp_path)
+    now = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)  # Thanksgiving morning (holiday), before the 27th's early close
+    result = run_health.compute_next_market_aware_run(config, now=now)
+    assert result["is_early_close"] is True
+    assert result["target_run_utc"].startswith("2026-11-27")
+
+
+def test_compute_next_market_aware_run_stays_today_when_todays_target_has_not_passed_yet(tmp_path):
+    config = make_config(tmp_path)
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=timezone.utc)  # well before today's 20:30 UTC target
+    result = run_health.compute_next_market_aware_run(config, now=now)
+    assert result["target_run_utc"].startswith("2026-10-28")
+
+
 # --- spend report: committed vs reserved, never blended ----------------------
 
 
@@ -359,6 +406,8 @@ def test_format_health_text_distinguishes_check_failed_from_genuinely_clean():
         "status": {"last_run_started_at": None, "last_run_finished_at": None, "last_run_ok": None, "last_run_summary": None, "last_run_failed_symbols": [], "last_success_at": None, "most_recent_report_file_date": None},
         "next_scheduled_run": None,
         "launchd": {"installed": None, "detail": "not macOS"},
+        "next_market_aware_run": None,
+        "launchd_after_close": {"installed": None, "detail": "not macOS"},
         "errors": {"since_last_run_started": [], "historical": []},
         "spend": None,
         "data_staleness": {"stale": [], "check_failed": ["AMD", "QQQ"], "ok": []},
