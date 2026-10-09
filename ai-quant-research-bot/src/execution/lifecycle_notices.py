@@ -73,6 +73,27 @@ def format_reconciliation_failure_notice(summary: str) -> str:
     return f"🚨 RECONCILIATION FAILURE (requires attention) - new entries blocked\n{summary}"
 
 
+def format_broker_disconnected_notice(connection_state: str) -> str:
+    """Sprint 3 (Reliability: fail-closed alert-coverage audit) - a real
+    gap found and fixed: `run_one_tick()` returns EARLY on a non-
+    CONNECTED state, before `circuit_breaker.check_all()` ever runs,
+    so `BREAKER_BROKER_DISCONNECTED` never actually appears in a
+    tick's `tripped` list and the existing "newly tripped breaker"
+    Telegram notice in `run_forever()` could never fire for a
+    disconnect specifically - only a warning was logged. This is the
+    dedicated notice that closes that gap."""
+    return (
+        f"🚨 BROKER DISCONNECTED (state: {connection_state}) - new entries blocked\n"
+        "Existing protected positions continue to be managed once reconnected. "
+        "If a launchd KeepAlive agent is configured it will restart position_monitor on a crash; "
+        "this notice covers a live connection drop the process is still running through."
+    )
+
+
+def format_broker_reconnected_notice() -> str:
+    return "✅ Broker reconnected - position_monitor resumed normal monitoring. New entries are no longer frozen on this account."
+
+
 def format_run_failure_notice(label: str, summary: str) -> str:
     """Daily Reliability & Safe Automation milestone: a Telegram alert for
     a failed scheduled run (an unhandled exception, or the whole run

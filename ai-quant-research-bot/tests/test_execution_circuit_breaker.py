@@ -158,6 +158,33 @@ def test_resume_is_a_noop_when_never_halted(tmp_path):
     assert cb.is_halted(config) == (False, None)
 
 
+def test_is_halted_fails_closed_on_a_corrupted_halt_file(tmp_path):
+    """Sprint 3 fault injection: a REAL corrupted halt-state file (a
+    disk error, a crash mid-write) must be treated as halted - the
+    opposite conservatism from read_reconciliation_status()'s "corrupt
+    = no record" choice, because the manual kill switch has no other
+    independent signal anywhere else. Must never raise either, since
+    check_all()'s own docstring promises that."""
+    halt_path = tmp_path / "halt.json"
+    halt_path.write_text("{not valid json!!!", encoding="utf-8")
+    config = {"execution": {"halt_state_file": str(halt_path)}}
+
+    halted, reason = cb.is_halted(config)
+
+    assert halted is True
+    assert "failing closed" in reason.lower()
+
+
+def test_check_all_never_raises_on_a_corrupted_halt_file(tmp_path):
+    halt_path = tmp_path / "halt.json"
+    halt_path.write_text("{not valid json!!!", encoding="utf-8")
+    config = {"execution": {"halt_state_file": str(halt_path)}}
+
+    result = cb.check_all(config)  # must not raise
+
+    assert cb.BREAKER_MANUAL_KILL_SWITCH in result.tripped
+
+
 def test_manual_kill_switch_breaker_trips_check_all(tmp_path):
     config = {"execution": {"halt_state_file": str(tmp_path / "halt.json")}}
     cb.halt(config, reason="stop everything")

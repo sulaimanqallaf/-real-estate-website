@@ -138,12 +138,29 @@ def run_forever(
     logger.info("Position monitor starting (poll interval %ss).", poll_interval_seconds)
     previously_tripped: set[str] = set()
     reconciliation_already_failing = False
+    was_connected = True  # assume healthy at startup - connect() already succeeded before run_forever() is ever called
     while True:
         local_open_trades = local_open_trades_fn() if local_open_trades_fn else []
         tick = run_one_tick(broker, manager, config, local_open_trades, logger)
         if token and chat_id:
             from .. import paper_trade_tracker, telegram_bot
             from . import lifecycle_notices
+
+            # Sprint 3: run_one_tick() returns EARLY on a non-CONNECTED
+            # state, before check_all() ever runs - so a disconnect can
+            # never appear in "breakers.tripped" below and the generic
+            # newly-tripped-breaker notice could never fire for it. This
+            # is the dedicated, edge-triggered (not every tick) notice
+            # for exactly that gap - see format_broker_disconnected_
+            # notice()'s docstring.
+            is_connected_now = tick.get("connection_state") == CONNECTION_CONNECTED
+            if was_connected and not is_connected_now:
+                notice = lifecycle_notices.format_broker_disconnected_notice(tick.get("connection_state", "UNKNOWN"))
+                safe_run(logger, "broker disconnected notice", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+            elif not was_connected and is_connected_now:
+                notice = lifecycle_notices.format_broker_reconnected_notice()
+                safe_run(logger, "broker reconnected notice", lambda n=notice: telegram_bot.send_telegram_message(token, chat_id, n, logger))
+            was_connected = is_connected_now
 
             for trade in tick.get("closed_trades", []):
                 notice = paper_trade_tracker.format_exit_notification(trade)

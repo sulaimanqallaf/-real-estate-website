@@ -172,6 +172,79 @@ def test_run_forever_notifies_once_for_a_newly_tripped_breaker_not_every_tick(mo
     assert len(breaker_notices) == 1  # only the FIRST tick's newly-tripped breaker, not the second tick's repeat
 
 
+def test_run_forever_sends_exactly_one_disconnect_notice_and_one_reconnect_notice(monkeypatch):
+    """Sprint 3: run_one_tick() returns EARLY on a disconnect, before
+    breakers are ever evaluated - so the generic newly-tripped-breaker
+    notice could never fire for a disconnect specifically (confirmed:
+    none of these disconnected ticks carry a "breakers" key at all,
+    exactly like the real early-return shape). This is the dedicated,
+    edge-triggered notice that closes that gap - one notice on the
+    CONNECTED->not-CONNECTED edge, one on the reverse, never a repeat
+    while the state is unchanged."""
+    from src.execution import position_monitor
+
+    sent = []
+    monkeypatch.setattr("src.telegram_bot.send_telegram_message", lambda token, chat_id, text, logger: sent.append(text) or True)
+
+    ticks = [
+        {"connection_state": "CONNECTED", "new_entries_allowed": True, "closed_trades": []},
+        {"connection_state": "DISCONNECTED", "new_entries_allowed": False},  # early-return shape: no "breakers"/"reconciliation" keys
+        {"connection_state": "DISCONNECTED", "new_entries_allowed": False},
+        {"connection_state": "CONNECTED", "breakers": _breaker_result([]), "reconciliation": _clean_reconciliation(), "new_entries_allowed": True, "closed_trades": []},
+    ]
+    call_count = {"n": 0}
+
+    def fake_run_one_tick(broker, manager, config, local_open_trades, logger):
+        tick = ticks[min(call_count["n"], len(ticks) - 1)]
+        call_count["n"] += 1
+        if call_count["n"] >= len(ticks):
+            raise KeyboardInterrupt
+        return tick
+
+    monkeypatch.setattr(position_monitor, "run_one_tick", fake_run_one_tick)
+    monkeypatch.setattr(position_monitor.time, "sleep", lambda s: None)
+
+    import logging
+
+    with pytest.raises(KeyboardInterrupt):
+        position_monitor.run_forever(object(), object(), {}, logging.getLogger("test"), token="TOKEN", chat_id="123")
+
+    disconnect_notices = [s for s in sent if "DISCONNECTED" in s]
+    reconnect_notices = [s for s in sent if "reconnected" in s.lower()]
+    assert len(disconnect_notices) == 1
+    assert len(reconnect_notices) == 1
+
+
+def test_run_forever_sends_no_connection_notice_while_connection_state_never_changes(monkeypatch):
+    from src.execution import position_monitor
+
+    sent = []
+    monkeypatch.setattr("src.telegram_bot.send_telegram_message", lambda token, chat_id, text, logger: sent.append(text) or True)
+
+    ticks = [
+        {"connection_state": "CONNECTED", "breakers": _breaker_result([]), "reconciliation": _clean_reconciliation(), "new_entries_allowed": True, "closed_trades": []},
+        {"connection_state": "CONNECTED", "breakers": _breaker_result([]), "reconciliation": _clean_reconciliation(), "new_entries_allowed": True, "closed_trades": []},
+    ]
+    call_count = {"n": 0}
+
+    def fake_run_one_tick(broker, manager, config, local_open_trades, logger):
+        tick = ticks[min(call_count["n"], len(ticks) - 1)]
+        call_count["n"] += 1
+        if call_count["n"] >= len(ticks):
+            raise KeyboardInterrupt
+        return tick
+
+    monkeypatch.setattr(position_monitor, "run_one_tick", fake_run_one_tick)
+    monkeypatch.setattr(position_monitor.time, "sleep", lambda s: None)
+
+    import logging
+
+    with pytest.raises(KeyboardInterrupt):
+        position_monitor.run_forever(object(), object(), {}, logging.getLogger("test"), token="TOKEN", chat_id="123")
+
+    assert sent == []
+
+
 def _breaker_result(tripped):
     from src.execution.circuit_breaker import BreakerResult
 

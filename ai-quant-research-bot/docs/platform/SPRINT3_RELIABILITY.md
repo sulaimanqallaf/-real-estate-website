@@ -73,6 +73,39 @@ All three were evaluated for real, not assumed to be useful:
    rather than crashing. Verified with a real mid-tick `FakeBroker`
    failure injected between the top check and `reconcile()`.
 
+3. **`circuit_breaker.is_halted()` had the same "never raises" gap, a
+   third time.** `check_all()`'s own docstring promises it never
+   raises; `is_halted()` (called via `check_manual_kill_switch()`) had
+   no try/except around its halt-state-file read/JSON parse, so a
+   corrupted file (a disk error, a crash mid-write) would raise
+   `json.JSONDecodeError` straight through. Fixed: wrapped in
+   `except (OSError, ValueError)`, returning `(True, reason)` -
+   **deliberately the OPPOSITE conservatism** from
+   `read_reconciliation_status()`'s existing "corrupt = treat as no
+   record, never halt on it" choice. That asymmetry is intentional,
+   not an inconsistency: reconciliation failures are defense-in-depth
+   (other breakers also gate entries independently), but the manual
+   kill switch is the ONE place the user's own explicit halt intent is
+   recorded, with no other independent signal anywhere else - an
+   unreadable file could be the kill switch mid-write, so the safe
+   assumption is halted. Verified with a real corrupted JSON file.
+
+## Telegram alert-coverage gap found and fixed
+
+`run_one_tick()` returns EARLY on a non-`CONNECTED` broker state, before
+`circuit_breaker.check_all()` ever runs - so `BREAKER_BROKER_DISCONNECTED`
+could never actually appear in a tick's `tripped` list, and
+`run_forever()`'s existing "notify on a newly tripped breaker" logic
+could therefore never fire for a disconnect specifically. Only a log
+warning was emitted; the operator's phone stayed silent. Fixed: a
+dedicated, edge-triggered notice (`lifecycle_notices.
+format_broker_disconnected_notice()`/`format_broker_reconnected_notice()`)
+sent exactly once on each CONNECTED->not-CONNECTED transition and once
+on the reverse - never a repeat while the state is unchanged, consistent
+with the existing breaker/reconciliation notice pattern's own anti-spam
+design. Verified with a real `FakeBroker` state-transition sequence
+through `run_forever()`'s actual loop.
+
 ## Already-covered fault-injection scenarios (verified, not re-built)
 
 Several of this milestone's scenarios already had thorough, real

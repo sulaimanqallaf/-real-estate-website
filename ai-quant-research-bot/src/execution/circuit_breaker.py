@@ -111,12 +111,28 @@ def resume(config: dict[str, Any]) -> None:
 
 
 def is_halted(config: dict[str, Any]) -> tuple[bool, str | None]:
+    """Returns `(True, reason)` if the halt-state file exists but could
+    not be read/parsed - Sprint 3 (Reliability: fail-closed audit):
+    this is a real, found-not-assumed gap - the file read/JSON parse
+    here had no try/except at all, so a corrupted file (a disk error,
+    a crash mid-write) would have raised straight through `check_all()`
+    (whose own docstring promises "never raises"). Deliberately the
+    OPPOSITE conservatism from `read_reconciliation_status()`'s own
+    "treat corrupt as no-record, never halt on it" choice - that one is
+    defense-in-depth with other independent checks also gating entries;
+    THIS is the manual kill switch, the one place the user's own
+    explicit halt intent is recorded, with no other independent signal
+    anywhere else - an unreadable file could be the kill switch mid-
+    write, so the safe assumption is halted, never silently not-halted."""
     path = _halt_file_path(config)
     if not path.exists():
         return False, None
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return bool(data.get("halted")), data.get("reason")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("halted")), data.get("reason")
+    except (OSError, ValueError) as exc:
+        return True, f"halt-state file exists but could not be read ({exc}) - failing closed"
 
 
 def status(config: dict[str, Any]) -> dict[str, Any]:
