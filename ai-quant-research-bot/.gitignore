@@ -22,3 +22,9 @@ data/runtime/*
 !data/journal/.gitkeep
 !data/models/.gitkeep
 !data/runtime/.gitkeep
+
+# User-supplied legally-obtained documents for the RAG knowledge library
+# (src/intelligence/knowledge_library.py) - never committed, since this
+# repo has no right to redistribute whatever the user puts here.
+data/knowledge/*
+!data/knowledge/.gitkeep
