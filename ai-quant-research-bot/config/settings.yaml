@@ -363,6 +363,9 @@ providers:
     exchange: "binance"      # any CCXT exchange id; real gate is the isolated oss_quant venv, not an API key - see src/data_providers/crypto_provider.py
     timeframe: "1d"
     limit: 500               # max candles per fetch_ohlcv call
+  alpaca:
+    enabled: true            # gated further at runtime on ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY (see .env.example)
+                             # feed is ALWAYS "iex" (Basic/free plan) - hardcoded in src/data_providers/alpaca_provider.py, not configurable here on purpose
 
 # Point-in-time ML dataset builder output (src/dataset_builder.py) - Parquet
 # files, never used to train a model in this phase. See README "ML dataset
