@@ -337,6 +337,29 @@ summary line reports how many folds were profitable and how often the
 strategy beat the benchmark fold-for-fold - never a single blended
 number that could hide an unlucky run of folds behind a lucky one.
 
+### Transparent strategy validation report (Sprint 3, Task V3)
+
+```bash
+python -m src.analytics.strategy_validation_report
+```
+
+Consolidates the single-window backtest (Task V1's transaction costs
+already included) and the walk-forward fold consistency check (Task
+V2) into one report per strategy, and adds the one thing neither does
+on its own: an explicit **evidence verdict** -
+`INSUFFICIENT_EVIDENCE`, `INCONSISTENT_ACROSS_FOLDS`, or
+`CONSISTENT_IN_BACKTEST` - gated on named, inspectable thresholds
+(`src/analytics/strategy_validation_report.py`'s
+`MIN_TRADES_FOR_EVIDENCE`/`MIN_FOLDS_FOR_EVIDENCE`/
+`CONSISTENCY_FRACTION_PROFITABLE`). A strategy with too few trades or
+folds is flagged `INSUFFICIENT_EVIDENCE`, never silently assumed
+profitable; one that's only profitable in a minority of walk-forward
+folds is flagged `INCONSISTENT_ACROSS_FOLDS`, even if its single-
+window number looks good. **Even the best verdict is explicitly past,
+cost-inclusive backtest behavior only - never a forecast or a
+guarantee of future performance** (see "Disclaimer" below). Output
+goes to `data/reports/strategy_validation_<date>.txt`.
+
 ### ML dataset build, training, and registry inspection
 
 All three of these are OFFLINE, standalone commands - none of them run as
