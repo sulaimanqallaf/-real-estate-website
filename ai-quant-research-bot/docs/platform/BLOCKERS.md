@@ -115,3 +115,28 @@ then run `python -m src.data_providers.iex_validation` (optionally with
 your own symbols/`--days`). It prints a plain PASS/FAIL/UNVALIDATED line
 per symbol — a genuinely "validated real market data" claim can only be
 made once that command reports `PASS` for real, not from this sandbox.
+
+## 9. Real-data run of Sprint 3's backtest/walk-forward/validation report (Tasks V1-V3)
+**Blocks**: actually running `python -m src.backtester`,
+`python -m src.analytics.walk_forward`, or
+`python -m src.analytics.strategy_validation_report` against REAL yfinance
+history from this sandbox - confirmed directly, not assumed: `curl` against
+`https://query1.finance.yahoo.com/v8/finance/chart/AAPL` returns the same
+`403 Forbidden organization policy` CONNECT-tunnel rejection as every other
+financial-data-vendor host this project touches (items 3 and 8 above).
+Every test for these three modules (`tests/test_backtester_transaction_costs.py`,
+`tests/test_walk_forward.py`, `tests/test_strategy_validation_report.py`)
+runs the REAL strategy/indicator/risk_manager/cost-model logic end-to-end -
+that logic is genuinely exercised and correct - but only ever against
+`src/analytics/synthetic_fixtures.py`'s deterministic, clearly-labeled
+synthetic price series, never real market data. No strategy in this
+codebase has been honestly evidenced as profitable (or not) on real history
+yet - that evidence does not exist until you produce it yourself.
+**What you'd need to do**: on a machine with real outbound network access
+(no credentials needed - yfinance is free/keyless), run
+`python -m src.analytics.strategy_validation_report` (which runs the
+single-window backtest and the walk-forward check together and prints an
+evidence-gated verdict per strategy - see README "Transparent strategy
+validation report"). Read the verdict literally: `INSUFFICIENT_EVIDENCE`
+or `INCONSISTENT_ACROSS_FOLDS` means exactly what it says, not "run it
+again and hope."
