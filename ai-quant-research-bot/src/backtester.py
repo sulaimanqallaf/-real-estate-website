@@ -14,6 +14,31 @@ Simplifications (documented rather than hidden, since this is a research tool):
   - Every simulated entry is passed through the same risk_manager rules used live
     (SMA200 filter, RSI cap, min risk/reward, downside<upside) - trades that would
     be blocked live are never opened in the backtest either.
+  - Transaction costs and slippage (Sprint 3 "Real Strategy Validation"
+    milestone, Task V1: "include transaction costs and realistic
+    slippage") - see `config["backtest"]["transaction_costs"]`:
+      * `slippage_bps` is applied to every fill price itself, adversely
+        (a BUY fills a little higher, a SELL fills a little lower than
+        the raw triggered price) via `_apply_slippage()` - this is why
+        it's baked into `Trade.entry_price`/`exit_price` directly rather
+        than tracked as a separate field: a real fill price already
+        reflects slippage, so does this one.
+      * Commission (`commission_per_share`, with a `commission_min_per_order`
+        floor and a `commission_max_pct_of_trade` ceiling - the same
+        shape as IBKR's own real US-stock commission schedule) is a
+        separate round-trip dollar cost on `Trade.commission`, charged
+        once on entry and once on exit, and subtracted in
+        `Trade.pnl_dollars` - `Trade.return_pct` deliberately stays a
+        pure price return (it already reflects slippage via the fill
+        prices; commission is a dollar cost, not a price move, so it
+        belongs in the dollar P&L figure, not folded into a percentage).
+      * **Backward-compatible by construction**: a config whose
+        `backtest` section has no `transaction_costs` key at all (e.g.
+        every existing test's hand-built minimal config) gets exactly
+        zero commission and zero slippage - unchanged behavior from
+        every prior sprint. `config/settings.yaml`'s own real defaults
+        ARE non-zero, so a real run's report reflects honest, realistic
+        net-of-cost performance by default.
 
 Options skew is NOT backtested in Version 1 (Yahoo's free IV history isn't reliably
 available historically) - only the three price-based strategies are.
@@ -57,10 +82,11 @@ class Trade:
     exit_price: float
     shares: int
     exit_reason: str
+    commission: float = 0.0  # round-trip (entry + exit legs) - see module docstring
 
     @property
     def pnl_dollars(self) -> float:
-        return (self.exit_price - self.entry_price) * self.shares
+        return (self.exit_price - self.entry_price) * self.shares - self.commission
 
     @property
     def return_pct(self) -> float:
@@ -76,6 +102,55 @@ class OpenPosition:
     stop_loss: float
     target: float
     shares: int
+
+
+def _apply_slippage(price: float, side: str, config: dict[str, Any]) -> float:
+    """Adverse price slippage - a BUY always fills a little WORSE (higher)
+    and a SELL always fills a little WORSE (lower) than the raw triggered
+    price, never in the trade's favor (real market impact/spread cost,
+    not a coin flip). `side` is `"buy"` or `"sell"`. Zero (price
+    unchanged) when `transaction_costs`/`slippage_bps` isn't configured -
+    see module docstring."""
+    bps = config.get("backtest", {}).get("transaction_costs", {}).get("slippage_bps", 0.0)
+    factor = bps / 10_000.0
+    return price * (1.0 + factor) if side == "buy" else price * (1.0 - factor)
+
+
+def _commission_for_fill(shares: float, price: float, config: dict[str, Any]) -> float:
+    """One leg's commission (either the entry fill or the exit fill) -
+    `_build_trade()` charges this once per leg, i.e. twice per
+    round-trip trade. IBKR-shaped: per-share rate with a minimum floor
+    and a percent-of-trade-value ceiling. Zero when `transaction_costs`
+    isn't configured - see module docstring."""
+    costs = config.get("backtest", {}).get("transaction_costs", {})
+    per_share = costs.get("commission_per_share", 0.0)
+    if per_share <= 0.0:
+        return 0.0
+    commission = max(shares * per_share, costs.get("commission_min_per_order", 0.0))
+    max_pct = costs.get("commission_max_pct_of_trade")
+    if max_pct is not None:
+        commission = min(commission, shares * price * max_pct)
+    return commission
+
+
+def _build_trade(
+    symbol: str,
+    strategy_name: str,
+    entry_date: pd.Timestamp,
+    entry_price: float,
+    exit_date: pd.Timestamp,
+    raw_exit_price: float,
+    shares: int,
+    exit_reason: str,
+    config: dict[str, Any],
+) -> Trade:
+    """`entry_price` is already the realistic, slippage-adjusted fill
+    price (applied once, when the position was opened - see
+    `_run_strategy_backtest`); this only needs to slippage-adjust the
+    EXIT side and compute round-trip commission on both legs."""
+    exit_price = _apply_slippage(raw_exit_price, "sell", config)
+    commission = _commission_for_fill(shares, entry_price, config) + _commission_for_fill(shares, exit_price, config)
+    return Trade(symbol, strategy_name, entry_date, entry_price, exit_date, exit_price, shares, exit_reason, commission=commission)
 
 
 def period_to_days(period_str: str) -> int:
@@ -134,25 +209,25 @@ def _run_strategy_backtest(
 
                 if low <= open_position.stop_loss:
                     all_trades.append(
-                        Trade(
+                        _build_trade(
                             symbol, strategy_name, open_position.entry_date, open_position.entry_price,
-                            next_row["date"], open_position.stop_loss, open_position.shares, "stop_loss",
+                            next_row["date"], open_position.stop_loss, open_position.shares, "stop_loss", config,
                         )
                     )
                     open_position = None
                 elif high >= open_position.target:
                     all_trades.append(
-                        Trade(
+                        _build_trade(
                             symbol, strategy_name, open_position.entry_date, open_position.entry_price,
-                            next_row["date"], open_position.target, open_position.shares, "target",
+                            next_row["date"], open_position.target, open_position.shares, "target", config,
                         )
                     )
                     open_position = None
                 elif days_held >= max_holding_days:
                     all_trades.append(
-                        Trade(
+                        _build_trade(
                             symbol, strategy_name, open_position.entry_date, open_position.entry_price,
-                            next_row["date"], close, open_position.shares, "time_exit",
+                            next_row["date"], close, open_position.shares, "time_exit", config,
                         )
                     )
                     open_position = None
@@ -167,7 +242,7 @@ def _run_strategy_backtest(
             if not risk_result["tradeable"] or risk_result["shares"] <= 0:
                 continue
 
-            entry_price = next_row["open"]
+            entry_price = _apply_slippage(next_row["open"], "buy", config)
             open_position = OpenPosition(
                 symbol=symbol,
                 strategy=strategy_name,
@@ -181,9 +256,9 @@ def _run_strategy_backtest(
         if open_position is not None:
             last_row = rows.iloc[-1]
             all_trades.append(
-                Trade(
+                _build_trade(
                     symbol, strategy_name, open_position.entry_date, open_position.entry_price,
-                    last_row["date"], last_row["close"], open_position.shares, "eod_mark",
+                    last_row["date"], last_row["close"], open_position.shares, "eod_mark", config,
                 )
             )
 
@@ -352,6 +427,7 @@ def save_backtest_report(results: dict[str, Any], config: dict[str, Any]) -> Pat
                     {
                         "symbol": t.symbol, "entry_date": t.entry_date, "entry_price": t.entry_price,
                         "exit_date": t.exit_date, "exit_price": t.exit_price, "shares": t.shares,
+                        "commission": round(t.commission, 2),
                         "pnl_dollars": round(t.pnl_dollars, 2), "return_pct": round(t.return_pct, 2),
                         "exit_reason": t.exit_reason,
                     }

@@ -75,7 +75,14 @@ def test_crosscheck_reports_agreement_when_vectorbt_echoes_our_own_numbers(monke
 
     lookback_days = backtester.period_to_days(config["backtest"]["lookback_period"])
     backtest_start = df.index.max() - timedelta(days=lookback_days)
-    trades, equity_curve = backtester._run_strategy_backtest("Trend Following", ["SYN1"], {"SYN1": df}, backtest_start, config, LOGGER)
+    # run_crosscheck() itself runs its internal comparison against a
+    # commission-zeroed copy of config (see backtester_crosscheck's module
+    # docstring, "Slippage vs. commission") - this fixture must build its
+    # "echo" numbers the same way, or they won't match what run_crosscheck
+    # actually produces once config/settings.yaml's real commission defaults
+    # are non-zero.
+    config_for_fixture = backtester_crosscheck._config_with_commission_zeroed(config)
+    trades, equity_curve = backtester._run_strategy_backtest("Trend Following", ["SYN1"], {"SYN1": df}, backtest_start, config_for_fixture, LOGGER)
     assert trades, "fixture must produce at least one real trade for this test to mean anything"
     our_stats = backtester._compute_stats(trades, equity_curve, config["backtest"]["initial_capital"])
 

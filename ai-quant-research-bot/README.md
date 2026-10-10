@@ -301,7 +301,19 @@ benchmark tickers, simulates each strategy independently over the configured
 rate, average win/loss, profit factor, max drawdown, and Sharpe ratio per strategy,
 a blended "Combined" block, and SPY/QQQ buy-and-hold comparisons. Output goes to
 `data/reports/backtest_<date>.csv` (summary) and
-`data/reports/backtest_trades_<strategy>_<date>.csv` (every simulated trade).
+`data/reports/backtest_trades_<strategy>_<date>.csv` (every simulated trade,
+including its `commission` column).
+
+**Transaction costs and slippage (Sprint 3, Task V1)** are on by default -
+see `config/settings.yaml`'s `backtest.transaction_costs`: every fill pays
+adverse slippage (`slippage_bps`, baked straight into the reported
+entry/exit price - a real fill price already reflects it) and every
+round-trip trade pays an IBKR-shaped commission (`commission_per_share`
+with a `commission_min_per_order` floor and a `commission_max_pct_of_trade`
+ceiling), both subtracted before any return/Sharpe/drawdown number is
+computed. Remove the whole `transaction_costs` section (or set every field
+to `0`) to see the old, frictionless numbers - useful for isolating
+"did the strategy call this right" from "was it worth the cost to trade it."
 
 ### ML dataset build, training, and registry inspection
 

@@ -8,8 +8,7 @@ entry/exit logic (strategy signal -> risk_manager sizing -> stop/target/
 time-exit) is this project's own and VectorBT has no equivalent of it.
 What CAN be compared honestly is the arithmetic layered on top of a
 given, already-decided trade list: given the exact same fills (entry
-date/price, exit date/price, share count, zero commission/slippage -
-`src/backtester.py` models neither), do two independently-written
+date/price, exit date/price, share count), do two independently-written
 engines compute the same total return, Sharpe, and max drawdown? This
 module runs our backtester for one (symbol, strategy) pair, replays its
 literal trade list through `vbt.Portfolio.from_signals` via the
@@ -19,6 +18,21 @@ computed from the identical cash flows - see
 `tools/oss_quant_runner.py`'s `_run_vectorbt_trade_replay` docstring),
 and reports agreement or divergence - never silently treating either
 engine's number as more authoritative than the other's.
+
+**Slippage vs. commission (Sprint 3 Task V1), handled differently here on
+purpose.** `src/backtester.py` now models both, but only slippage flows
+into this comparison automatically: it's baked directly into
+`Trade.entry_price`/`exit_price` themselves (a real fill price already
+reflects slippage), and those exact prices are what both engines are fed
+- VectorBT's replay included. Commission is a separate round-trip dollar
+cost (`Trade.commission`) that the `vectorbt_trade_replay` task is never
+told about, so feeding it a commission-bearing trade list would make this
+comparison fail for a reason that has nothing to do with either engine's
+arithmetic being wrong. `run_crosscheck()` therefore runs its OWN internal
+`_run_strategy_backtest()` call (the one that produces `our_stats` and the
+VectorBT payload) against a commission-zeroed copy of `config` - slippage
+stays real and identical on both sides; commission is deliberately out of
+scope for THIS specific comparison, same as it always was.
 
 Returns `None` (never a fabricated comparison) when our own backtester
 produced zero trades for the (symbol, strategy) pair, or when the
@@ -53,6 +67,20 @@ AGREEMENT_TOLERANCE = {
     "max_drawdown_pct": 0.01,
     "sharpe_ratio": 0.03,
 }
+
+
+def _config_with_commission_zeroed(config: dict[str, Any]) -> dict[str, Any]:
+    """See module docstring's "Slippage vs. commission" note - only
+    commission is zeroed; `slippage_bps` is left exactly as configured,
+    since it's baked into the fill prices both engines see identically."""
+    import copy
+
+    cfg = copy.deepcopy(config)
+    costs = dict(cfg.get("backtest", {}).get("transaction_costs", {}))
+    costs["commission_per_share"] = 0.0
+    costs["commission_min_per_order"] = 0.0
+    cfg.setdefault("backtest", {})["transaction_costs"] = costs
+    return cfg
 
 
 def _trade_replay_payload(
@@ -105,7 +133,9 @@ def run_crosscheck(
     backtest_start = df.index.max() - timedelta(days=lookback_days)
     initial_capital = config["backtest"]["initial_capital"]
 
-    trades, equity_curve = _run_strategy_backtest(strategy_name, [symbol], price_history, backtest_start, config, logger)
+    trades, equity_curve = _run_strategy_backtest(
+        strategy_name, [symbol], price_history, backtest_start, _config_with_commission_zeroed(config), logger
+    )
     if not trades:
         logger.info("Crosscheck skipped: our backtester produced zero %s trades for %s.", strategy_name, symbol)
         return None

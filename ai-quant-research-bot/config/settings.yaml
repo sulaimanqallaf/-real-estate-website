@@ -203,6 +203,16 @@ backtest:
   max_holding_days: 30
   risk_pct_per_trade: 0.75
   benchmarks: [SPY, QQQ]
+  # Sprint 3 "Real Strategy Validation" milestone (Task V1): "include
+  # transaction costs and realistic slippage." Missing this whole section
+  # (e.g. a test's own minimal config dict) means exactly zero cost -
+  # unchanged behavior from every prior sprint - see src/backtester.py's
+  # module docstring for how each field is applied.
+  transaction_costs:
+    commission_per_share: 0.005      # IBKR-style per-share commission
+    commission_min_per_order: 1.0    # IBKR-style minimum commission per order
+    commission_max_pct_of_trade: 0.01   # IBKR-style cap: never more than 1% of trade value
+    slippage_bps: 5.0                 # adverse price slippage (basis points) applied to every fill
 
 telegram:
   enabled: true
