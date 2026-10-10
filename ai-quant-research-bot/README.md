@@ -315,6 +315,28 @@ computed. Remove the whole `transaction_costs` section (or set every field
 to `0`) to see the old, frictionless numbers - useful for isolating
 "did the strategy call this right" from "was it worth the cost to trade it."
 
+### Walk-forward, out-of-sample validation (Sprint 3, Task V2)
+
+```bash
+python -m src.analytics.walk_forward --fold-period 90d
+```
+
+Splits each strategy's real historical data into sequential,
+non-overlapping `fold_period`-long windows (default `90d`, see
+`config/settings.yaml`'s `backtest.walk_forward.fold_period`) and runs
+the exact same production backtest engine (`src/backtester.py`,
+including Task V1's transaction costs/slippage) independently on each
+one, starting fresh each time. None of this project's three strategies
+have any parameter fitted to historical data, so there's no
+optimization step to walk FORWARD over in the traditional sense - what
+this actually checks is **consistency**: does a fixed, never-tuned
+rule set perform similarly across several independent historical
+periods, or did a single one-year backtest just get lucky? Each fold
+reports its own return/trades/Sharpe and buy-and-hold comparison; the
+summary line reports how many folds were profitable and how often the
+strategy beat the benchmark fold-for-fold - never a single blended
+number that could hide an unlucky run of folds behind a lucky one.
+
 ### ML dataset build, training, and registry inspection
 
 All three of these are OFFLINE, standalone commands - none of them run as

@@ -212,6 +212,14 @@ backtest:
     commission_per_share: 0.005      # IBKR-style per-share commission
     commission_min_per_order: 1.0    # IBKR-style minimum commission per order
     commission_max_pct_of_trade: 0.01   # IBKR-style cap: never more than 1% of trade value
+    slippage_bps: 5.0                   # adverse price slippage (basis points) applied to every fill
+  # Sprint 3 "Real Strategy Validation" milestone (Task V2): "use
+  # walk-forward and out-of-sample testing" - see
+  # src/analytics/walk_forward.py. Each fold is this many days long;
+  # run `python -m src.analytics.walk_forward --fold-period <period>`
+  # to override without editing this file.
+  walk_forward:
+    fold_period: "90d"
     slippage_bps: 5.0                 # adverse price slippage (basis points) applied to every fill
 
 telegram:
