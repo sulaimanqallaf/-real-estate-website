@@ -66,6 +66,8 @@ export interface HealthReport {
   spend: SpendSummary | null;
   data_staleness: { stale: string[]; check_failed: string[]; ok: string[] };
   circuit_breaker: { halted: boolean; reason: string | null };
+  position_monitor_heartbeat: { last_heartbeat_at: string | null; age_seconds: number | null; stale: boolean; never_started: boolean };
+  iex_data_freshness: { stale: string[]; check_failed: string[]; ok: string[]; cached_file_count: number };
 }
 
 export interface SpendSummary {

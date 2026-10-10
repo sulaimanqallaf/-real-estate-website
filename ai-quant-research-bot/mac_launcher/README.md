@@ -8,7 +8,7 @@ use:
 |---|---|
 | `Start Dashboard.command` | Checks dependencies, installs/updates what's needed, starts the dashboard backend + frontend, opens your browser to it. |
 | `Stop Dashboard.command` | Stops both, and only both - nothing else on your Mac. |
-| `Dashboard Status.command` | Shows whether the dashboard is running, whether it's actually reachable, and (read-only) whether the separate Mac launchd research scheduler is loaded. |
+| `Dashboard Status.command` | Shows whether the dashboard is running, whether it's actually reachable, (read-only) whether the separate Mac launchd research scheduler is loaded, and - Sprint 3 - a full reliability/freshness summary (position_monitor heartbeat, circuit breaker, cached-data staleness for both the yfinance and Alpaca/IEX caches) via `python -m src.execution.run_health`, so you never have to open Terminal yourself just to check this. |
 | `Check for Updates.command` | Checks GitHub for new commits on your current branch; only applies them if you explicitly type `y`, after creating a rollback tag. |
 
 ## Honest limitations - read this before relying on it
@@ -83,6 +83,11 @@ processes, across multiple full cycles:
   repeated start/stop cycles after the fix.
 - `Check for Updates.command` correctly fetches the real GitHub remote
   and reports "already up to date" or lists real pending commits.
+- `Dashboard Status.command`'s new Sprint 3 reliability section was run
+  for real against the backend's actual Python venv (after installing
+  this sprint's new `requirements.txt` entries into it) and correctly
+  printed the full `run_health` report, including the new Alpaca/IEX
+  cache-freshness line, with no errors.
 
 ## Uninstalling
 

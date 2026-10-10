@@ -1,12 +1,19 @@
 #!/bin/bash
 # Read-only status check: dashboard process state, backend API reachability,
-# AND whether the Mac launchd research scheduler is running - checked via
-# `launchctl list`, exactly like `python -m src.execution.run_health` does,
-# never started/stopped/modified from here.
+# whether the Mac launchd research scheduler is running (via `launchctl
+# list`), AND - Sprint 3 Task A1 - a reliability/freshness summary
+# (position_monitor heartbeat, circuit breaker, cached-data staleness for
+# both the yfinance and Alpaca/IEX caches) via `python -m src.execution.
+# run_health`, so you never have to open Terminal yourself to check this.
+# Never started/stopped/modified from here - read-only, same as
+# run_health.py's own docstring promises ("no LLM call, no broker call, no
+# order").
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BACKEND_DIR="$REPO_ROOT/dashboard/backend"
 RUN_DIR="$SCRIPT_DIR/.run"
 
 echo "=============================================="
@@ -47,6 +54,15 @@ if command -v launchctl >/dev/null 2>&1; then
   fi
 else
   echo "  launchctl not available on this system (not macOS?)."
+fi
+echo
+
+echo "Reliability status (Sprint 3 - watchdog, circuit breaker, data freshness):"
+if [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+  (cd "$REPO_ROOT" && "$BACKEND_DIR/.venv/bin/python" -m src.execution.run_health) | sed 's/^/  /' \
+    || echo "  Could not run the reliability check (see any error above)."
+else
+  echo "  Unavailable - run 'Start Dashboard.command' at least once first to set up the Python environment this needs."
 fi
 
 echo

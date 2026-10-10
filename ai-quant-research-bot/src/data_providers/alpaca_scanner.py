@@ -72,6 +72,53 @@ def _save_symbol_bars(symbol: str, timeframe: str, df: pd.DataFrame, config: dic
     return out_path
 
 
+def iex_cache_freshness_report(config: dict[str, Any], logger: logging.Logger, now: datetime | None = None) -> dict[str, Any]:
+    """Freshness of every file currently cached under `iex_raw_dir()`
+    (Sprint 3 "Automation and Dashboard" milestone, Task A1: "add...
+    data freshness to the dashboard"). Glob-based, not config-driven -
+    unlike the yfinance cache's fixed `tickers:` list, Task D2's whole
+    point is scaling past a fixed list, so this reports whatever is
+    actually on disk right now, labeled `"{symbol}_{timeframe}"`.
+
+    Mirrors `run_health.data_staleness_report()`'s exact `"stale"`/
+    `"check_failed"`/`"ok"` convention (never fabricates an age for an
+    unreadable/unparseable file - a read/parse problem is reported as
+    `check_failed`, never silently treated as fresh) so both reports
+    render identically in the dashboard. An empty or missing cache
+    directory (nothing scanned yet) returns all-empty lists, never an
+    error."""
+    from datetime import timezone
+
+    reference = now or datetime.now(timezone.utc)
+    threshold = config.get("data", {}).get("max_bar_age_days_warning", 3)
+    result: dict[str, Any] = {"stale": [], "check_failed": [], "ok": [], "cached_file_count": 0}
+
+    out_dir = iex_raw_dir(config)
+    if not out_dir.exists():
+        return result
+
+    for path in sorted(out_dir.glob("*.csv")):
+        label = path.stem  # "{symbol}_{timeframe}"
+        result["cached_file_count"] += 1
+        try:
+            df = pd.read_csv(path, index_col=0)
+        except Exception as exc:  # noqa: BLE001 - an unreadable cache file is real and reportable, never "fresh"
+            logger.warning("Could not read cached IEX bars at %s: %s", path, exc)
+            result["check_failed"].append(label)
+            continue
+        if df.empty:
+            result["check_failed"].append(label)
+            continue
+        parsed = pd.to_datetime(df.index[-1], errors="coerce", utc=True)
+        if parsed is None or pd.isna(parsed):
+            result["check_failed"].append(label)
+            continue
+        age_days = (reference.date() - parsed.date()).days
+        (result["stale"] if age_days > threshold else result["ok"]).append(label)
+
+    return result
+
+
 @dataclass
 class ScanReport:
     """Summary of one `scan_symbols()` run. `succeeded` only ever lists a

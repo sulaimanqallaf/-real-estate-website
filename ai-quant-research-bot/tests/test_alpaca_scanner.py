@@ -245,3 +245,93 @@ def test_main_returns_nonzero_exit_code_when_nothing_succeeded(tmp_path, monkeyp
     monkeypatch.setattr("src.utils.load_config", lambda path: {"data": {"iex_raw_dir": str(tmp_path / "raw_iex")}, "logging": {"log_dir": str(tmp_path / "logs")}})
 
     assert scanner.main() == 1
+
+
+# --- iex_cache_freshness_report (Sprint 3 Task A1: dashboard data freshness) -----------
+
+
+def test_freshness_report_is_all_empty_when_the_cache_dir_does_not_exist(tmp_path):
+    config = _config(tmp_path)
+    report = scanner.iex_cache_freshness_report(config, LOGGER)
+    assert report == {"stale": [], "check_failed": [], "ok": [], "cached_file_count": 0}
+
+
+def test_freshness_report_is_all_empty_when_the_cache_dir_is_empty(tmp_path):
+    config = _config(tmp_path)
+    scanner.iex_raw_dir(config).mkdir(parents=True)
+    report = scanner.iex_cache_freshness_report(config, LOGGER)
+    assert report == {"stale": [], "check_failed": [], "ok": [], "cached_file_count": 0}
+
+
+def test_freshness_report_flags_a_fresh_file_as_ok(tmp_path):
+    config = _config(tmp_path)
+    now = datetime(2026, 1, 4, tzinfo=timezone.utc)  # 1 day after the cached bar - within the default 3-day threshold
+    scanner._save_symbol_bars("AAPL", "1Day", _bars_df("AAPL"), config)  # latest bar 2026-01-03
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER, now=now)
+
+    assert report["cached_file_count"] == 1
+    assert report["ok"] == ["AAPL_1Day"]
+    assert report["stale"] == [] and report["check_failed"] == []
+
+
+def test_freshness_report_flags_an_old_file_as_stale(tmp_path):
+    config = _config(tmp_path)
+    now = datetime(2026, 3, 1, tzinfo=timezone.utc)  # ~2 months after the cached bar
+    scanner._save_symbol_bars("AAPL", "1Day", _bars_df("AAPL"), config)
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER, now=now)
+
+    assert report["stale"] == ["AAPL_1Day"]
+    assert report["ok"] == []
+
+
+def test_freshness_report_respects_the_configured_staleness_threshold(tmp_path):
+    config = _config(tmp_path)
+    config["data"]["max_bar_age_days_warning"] = 30  # much more lenient than the default
+    now = datetime(2026, 1, 20, tzinfo=timezone.utc)  # ~17 days after the cached bar - stale by default (3d), not with this override
+    scanner._save_symbol_bars("AAPL", "1Day", _bars_df("AAPL"), config)
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER, now=now)
+
+    assert report["ok"] == ["AAPL_1Day"]
+    assert report["stale"] == []
+
+
+def test_freshness_report_flags_an_unreadable_file_as_check_failed_not_fresh(tmp_path):
+    config = _config(tmp_path)
+    out_dir = scanner.iex_raw_dir(config)
+    out_dir.mkdir(parents=True)
+    (out_dir / "CORRUPT_1Day.csv").write_text("not,valid,csv,\x00\x01", encoding="utf-8")
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER)
+
+    assert report["cached_file_count"] == 1
+    assert report["check_failed"] == ["CORRUPT_1Day"]
+    assert report["ok"] == [] and report["stale"] == []
+
+
+def test_freshness_report_flags_an_empty_file_as_check_failed(tmp_path):
+    config = _config(tmp_path)
+    out_dir = scanner.iex_raw_dir(config)
+    out_dir.mkdir(parents=True)
+    (out_dir / "EMPTY_1Day.csv").write_text("open,high,low,close,volume\n", encoding="utf-8")
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER)
+
+    assert report["check_failed"] == ["EMPTY_1Day"]
+
+
+def test_freshness_report_covers_multiple_cached_files_independently(tmp_path):
+    config = _config(tmp_path)
+    now = datetime(2026, 1, 4, tzinfo=timezone.utc)
+    scanner._save_symbol_bars("AAPL", "1Day", _bars_df("AAPL"), config)  # fresh
+    old_df = _bars_df("MSFT")
+    old_df.index = old_df.index - pd.Timedelta(days=365)
+    scanner._save_symbol_bars("MSFT", "1Day", old_df, config)  # stale
+
+    report = scanner.iex_cache_freshness_report(config, LOGGER, now=now)
+
+    assert report["cached_file_count"] == 2
+    assert report["ok"] == ["AAPL_1Day"]
+    assert report["stale"] == ["MSFT_1Day"]

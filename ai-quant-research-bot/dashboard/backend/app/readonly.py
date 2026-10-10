@@ -342,7 +342,7 @@ def data_provider_health() -> dict[str, Any]:
     real network call. `market_provider.py` (yfinance) isn't included:
     it's the main pipeline's primary, always-on provider, not one of
     the optional add-ons this panel is about."""
-    from src.data_providers import crypto_provider, forex_provider, macro_provider, options_flow_provider, sec_provider
+    from src.data_providers import alpaca_provider, crypto_provider, forex_provider, macro_provider, options_flow_provider, sec_provider
 
     config = get_config()
     options_flow = options_flow_provider.get_default_provider(config)
@@ -352,5 +352,6 @@ def data_provider_health() -> dict[str, Any]:
         {"name": "options_flow", "configured": options_flow.is_configured()},
         {"name": "forex", "configured": forex_provider.forex_configured()},
         {"name": "crypto", "configured": crypto_provider.crypto_configured(config)},
+        {"name": "alpaca_iex", "configured": alpaca_provider.alpaca_configured()},
     ]
     return _redact_deep({"providers": providers})

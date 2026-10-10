@@ -420,8 +420,11 @@ def build_health_report(config: dict[str, Any], logger: logging.Logger, now: dat
     reserved TradingAgents spend, cached-data freshness (including any
     tickers whose freshness check itself failed), and - Sprint 3 -
     whether position_monitor.py's continuous loop is actually alive
-    and ticking (see watchdog.py)."""
+    and ticking (see watchdog.py), and - Sprint 3 Task A1 - freshness
+    of the separate Alpaca/IEX cache (see `data_providers.
+    alpaca_scanner.iex_cache_freshness_report()`)."""
     from . import circuit_breaker, watchdog
+    from ..data_providers import alpaca_scanner
 
     reference = now or datetime.now(timezone.utc)
     next_market_aware = compute_next_market_aware_run(config, reference)
@@ -436,6 +439,7 @@ def build_health_report(config: dict[str, Any], logger: logging.Logger, now: dat
         "data_staleness": data_staleness_report(config, logger, reference),
         "circuit_breaker": circuit_breaker.status(config),
         "position_monitor_heartbeat": watchdog.heartbeat_status(config, now=reference),
+        "iex_data_freshness": alpaca_scanner.iex_cache_freshness_report(config, logger, now=reference),
     }
 
 
@@ -517,6 +521,18 @@ def format_health_text(report: dict[str, Any]) -> str:
         lines.append(f"position_monitor heartbeat: STALE - last seen {heartbeat['last_heartbeat_at']} ({heartbeat['age_seconds']}s ago)")
     else:
         lines.append(f"position_monitor heartbeat: OK - last seen {heartbeat['last_heartbeat_at']} ({heartbeat['age_seconds']}s ago)")
+
+    iex = report["iex_data_freshness"]
+    if iex["cached_file_count"] == 0:
+        lines.append("Alpaca/IEX cache: empty (nothing scanned yet - see 'python -m src.data_providers.alpaca_scanner')")
+    else:
+        lines.append(f"Alpaca/IEX cache: {iex['cached_file_count']} file(s) cached")
+        if iex["check_failed"]:
+            lines.append(f"  CHECK FAILED for: {', '.join(iex['check_failed'])} (age unknown - treat as a problem, not as fresh)")
+        if iex["stale"]:
+            lines.append(f"  Stale: {', '.join(iex['stale'])}")
+        if not iex["check_failed"] and not iex["stale"]:
+            lines.append("  All cached files fresh.")
 
     errors = report["errors"]
     if errors["since_last_run_started"]:

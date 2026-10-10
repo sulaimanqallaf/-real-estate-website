@@ -66,6 +66,9 @@ def test_readonly_module_only_imports_the_allow_listed_src_modules():
         "src.data_providers.crypto_provider", "src.data_providers.forex_provider",
         "src.data_providers.macro_provider", "src.data_providers.options_flow_provider",
         "src.data_providers.sec_provider",
+        # Sprint 3 "Free Real Market Data" milestone: same is_configured()-
+        # only pattern as every other provider above, no network call.
+        "src.data_providers.alpaca_provider",
     }
     tree = ast.parse((BACKEND_ROOT / "app" / "readonly.py").read_text(encoding="utf-8"))
     found = set()

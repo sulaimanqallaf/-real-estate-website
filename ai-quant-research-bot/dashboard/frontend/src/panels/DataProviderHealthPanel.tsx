@@ -7,6 +7,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   options_flow: "Options flow",
   forex: "Forex OHLCV",
   crypto: "Crypto OHLCV (CCXT)",
+  alpaca_iex: "Alpaca Basic/IEX (free market data)",
 };
 
 export function DataProviderHealthPanel({ data }: { data: DataProviderHealth | null }) {
