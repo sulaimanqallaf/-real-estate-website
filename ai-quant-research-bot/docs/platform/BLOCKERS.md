@@ -14,11 +14,13 @@ is correct; they cannot prove the real `ibapi` socket client behaves the same
 way against a live TWS/Gateway process, because this sandbox has no network
 path to one and no running IBKR session to attach to.
 **What you'd need to do**: on your Mac, start TWS or IB Gateway in Paper
-Trading mode, confirm `ibapi` is installed (`pip install ibapi`), and run the
-existing `python -m src.execution.circuit_breaker status` /
-`position_monitor.py` against it. This is exactly what the main README's
-existing "Rollout" section already walks through — nothing new is needed
-there; this sprint didn't touch that path.
+Trading mode, confirm `ibapi` is installed (`pip install ibapi`), and run
+`python -m src.execution.connectivity_preflight` (Sprint 3, Task I1's new
+guided checklist - identity, reconnect handling, order reconciliation, and
+the kill switch, in one command; see README "Guided connectivity
+preflight") followed by `position_monitor.py` against it. This is exactly
+what the main README's existing "Rollout" section already walks through —
+nothing new needed there beyond the new preflight command itself.
 
 ## 2. Licensed live/delayed market data feed
 **Blocks**: deliverable A's "provider abstraction for licensed live market

@@ -2107,6 +2107,45 @@ open orders (read-only):
   none
 ```
 
+### Guided connectivity preflight (Sprint 3, Task I1)
+
+```bash
+python -m src.execution.connectivity_preflight
+# or, to skip the interactive reconnect step for a quick check:
+python -m src.execution.connectivity_preflight --skip-reconnect-check
+```
+
+A single guided checklist that runs the four things "IBKR Paper
+Readiness" actually needs verified before this project's existing
+`autonomous_paper.enabled`/`auto_execute.enabled` switches (both
+`false` in `config/settings.yaml` - this command never touches them)
+should even be considered:
+
+1. **Paper-account identity** - re-confirms `account_mode == PAPER`
+   (on top of `IBKRClient.connect()`'s own fail-closed check).
+2. **Reconnect handling** - the one INTERACTIVE step: it prints an
+   instruction to manually stop/restart your real TWS/Gateway (or its
+   network) and polls `connection_state()`, reporting whether a real
+   disconnect-then-reconnect was actually observed. There's no way to
+   script "kill your real TWS" from here - skip the manual step and
+   you get an honest `SKIPPED`, never a fabricated pass.
+3. **Order reconciliation** - runs `reconciliation.reconcile()`
+   against whatever your paper account currently reports; any
+   pre-existing position/order is listed for your own review, not
+   treated as this step failing (the mechanism working is what's
+   verified).
+4. **Kill switch** - round-trips the manual halt file
+   (`circuit_breaker.halt()`/`resume()`) and confirms it's actually
+   honored - the only step that needs no broker connection at all, and
+   the only one that still runs even when steps 1-3 report `BLOCKED`
+   (no real TWS/Gateway session reachable - including from this
+   project's own development sandbox, see
+   `docs/platform/BLOCKERS.md` item 1).
+
+Never places, cancels, or modifies an order. Run it after any change
+to the connection/reconciliation/circuit-breaker code, and again
+before ever considering flipping `autonomous_paper.enabled`.
+
 `positions()` uses `reqPositions()`; `open_orders()`/`get_order()` use
 `reqAllOpenOrders()` - scoped to everything TWS reports for your login,
 not only orders placed through this API session, so a human-placed TWS
