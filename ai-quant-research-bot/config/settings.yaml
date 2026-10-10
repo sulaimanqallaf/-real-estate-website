@@ -89,6 +89,11 @@ data:
   # wire a shorter lookback for that one strategy yourself.
   mean_reversion_interval: "1d"
   raw_dir: "data/raw"
+  # Sprint 3 "Free Real Market Data" milestone: Alpaca Basic/IEX bars
+  # (src/data_providers/alpaca_scanner.py) cache here - a DIFFERENT
+  # directory from raw_dir above on purpose, so this free, IEX-only feed
+  # is never mixed on disk with the yfinance consolidated-tape cache.
+  iex_raw_dir: "data/raw_iex"
   processed_dir: "data/processed"
   reports_dir: "data/reports"
   journal_dir: "data/journal"

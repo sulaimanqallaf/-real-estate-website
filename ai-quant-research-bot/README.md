@@ -2921,6 +2921,52 @@ when it hasn't been run.
   into a production strategy - there is no `promote()` function
   anywhere in that package by design.
 
+## Free Real Market Data (Sprint 3) - Alpaca Basic/IEX
+
+`src/data_providers/alpaca_provider.py` integrates Alpaca Markets' free
+**Basic** plan - the **IEX exchange feed only**, never the paid
+consolidated "SIP" feed ($99/mo Algo Trader Plus; this project has no
+paid market-data subscription and `feed=iex` is hardcoded, not a config
+option). No credit card is required to sign up for the Basic plan.
+
+**Setup**: create a free account at alpaca.markets, generate API keys,
+and set `ALPACA_API_KEY_ID`/`ALPACA_API_SECRET_KEY` in your `.env` (see
+`.env.example`). Leave them unset to skip Alpaca entirely - every call
+cleanly reports "Data Unavailable," never a crash.
+
+**Rate limiting**: the Basic plan's real ceiling is 200 historical API
+calls/minute. `alpaca_provider.RateLimiter` enforces this with a sliding
+60-second window that blocks (sleeps) rather than ever sending one
+request over the limit - correct for a batch job, not an interactive
+request path.
+
+**Scanner**: `src/data_providers/alpaca_scanner.py` scales that single
+provider call up to hundreds/low-thousands of symbols for Task D2's
+target of a 500-1,000 stock/ETF universe. It batches symbols (default
+100/request, a practical URL-size choice, not a documented Alpaca
+limit), shares ONE `RateLimiter` across every batch in the run so the
+whole scan - not just one call - stays under the real per-minute
+ceiling, and never aborts the rest of a scan because one batch failed
+(that batch's symbols are recorded `unavailable` with a reason; the
+scan continues). Run it standalone:
+
+```bash
+python -m src.data_providers.alpaca_scanner --timeframe 1Day --days 30 AAPL MSFT NVDA
+# or, with no symbols given, scans src/universe.py's curated candidate pool:
+python -m src.data_providers.alpaca_scanner --timeframe 5Min --days 5
+```
+
+**Cache separation, on purpose**: Alpaca/IEX bars cache to
+`data/raw_iex/{symbol}_{timeframe}.csv` - a DIFFERENT directory and
+filename shape from the existing yfinance consolidated-tape cache at
+`data/raw/{symbol}_daily.csv` (`data_collector.py`, untouched by any of
+this). Every result's `source` is `"alpaca_iex"`, never a generic
+`"alpaca"` - so this free, IEX-only feed can never be silently mistaken
+for a full consolidated tape anywhere downstream (dashboard, reports,
+strategies). This separation is deliberate per Sprint 3's "Free Real
+Market Data" milestone ("Keep IEX-only and consolidated data clearly
+separated") and is explicitly validated in Task D3.
+
 ## Disclaimer
 
 Research and educational tool only. Not financial advice. No trades are placed -
