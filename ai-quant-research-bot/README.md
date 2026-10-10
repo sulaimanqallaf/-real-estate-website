@@ -2967,6 +2967,23 @@ strategies). This separation is deliberate per Sprint 3's "Free Real
 Market Data" milestone ("Keep IEX-only and consolidated data clearly
 separated") and is explicitly validated in Task D3.
 
+**Validation (Task D3)**: `src/data_providers/iex_validation.py` checks
+real 1-minute/5-minute/15-minute bars for schema sanity, impossible OHLC
+ordering, overlapping/sub-duration bars, and - the strongest check -
+whether independently-fetched 1-minute bars resampled up to 5-minute/
+15-minute windows actually agree with Alpaca's own 5-minute/15-minute
+bars to the cent. Run it yourself (needs real Alpaca credentials and
+real network access - this sandbox has neither; see
+`docs/platform/BLOCKERS.md` item 8):
+
+```bash
+python -m src.data_providers.iex_validation SPY AAPL MSFT
+```
+
+It prints a plain PASS/FAIL/UNVALIDATED line per symbol - never a
+fabricated pass; a symbol whose data couldn't be fetched is reported
+`UNVALIDATED` with the reason.
+
 ## Disclaimer
 
 Research and educational tool only. Not financial advice. No trades are placed -

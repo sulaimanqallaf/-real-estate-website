@@ -92,3 +92,24 @@ attempted, or scaffolded as a live path. `src/utils.py`'s
 that. See `docs/platform/ROADMAP.md`'s "Path to the $500 pilot" section for
 what WOULD need to happen first, entirely gated on the user's own future
 explicit sign-off.
+
+## 8. Real-data validation of the new Alpaca Basic/IEX feed (Sprint 3, Task D3)
+**Blocks**: actually confirming Alpaca's real 1-minute/5-minute/15-minute
+bars pass the schema/OHLC/cross-timeframe checks in
+`src/data_providers/iex_validation.py`. The validator itself is real,
+tested code (`tests/test_iex_validation.py`, 28 tests against
+hand-constructed, structurally genuine fixtures) — what's blocked is
+running it against Alpaca's REAL feed from this sandbox: `curl` directly
+against `https://data.alpaca.markets/v2/stocks/bars` returns a `403
+Forbidden organization policy` CONNECT-tunnel rejection (confirmed, not
+assumed), the same class of egress block already hit on every other
+financial-data-vendor host this project touches (`docs.alpaca.markets`,
+crypto exchange hosts — see item 3 above). No `ALPACA_API_KEY_ID`/
+`ALPACA_API_SECRET_KEY` are configured in this sandbox either, so even
+network access alone wouldn't be enough.
+**What you'd need to do**: on a machine with real outbound network access,
+set real Alpaca Basic (free) credentials in `.env` (see `.env.example`),
+then run `python -m src.data_providers.iex_validation` (optionally with
+your own symbols/`--days`). It prints a plain PASS/FAIL/UNVALIDATED line
+per symbol — a genuinely "validated real market data" claim can only be
+made once that command reports `PASS` for real, not from this sandbox.
