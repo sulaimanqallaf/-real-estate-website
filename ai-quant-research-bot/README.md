@@ -2885,6 +2885,66 @@ checkpointed per watchlist ticker for crash recovery. Sends one
 Telegram briefing per cycle, only when something new happened, with
 `heartbeat`/registry status independent of every other agent.
 
+## Strategy Lab - the Autonomous Learning Laboratory (Sprint 4, Priority 4) - `src/agents/strategy_lab.py`
+
+```bash
+python -m src.agents.strategy_lab
+```
+
+Connects research to validation, end to end, reusing code this
+project already trusts rather than inventing anything new:
+
+1. **Generate** - `generate_candidates()` sweeps a small grid
+   (`config["research"]["strategy_lab"]["window_grid"]`, default
+   10/15/20/25/30) into a candidate per `(strategy, symbol)` pair for
+   each strategy with a tunable window (Mean Reversion's `ma_window`,
+   Momentum Breakout's `breakout_window`); Trend Following has no such
+   knob, so it gets exactly one default-parameter candidate, never
+   fake diversity.
+2. **Backtest** - each candidate runs through the exact same
+   `backtester._run_strategy_backtest()` every other analytics module
+   uses, with its overrides merged in via `sandbox._apply_overrides()`
+   (the same allowlisted merge `sandbox.run_hypothesis()` itself uses -
+   no new override path).
+3. **Out-of-sample test** - Task V2's `analytics.walk_forward.
+   run_walk_forward()`, unmodified, on the same overridden config.
+4. **Prevent overfitting** - `analytics.monte_carlo.
+   run_monte_carlo_stress_test()` (Phase 4) bootstraps the candidate's
+   OWN closed trades to show how much its result depends on trade
+   ORDER/luck, never fabricated below 10 trades. The SAME evidence-gated
+   verdict Task V3 built (`INSUFFICIENT_EVIDENCE`/
+   `INCONSISTENT_ACROSS_FOLDS`/`CONSISTENT_IN_BACKTEST`) is reused
+   directly to judge each candidate.
+5. **VectorBT** - `analytics.backtester_crosscheck.run_crosscheck()`,
+   Sprint 3's isolated, optional independent-engine agreement check,
+   run on the candidate's own fills.
+6. **QuantStats** - the same `oss_quant_adapter.run_task
+   ("performance_report", ...)` subprocess task `analytics.
+   performance_report.py` uses for live trades, fed the candidate's
+   own per-trade backtest returns instead - real Sharpe/Sortino/max
+   drawdown/profit factor/win rate/exposure on a labeled BACKTEST
+   candidate. Both step 5 and 6 degrade honestly to `None` when the
+   isolated `.venvs/oss_quant/` venv isn't set up
+   (`scripts/setup_oss_quant_env.sh`).
+7. **Compare** - `rank_candidates()` sorts consistent-in-backtest
+   candidates first, then inconsistent, then insufficient-evidence,
+   and by mean walk-forward fold return within a tier - never a claim
+   about future performance, only a ranking of the evidence gathered.
+
+Every candidate with at least one trade is recorded into the SAME
+`research.hypothesis_ledger` Task P2's Research Scholar Agent writes
+to - one shared, permanent, append-only record of every hypothesis
+this project has ever tested, whichever agent proposed it.
+
+**Never deployed without approval - structurally.** No import of
+`src.execution` anywhere in this module; there is no `promote()`
+function anywhere in this codebase and never has been. A candidate's
+scorecard is a row in a database - reviewing it and deciding whether
+anything is worth a human-reviewed strategy change stays entirely
+outside this module. Checkpointed per `(strategy, symbol)` pair for
+crash recovery; its own process lock, independent of every other
+agent.
+
 ## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
 
 GitHub Issue #1 includes a comment proposing selective integration of

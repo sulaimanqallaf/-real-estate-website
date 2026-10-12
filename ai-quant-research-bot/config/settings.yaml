@@ -415,6 +415,18 @@ research:
     fred_series: [FEDFUNDS, CPIAUCSL, UNRATE, DGS10]
     daily_api_limit_per_source: 50   # per (sec_filings|fred) - see src/agents/budget.py
 
+  # Sprint 4 "Autonomous learning laboratory" milestone (Priority 4) -
+  # the Strategy Lab (src/agents/strategy_lab.py). Generates its own
+  # candidates by sweeping window_grid into each (strategy, symbol)
+  # pair's tunable parameter - never deployed anywhere; see the
+  # module's own docstring for the full multi-stage validation pipeline.
+  strategy_lab:
+    strategy_symbol_pairs:
+      - ["Mean Reversion", "SPY"]
+      - ["Momentum Breakout", "SPY"]
+      - ["Trend Following", "SPY"]
+    window_grid: [10, 15, 20, 25, 30]
+
 # Point-in-time ML dataset builder output (src/dataset_builder.py) - Parquet
 # files, never used to train a model in this phase. See README "ML dataset
 # design".
