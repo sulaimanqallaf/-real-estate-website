@@ -2977,6 +2977,66 @@ permits `src.agents.registry`, `src.agents.heartbeat`, and
 `src.research.paper_memory` - pure bookkeeping reads, no network call
 and no import of `src.execution`.
 
+## Agent Fleet Health Report & Telegram Failure Alerts (Sprint 4, Priority 6) - `src/agents/health_report.py`
+
+```bash
+python -m src.agents.health_report
+```
+
+The daily health report + failure-notification half of Priority 6
+("durable job scheduling, independent agent workers, recovery
+checkpoints, cost limits, daily health reporting and Telegram failure
+notifications") - the rest (durable job registry, checkpoints, cost
+limits) was already built as the shared runtime every Sprint 4 agent
+is built on (`src/agents/registry.py`/`checkpoint.py`/`budget.py` -
+see "Shared agent framework" above). This module is the one piece
+that reads across all three new agents together:
+
+- **`build_fleet_report()`** - one entry per agent (Research Scholar,
+  News Agent, Strategy Lab) with its registry status, heartbeat
+  freshness, and - new this milestone - its daily API budget usage
+  per source (`openalex`/`arxiv`/`semantic_scholar` for Research
+  Scholar, `sec_filings`/`fred` for News Agent), so a quietly-exhausted
+  free-tier quota (previously invisible outside that agent's own log
+  file - `budget.check_and_increment()` returning `False` only logs at
+  `INFO` and skips, it was never a registry `FAILED`) is now visible
+  in one place.
+- **`check_and_alert_fleet()`** - sends a Telegram alert for an agent
+  that is newly `FAILED` or whose heartbeat has newly gone stale, with
+  **deduplication this project didn't have before**: Sprint 3's own
+  `execution/run_health.send_failure_alert()` and `execution/
+  watchdog.send_stale_heartbeat_alert()` both send unconditionally
+  every time they're called (see their docstrings) - fine for a
+  position-monitor watchdog meant to page a human every few minutes
+  until a live trading connection is restored, wrong for a daily/
+  scheduled research job, which would otherwise re-alert on every
+  single health-check tick for the same already-reported failure. A
+  small per-agent JSON dedup file (`data/journal/agents/
+  {agent_name}_last_alert.json`) tracks the `finished_at` of the last
+  FAILED run already alerted on, and whether a stale-heartbeat alert is
+  currently "active" (cleared once the heartbeat recovers, so a second,
+  later stale period alerts again).
+- Same redaction/fail-closed posture as every other Telegram-sending
+  code in this project: every dynamic string is passed through
+  `utils.redact_secrets()` before it reaches a log line or the
+  Telegram API, Telegram is entirely optional (missing
+  `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` just logs and skips, dedup
+  state still advances so a later real alert isn't suppressed by a
+  "pending" send that never happened), and the whole send path is
+  wrapped so a failure in alerting itself can never raise or mask the
+  original problem it's reporting on.
+
+**Strategy Lab now also sends a Telegram run summary** (`_send_telegram_summary()`
+in `src/agents/strategy_lab.py`) - until this milestone it was the one
+Sprint 4 agent with no Telegram wiring at all, unlike Research
+Scholar's and News Agent's own summary-on-every-run notifications.
+
+Reserve launchd label (documented only, like every other job in this
+project - see "Project structure"/section 6 - no `.plist` is ever
+committed to this repo): `com.aiquantresearchbot.agentfleethealth`,
+run periodically (e.g. `StartInterval` every 1800s) - **not** one of
+the 7 existing jobs, and this module makes no change to any of them.
+
 ## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
 
 GitHub Issue #1 includes a comment proposing selective integration of

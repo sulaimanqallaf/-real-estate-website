@@ -282,6 +282,34 @@ def run_lab_cycle(config: dict[str, Any], logger: logging.Logger, now: datetime 
     return summary
 
 
+def _send_telegram_summary(config: dict[str, Any], logger: logging.Logger, summary: dict[str, Any]) -> None:
+    """Sprint 4 Priority 6 ("daily health reporting and Telegram
+    failure notifications"): same best-effort, Telegram-optional
+    pattern `research_scholar.py`/`news_agent.py` already use - until
+    this, Strategy Lab was the one Sprint 4 agent with no Telegram
+    wiring of its own at all."""
+    import os
+
+    from .. import telegram_bot
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.info("Strategy Lab: Telegram not configured, skipping summary notification.")
+        return
+
+    lines = [
+        "Strategy Lab - daily summary",
+        f"Candidates generated: {summary['candidates_generated']}, evaluated: {summary['candidates_evaluated']}",
+    ]
+    top = summary.get("top_candidate")
+    if top:
+        lines.append(f"Top candidate: {top['hypothesis_id']} ({top['strategy_name']}/{top['symbol']}) - {top['verdict']}")
+    if summary["errors"]:
+        lines.append(f"Errors: {len(summary['errors'])} (see logs)")
+    telegram_bot.send_report(token, chat_id, "\n".join(lines), 3500, logger)
+
+
 def main() -> int:
     """`python -m src.agents.strategy_lab` - runs one full lab cycle.
     Has its own singleton lock, independent of every other process in
@@ -303,6 +331,7 @@ def main() -> int:
 
     summary = run_lab_cycle(config, logger)
     print(f"Strategy Lab: {summary}")
+    _send_telegram_summary(config, logger, summary)
     return 1 if summary["errors"] else 0
 
 

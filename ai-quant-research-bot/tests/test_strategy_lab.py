@@ -349,3 +349,46 @@ def test_main_returns_zero_on_a_clean_run(tmp_path, monkeypatch):
     monkeypatch.setattr(lab, "run_lab_cycle", lambda cfg, logger: {"candidates_generated": 0, "candidates_evaluated": 0, "top_candidate": None, "errors": []})
 
     assert lab.main() == 0
+
+
+def test_main_sends_a_telegram_summary_when_configured(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setattr("src.utils.load_env", lambda: None)
+    monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
+    monkeypatch.setattr(
+        lab, "run_lab_cycle",
+        lambda cfg, logger: {
+            "candidates_generated": 5, "candidates_evaluated": 5,
+            "top_candidate": {"hypothesis_id": "h1", "strategy_name": "Mean Reversion", "symbol": "SPY", "verdict": "CONSISTENT_IN_BACKTEST", "verdict_reason": "ok"},
+            "errors": [],
+        },
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    sent = {}
+
+    def _fake_send_report(token, chat_id, text, max_chars, logger):
+        sent["text"] = text
+        return True
+
+    monkeypatch.setattr("src.telegram_bot.send_report", _fake_send_report)
+
+    assert lab.main() == 0
+    assert "Strategy Lab" in sent["text"]
+    assert "h1" in sent["text"]
+
+
+def test_main_skips_telegram_when_not_configured(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setattr("src.utils.load_env", lambda: None)
+    monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
+    monkeypatch.setattr(lab, "run_lab_cycle", lambda cfg, logger: {"candidates_generated": 0, "candidates_evaluated": 0, "top_candidate": None, "errors": []})
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    def _should_not_be_called(*a, **k):
+        raise AssertionError("send_report must not be called without Telegram configured")
+
+    monkeypatch.setattr("src.telegram_bot.send_report", _should_not_be_called)
+    assert lab.main() == 0
