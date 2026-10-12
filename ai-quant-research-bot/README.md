@@ -2767,6 +2767,82 @@ moment you tap Approve rather than just once at send time is `aggressive_mode.
 enabled` for Aggressive candidates (see "Read this before you trust the output"
 above).
 
+## Research Scholar Agent (Sprint 4, Priority 2) - `src/agents/research_scholar.py`
+
+```bash
+python -m src.agents.research_scholar
+```
+
+An independent, daily agent that reads real academic research and
+turns promising findings into falsifiable, real-backtested
+hypotheses - entirely separate from the daily `src/main.py` run and
+from every other scheduled job in this project (its own process lock,
+`data/journal/agents/research_scholar.lock`, and its own optional
+launchd label, `com.aiquantresearchbot.researchscholar`, never one of
+the 7 existing jobs).
+
+One cycle:
+
+1. **Fetch** - for each configured research query
+   (`config["research"]["scholar"]["queries"]`), real search calls to
+   `src/data_providers/openalex_provider.py`, `arxiv_provider.py`
+   (scoped to arXiv's own `q-fin` category), and
+   `semantic_scholar_provider.py` - all free, no API key. Each source
+   is gated by `src/agents/budget.py`'s daily call cap
+   (`daily_api_limit_per_source`, default 20/source/day) so this never
+   exceeds these free APIs' real rate limits; one provider failing
+   never stops the other two.
+2. **Deduplicate** - `src/research/papers.dedupe_papers()` merges the
+   same paper found by more than one source (by DOI/arXiv id, falling
+   back to a normalized title), keeping whichever record has richer
+   metadata.
+3. **Evaluate evidence** - `src/research/papers.score_evidence()`, a
+   documented 0-1 TRIAGE HEURISTIC (citation tier + empirical-keyword
+   presence + strategy-archetype match) - explicitly not a claim about
+   a paper's actual scientific validity, only about whether it's worth
+   the cost of a real backtest.
+4. **Generate falsifiable hypotheses** - only for papers clearing
+   `min_evidence_score_for_hypothesis` (default 0.5).
+   `src/research/hypothesis_mapper.py` matches a paper's title/
+   abstract against this project's own strategy archetypes (Mean
+   Reversion/Momentum Breakout/Trend Following) and states the claim
+   in plain English, e.g. "Momentum Breakout produces a positive total
+   return on SPY... falsified if the real backtest shows zero trades,
+   a non-positive total return, or a negative Sharpe ratio" - then
+   actually runs it through `src/research/sandbox.run_hypothesis()`
+   (the real backtester, real yfinance history) and records the result
+   into `src/research/hypothesis_ledger.py`, exactly the same
+   sandbox/ledger Sprint 2 built, with the exact same hard safety
+   boundary: no network access inside the sandbox, no broker/execution
+   import anywhere, and **no `promote()` function anywhere in this
+   codebase** - a hypothesis result is a row in a database, never a
+   path into a real strategy change.
+5. **Store permanent research memory** - EVERY paper seen (not just
+   the ones that cleared the evidence bar) is recorded into
+   `src/research/paper_memory.py`'s own database
+   (`data/research/paper_memory.db`, separate from the hypothesis
+   ledger's own `data/research/research_hypotheses.db`), with its full
+   citation (title/authors/venue/year/DOI/arXiv id/URL) preserved so
+   any hypothesis can always be traced back to a checkable source.
+
+**Recovery and resilience** (Priority 6): a heartbeat
+(`data/journal/agents/research_scholar_heartbeat.json`), a durable
+job-status record (`data/journal/agents/research_scholar_status.json`,
+what the AI Company Dashboard reads), and a resumable checkpoint
+(`data/journal/agents/research_scholar_checkpoint.json`) - an
+interrupted run resumes from the next not-yet-completed query rather
+than re-spending its daily API budget re-fetching work it already did.
+A completed run sends a one-message Telegram summary if
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are configured (optional, best-effort).
+
+**Honest limitation**: the OpenAlex/arXiv/Semantic Scholar REST
+contracts in this codebase are written from each API's publicly
+documented format, not verified against a real response - every one
+of those hosts is blocked from this project's own development sandbox
+(confirmed via `curl`; see `docs/platform/BLOCKERS.md` item 10). Run
+this on a machine with real network access to get real evidence of
+whether the parsing logic matches reality.
+
 ## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
 
 GitHub Issue #1 includes a comment proposing selective integration of

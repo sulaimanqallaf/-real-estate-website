@@ -23,10 +23,12 @@ data/reports/*
 data/journal/*
 data/models/*
 data/runtime/*
+data/research/*
 !data/raw/.gitkeep
 !data/raw_iex/.gitkeep
 !data/processed/.gitkeep
 !data/reports/.gitkeep
+!data/research/.gitkeep
 !data/journal/.gitkeep
 !data/models/.gitkeep
 !data/runtime/.gitkeep

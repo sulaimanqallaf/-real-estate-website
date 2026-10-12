@@ -140,3 +140,29 @@ evidence-gated verdict per strategy - see README "Transparent strategy
 validation report"). Read the verdict literally: `INSUFFICIENT_EVIDENCE`
 or `INCONSISTENT_ACROSS_FOLDS` means exactly what it says, not "run it
 again and hope."
+
+## 10. Real-data verification of the Research Scholar Agent's academic providers (Sprint 4, Task P2)
+**Blocks**: confirming `src/data_providers/openalex_provider.py`,
+`arxiv_provider.py`, and `semantic_scholar_provider.py` actually parse a
+REAL response correctly. Unlike Sprint 3's Alpaca provider (verified
+against the real `alpaca-py` SDK source), there is no SDK to check these
+three APIs' JSON/XML shape against - each module's REST contract is
+written from that API's publicly documented format, as best understood,
+and has never been run against a real response: `curl` directly against
+`api.openalex.org`, `export.arxiv.org`, and `api.semanticscholar.org` all
+return a `403 Forbidden organization policy` CONNECT-tunnel rejection from
+this sandbox (confirmed, not assumed) - the same class of block as every
+other external host this project touches. Every provider's own tests
+(`tests/test_openalex_provider.py`, `test_arxiv_provider.py`,
+`test_semantic_scholar_provider.py`) prove the PARSING LOGIC is correct
+against hand-built fixtures that match the documented schema as best
+understood; none of them prove the real API still matches that schema.
+**What you'd need to do**: on a machine with real outbound network
+access, run `python -m src.agents.research_scholar` (no credentials
+needed - all three APIs are free and keyless) and inspect its output and
+`data/research/paper_memory.db` for real papers with sane-looking
+titles/abstracts/citation counts. If a real response's shape differs from
+what's assumed here, the affected provider degrades to returning fewer/no
+results (never raises, never fabricates a malformed `Paper`) rather than
+visibly erroring - so the very first real run's output should be read by
+a human, not assumed correct.

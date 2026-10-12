@@ -390,6 +390,22 @@ providers:
     enabled: true            # gated further at runtime on ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY (see .env.example)
                              # feed is ALWAYS "iex" (Basic/free plan) - hardcoded in src/data_providers/alpaca_provider.py, not configurable here on purpose
 
+# Sprint 4 "Autonomous academic research" milestone (Priority 2) - the
+# Research Scholar Agent (src/agents/research_scholar.py). Not a
+# secret: an optional contact email for OpenAlex's "polite pool"
+# (faster/more reliable rate limits, no credential involved) - leave
+# blank to use OpenAlex's anonymous pool.
+research:
+  contact_email: ""
+  scholar:
+    queries:
+      - "momentum anomaly equity returns"
+      - "mean reversion stock returns"
+      - "trend following futures returns"
+    symbols: [SPY, QQQ]
+    min_evidence_score_for_hypothesis: 0.5
+    daily_api_limit_per_source: 20   # per (openalex|arxiv|semantic_scholar) - see src/agents/budget.py
+
 # Point-in-time ML dataset builder output (src/dataset_builder.py) - Parquet
 # files, never used to train a model in this phase. See README "ML dataset
 # design".
