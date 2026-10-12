@@ -2945,6 +2945,38 @@ outside this module. Checkpointed per `(strategy, symbol)` pair for
 crash recovery; its own process lock, independent of every other
 agent.
 
+## AI Company Dashboard (Sprint 4, Priority 5)
+
+Two new read-only panels in the existing React dashboard
+(`dashboard/frontend/src/panels/`) surface the Sprint 4 agents'
+genuine activity - same `usePolling()` + `GET /api/...` pattern as
+every other panel, so neither one can ever place an order or change a
+risk setting.
+
+- **`AgentOperationsPanel.tsx`** (`GET /api/agent-operations`, reads
+  `src/agents/registry.py` + `src/agents/heartbeat.py`) - one row per
+  known agent (Research Scholar, News Agent, Strategy Lab, plus the
+  pre-existing position monitor) showing its last run's real
+  `RUNNING`/`SUCCESS`/`FAILED` status, start/finish time, summary or
+  error text, and heartbeat freshness (`OK`, `STALE`, or
+  `never started`) - never a fabricated "healthy" when an agent has
+  simply never run.
+- **`ResearchMemoryPanel.tsx`** (`GET /api/research-memory`, reads
+  `src/research/paper_memory.py`'s permanent SQLite store) - every
+  paper the Research Scholar Agent has recorded, with its citation
+  count, evidence score (`overall_score`/`citation_tier`/matched
+  strategies), and which hypothesis IDs (if any) it produced in the
+  shared `hypothesis_ledger` - so a claim like "this paper justifies
+  that hypothesis" is always traceable back to a citation, not
+  asserted on its own.
+
+Both endpoints follow the same safety posture as every other
+dashboard route: `dashboard/backend/app/readonly.py`'s AST-enforced
+`src.*` import allow-list (`test_readonly_safety.py`) now also
+permits `src.agents.registry`, `src.agents.heartbeat`, and
+`src.research.paper_memory` - pure bookkeeping reads, no network call
+and no import of `src.execution`.
+
 ## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
 
 GitHub Issue #1 includes a comment proposing selective integration of

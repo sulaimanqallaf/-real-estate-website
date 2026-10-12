@@ -1,6 +1,6 @@
 import type {
-  BacktestPerformance, DataProviderHealth, DecisionRow, HealthReport, LearningExperiments,
-  MarketScanner, ModesAvailability, PaperPnlSummary, PositionsAndOrders, ResearchAnalytics,
+  AgentOperations, BacktestPerformance, DataProviderHealth, DecisionRow, HealthReport, LearningExperiments,
+  MarketScanner, ModesAvailability, PaperPnlSummary, PositionsAndOrders, ResearchAnalytics, ResearchMemory,
   RiskStatus, RunStatus, SpendSummary, TradingAgentsResult,
 } from "./types";
 
@@ -28,4 +28,6 @@ export const api = {
   marketScanner: (limit = 100) => getJson<MarketScanner | null>(`/api/market-scanner?limit=${limit}`),
   researchAnalytics: (hypothesisLimit = 20) => getJson<ResearchAnalytics>(`/api/research-analytics?hypothesis_limit=${hypothesisLimit}`),
   dataProviderHealth: () => getJson<DataProviderHealth>("/api/data-provider-health"),
+  agentOperations: () => getJson<AgentOperations>("/api/agent-operations"),
+  researchMemory: (limit = 20) => getJson<ResearchMemory>(`/api/research-memory?limit=${limit}`),
 };

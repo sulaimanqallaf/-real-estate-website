@@ -69,6 +69,10 @@ def test_readonly_module_only_imports_the_allow_listed_src_modules():
         # Sprint 3 "Free Real Market Data" milestone: same is_configured()-
         # only pattern as every other provider above, no network call.
         "src.data_providers.alpaca_provider",
+        # Sprint 4 "AI Company Dashboard" milestone: pure bookkeeping
+        # (src/agents/__init__.py's own docstring) - no network, no
+        # src.execution import of their own.
+        "src.agents.registry", "src.agents.heartbeat", "src.research.paper_memory",
     }
     tree = ast.parse((BACKEND_ROOT / "app" / "readonly.py").read_text(encoding="utf-8"))
     found = set()

@@ -6,15 +6,15 @@ here ever writes to any bot-owned file, places an order, calls an LLM
 provider, or imports anything execution/broker-facing.
 
 **Hard safety invariant, enforced structurally** (see
-`tests/test_readonly_safety.py`): this module may import from
-`src.execution.run_health`, `src.execution.circuit_breaker`,
-`src.execution.unattended_readiness`, `src.ml.decision_ledger`,
-`src.ml.model_registry`, `src.ml.model_events`, `src.universe`,
-`src.intelligence.tradingagents_adapter`, `src.intelligence.
-tradingagents_spend`, `src.paper_trades`, and `src.utils` only - never
-`src.execution.order_manager`, `src.execution.execution_policy`,
-`src.execution.ibkr_client`, `src.execution.broker`,
-`src.execution.approval_bridge`, or `src.main.run`. The dashboard has
+`tests/test_readonly_safety.py` for the exact, current allow-list):
+this module may import only from an explicit allow-list of `src.*`
+modules - `src.execution.circuit_breaker`/`run_health` (never
+`order_manager`/`execution_policy`/`ibkr_client`/`broker`/
+`approval_bridge`), the read-only ML/research/analytics/data-provider
+modules, and - Sprint 4 - `src.agents.registry`/`heartbeat` and
+`src.research.paper_memory` (both pure bookkeeping, no network, no
+`src.execution` import of their own - see `src/agents/__init__.py`).
+Never `src.main.run`. The dashboard has
 no code path that can place an order, change a risk setting, or
 trigger a real run, by construction. `positions_and_orders()` below
 reads the SAME `executions.jsonl` file `order_manager.ExecutionJournal`
@@ -355,3 +355,38 @@ def data_provider_health() -> dict[str, Any]:
         {"name": "alpaca_iex", "configured": alpaca_provider.alpaca_configured()},
     ]
     return _redact_deep({"providers": providers})
+
+
+def agent_operations() -> dict[str, Any]:
+    """Sprint 4 Priority 5 "AI Company Dashboard": genuine status for
+    every autonomous agent that has ever run (Research Scholar, News
+    Agent, Strategy Lab, and any future agent built on
+    `src.agents.registry`) - job status, timestamps, and the
+    summary/error from its LATEST run, plus heartbeat liveness. An
+    agent that has never run simply doesn't appear in the list (never
+    fabricated as "idle" or "ok") - see `src.agents.registry`'s own
+    docstring for why this is a one-file-per-agent latest-run record,
+    not a history."""
+    from src.agents import heartbeat, registry
+
+    config = get_config()
+    agents = []
+    for name in registry.list_known_agents(config):
+        agents.append({"name": name, "status": registry.read_status(config, name), "heartbeat": heartbeat.heartbeat_status(config, name)})
+    return _redact_deep({"agents": agents})
+
+
+def research_memory(limit: int = 20) -> dict[str, Any]:
+    """Permanent research memory with citations (Sprint 4 Task P2) -
+    the most-recently-seen papers from `src.research.paper_memory`,
+    each with its evidence score and which hypothesis(es) (if any) it
+    generated. Returns an empty list (never fabricated) before the
+    Research Scholar Agent has run for the first time."""
+    from src.research import paper_memory
+
+    config = get_config()
+    try:
+        papers = paper_memory.query_papers(paper_memory.default_db_path(config), limit=limit)
+    except Exception:  # noqa: BLE001 - dashboard diagnostics must never crash on a missing/misconfigured database
+        papers = []
+    return _redact_deep({"papers": papers})

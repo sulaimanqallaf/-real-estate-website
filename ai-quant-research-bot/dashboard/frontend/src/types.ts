@@ -253,3 +253,59 @@ export interface DataProviderStatus {
 export interface DataProviderHealth {
   providers: DataProviderStatus[];
 }
+
+// --- Sprint 4 "AI Company Dashboard" (Priority 5) --------------------------------------
+
+export interface AgentRunStatus {
+  agent_name: string;
+  status: "RUNNING" | "SUCCESS" | "FAILED";
+  started_at: string;
+  finished_at: string | null;
+  summary: string | null;
+  error: string | null;
+  extra: Record<string, unknown>;
+}
+
+export interface AgentHeartbeatStatus {
+  last_heartbeat_at: string | null;
+  age_seconds: number | null;
+  stale: boolean;
+  never_started: boolean;
+}
+
+export interface AgentOperationEntry {
+  name: string;
+  status: AgentRunStatus | null;
+  heartbeat: AgentHeartbeatStatus;
+}
+
+export interface AgentOperations {
+  agents: AgentOperationEntry[];
+}
+
+export interface PaperEvidenceScore {
+  citation_tier: string;
+  has_empirical_keywords: boolean;
+  matched_strategies: string[];
+  overall_score: number;
+}
+
+export interface ResearchMemoryPaper {
+  paper_key: string;
+  title: string;
+  authors: string[];
+  year: number | null;
+  venue: string | null;
+  citation_count: number | null;
+  url: string | null;
+  external_ids: Record<string, string>;
+  sources: string[];
+  evidence_score: PaperEvidenceScore | null;
+  hypothesis_ids: string[];
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface ResearchMemory {
+  papers: ResearchMemoryPaper[];
+}

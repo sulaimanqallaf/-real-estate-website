@@ -1,6 +1,7 @@
 import { useState } from "react";
 import "./dashboard.css";
 import { api } from "./api";
+import { AgentOperationsPanel } from "./panels/AgentOperationsPanel";
 import { Banners } from "./panels/Banners";
 import { BacktestPanel } from "./panels/BacktestPanel";
 import { DataProviderHealthPanel } from "./panels/DataProviderHealthPanel";
@@ -11,6 +12,7 @@ import { MarketScannerPanel } from "./panels/MarketScannerPanel";
 import { ModeBar } from "./panels/ModeBar";
 import { PositionsOrdersPanel } from "./panels/PositionsOrdersPanel";
 import { ResearchAnalyticsPanel } from "./panels/ResearchAnalyticsPanel";
+import { ResearchMemoryPanel } from "./panels/ResearchMemoryPanel";
 import { RiskPanel } from "./panels/RiskPanel";
 import { PnlPanel, SpendPanel } from "./panels/SpendAndPnlPanel";
 import { TimelinePanel } from "./panels/TimelinePanel";
@@ -36,6 +38,8 @@ export default function App() {
   const { data: scanner } = usePolling(() => api.marketScanner(100), 20000);
   const { data: researchAnalytics } = usePolling(() => api.researchAnalytics(20), 60000);
   const { data: providerHealth } = usePolling(api.dataProviderHealth, 60000);
+  const { data: agentOperations } = usePolling(api.agentOperations, 20000);
+  const { data: researchMemory } = usePolling(() => api.researchMemory(20), 60000);
 
   const { connected, lastEvent, timeline, error } = useAgentEvents({ mode });
 
@@ -60,6 +64,8 @@ export default function App() {
           <BacktestPanel backtest={backtest} />
           <LearningExperimentsPanel data={learning} />
           <ResearchAnalyticsPanel data={researchAnalytics} />
+          <AgentOperationsPanel data={agentOperations} />
+          <ResearchMemoryPanel data={researchMemory} />
           <DataProviderHealthPanel data={providerHealth} />
           <SpendPanel spend={spend} />
           <PnlPanel pnl={pnl} />

@@ -30,6 +30,8 @@ def client(monkeypatch):
     monkeypatch.setattr(readonly, "market_scanner", lambda limit=100: None)
     monkeypatch.setattr(readonly, "research_analytics", lambda hypothesis_limit=20: {"performance_report": None, "monte_carlo": None, "regime_breakdown": None, "hypotheses": []})
     monkeypatch.setattr(readonly, "data_provider_health", lambda: {"providers": []})
+    monkeypatch.setattr(readonly, "agent_operations", lambda: {"agents": []})
+    monkeypatch.setattr(readonly, "research_memory", lambda limit=20: {"papers": []})
     return TestClient(main.app)
 
 
@@ -120,3 +122,27 @@ def test_data_provider_health_endpoint(client):
     response = client.get("/api/data-provider-health")
     assert response.status_code == 200
     assert response.json() == {"providers": []}
+
+
+def test_agent_operations_endpoint(client):
+    response = client.get("/api/agent-operations")
+    assert response.status_code == 200
+    assert response.json() == {"agents": []}
+
+
+def test_research_memory_endpoint(client):
+    response = client.get("/api/research-memory")
+    assert response.status_code == 200
+    assert response.json() == {"papers": []}
+
+
+def test_research_memory_endpoint_respects_limit_param(monkeypatch, client):
+    captured = {}
+
+    def _fake_research_memory(limit=20):
+        captured["limit"] = limit
+        return {"papers": []}
+
+    monkeypatch.setattr(readonly, "research_memory", _fake_research_memory)
+    client.get("/api/research-memory?limit=5")
+    assert captured["limit"] == 5

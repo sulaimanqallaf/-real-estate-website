@@ -119,6 +119,16 @@ def api_data_provider_health() -> dict:
     return readonly.data_provider_health()
 
 
+@app.get("/api/agent-operations")
+def api_agent_operations() -> dict:
+    return readonly.agent_operations()
+
+
+@app.get("/api/research-memory")
+def api_research_memory(limit: int = 20) -> dict:
+    return readonly.research_memory(limit=limit)
+
+
 @app.get("/api/modes")
 def api_modes() -> dict:
     return {"live": True, "replay": True, "demo": _demo_mode_allowed()}
