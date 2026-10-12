@@ -75,7 +75,10 @@ def fetch_papers(
     try:
         payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary, same pattern as every other provider in this package
-        return base.provider_error(SOURCE_SEMANTIC_SCHOLAR, f"failed to fetch Semantic Scholar results for query {query!r}: {exc}")
+        detail = f"failed to fetch Semantic Scholar results for query {query!r}: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_SEMANTIC_SCHOLAR, detail)
+        return base.provider_error(SOURCE_SEMANTIC_SCHOLAR, detail)
 
     raw_results = payload.get("data") or []
     papers = [p for p in (_parse_paper(r) for r in raw_results) if p is not None]

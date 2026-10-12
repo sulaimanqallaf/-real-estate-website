@@ -120,7 +120,9 @@ def test_fetch_papers_handles_malformed_xml_as_provider_error(monkeypatch):
     assert result.status == base.STATUS_ERROR
 
 
-def test_fetch_papers_returns_provider_error_on_network_failure(monkeypatch):
+def test_fetch_papers_returns_provider_blocked_on_a_network_failure(monkeypatch):
+    """Sprint 5: a connection-level failure is BLOCKED, not FAIL -
+    distinct from the malformed-XML case above, which IS a real FAIL."""
     import requests
 
     def _raise(*a, **k):
@@ -129,7 +131,7 @@ def test_fetch_papers_returns_provider_error_on_network_failure(monkeypatch):
     _disable_retry_backoff(monkeypatch)
     monkeypatch.setattr(requests, "get", _raise)
     result = av.fetch_papers("query", {}, LOGGER)
-    assert result.status == base.STATUS_ERROR
+    assert result.status == base.STATUS_BLOCKED
 
 
 def test_fetch_papers_handles_an_entry_with_no_published_date(monkeypatch):

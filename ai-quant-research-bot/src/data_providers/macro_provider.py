@@ -134,7 +134,10 @@ def fetch_series_latest(series_id: str, api_key: str | None = None, timeout: int
     try:
         payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
-        return base.provider_error(SOURCE_FRED, f"failed to fetch FRED series {series_id}: {exc}")
+        detail = f"failed to fetch FRED series {series_id}: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_FRED, detail)
+        return base.provider_error(SOURCE_FRED, detail)
 
     observations = parse_fred_observations(payload, series_id)
     if not observations:

@@ -44,7 +44,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..utils import resolve_path
+from ..data_providers import base
+from ..utils import redact_secrets, resolve_path
 from . import budget, checkpoint, heartbeat, registry
 
 AGENT_NAME = "news_agent"
@@ -80,10 +81,21 @@ def _save_seen_state(config: dict[str, Any], state: dict[str, list[str]]) -> Non
     path.write_text(json.dumps({"sec_accessions": sorted(set(state["sec_accessions"])), "fred_observations": sorted(set(state["fred_observations"]))}, indent=2), encoding="utf-8")
 
 
-def _fetch_filings_for_ticker(ticker: str, config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
+def _fetch_filings_for_ticker(ticker: str, config: dict[str, Any], logger: logging.Logger, summary: dict[str, Any]) -> list[dict[str, Any]]:
     """Returns new, not-yet-seen 8-K/Form 4 filings for `ticker` - `[]`
     (never raises) if the CIK can't be resolved, SEC isn't configured,
-    or the daily budget for this source is exhausted."""
+    or the daily budget for this source is exhausted.
+
+    Sprint 5 ("failed external providers must be visible as failures,
+    not silently appearing healthy"): calls `fetch_company_tickers()`
+    directly (rather than the convenience wrapper
+    `resolve_cik_for_ticker()`, which collapses every failure reason
+    into a plain `None`) so a real `STATUS_ERROR`/`STATUS_BLOCKED` on
+    the ticker->CIK lookup, or on the filings fetch itself, is recorded
+    into `summary["provider_issues"]` - previously invisible beyond a
+    `logger.warning` line. A ticker genuinely not found in SEC's own
+    map (lookup itself `STATUS_OK`) is NOT an issue - that is an
+    honest, expected non-answer."""
     from ..data_providers import sec_provider
 
     daily_limit = _news_config(config).get("daily_api_limit_per_source", DEFAULT_DAILY_LIMIT_PER_SOURCE)
@@ -94,19 +106,35 @@ def _fetch_filings_for_ticker(ticker: str, config: dict[str, Any], logger: loggi
     try:
         cik = sec_provider.resolve_cik_for_ticker(ticker, config, logger)
         if cik is None:
-            logger.info("News Agent: could not resolve a CIK for %s.", ticker)
+            # resolve_cik_for_ticker() collapses every failure reason into
+            # a plain None - call fetch_company_tickers() once more just
+            # to classify WHY, so a real lookup failure is recorded as an
+            # issue rather than silently treated the same as "ticker
+            # genuinely not in SEC's map" (an honest non-answer).
+            tickers_result = sec_provider.fetch_company_tickers(config, logger)
+            if tickers_result.status in (base.STATUS_ERROR, base.STATUS_BLOCKED):
+                summary["provider_issues"].append(
+                    {"source": "sec_filings", "ticker": ticker, "status": tickers_result.status, "detail": redact_secrets(tickers_result.error or "")}
+                )
+            else:
+                logger.info("News Agent: could not resolve a CIK for %s.", ticker)
             return []
+
         result = sec_provider.fetch_recent_filings(cik, form_types=("8-K", "4"))
     except Exception as exc:  # noqa: BLE001 - one ticker's failure must never stop the rest of the watchlist
         logger.warning("News Agent: SEC fetch for %s raised: %s", ticker, exc)
+        summary["provider_issues"].append({"source": "sec_filings", "ticker": ticker, "status": "exception", "detail": redact_secrets(str(exc))})
         return []
+
+    if result.status in (base.STATUS_ERROR, base.STATUS_BLOCKED):
+        summary["provider_issues"].append({"source": "sec_filings", "ticker": ticker, "status": result.status, "detail": redact_secrets(result.error or "")})
 
     if not result.ok:
         return []
     return [{**f, "ticker": ticker} for f in result.data]
 
 
-def _fetch_economic_events(series_ids: list[str], config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
+def _fetch_economic_events(series_ids: list[str], config: dict[str, Any], logger: logging.Logger, summary: dict[str, Any]) -> list[dict[str, Any]]:
     from ..data_providers import macro_provider
 
     daily_limit = _news_config(config).get("daily_api_limit_per_source", DEFAULT_DAILY_LIMIT_PER_SOURCE)
@@ -119,7 +147,10 @@ def _fetch_economic_events(series_ids: list[str], config: dict[str, Any], logger
             result = macro_provider.fetch_series_latest(series_id)
         except Exception as exc:  # noqa: BLE001 - one series' failure must never stop the rest
             logger.warning("News Agent: FRED fetch for %s raised: %s", series_id, exc)
+            summary["provider_issues"].append({"source": "fred", "series_id": series_id, "status": "exception", "detail": redact_secrets(str(exc))})
             continue
+        if result.status in (base.STATUS_ERROR, base.STATUS_BLOCKED):
+            summary["provider_issues"].append({"source": "fred", "series_id": series_id, "status": result.status, "detail": redact_secrets(result.error or "")})
         if result.ok:
             events.extend({"series_id": series_id, "value": o.value, "observation_date": str(o.observation_date), "available_at": str(o.available_at)} for o in result.data)
     return events
@@ -136,7 +167,7 @@ def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | Non
     fred_series: list[str] = news_cfg.get("fred_series") or DEFAULT_FRED_SERIES
 
     summary: dict[str, Any] = {
-        "tickers_checked": [], "new_filings": [], "new_economic_events": [], "errors": [],
+        "tickers_checked": [], "new_filings": [], "new_economic_events": [], "errors": [], "provider_issues": [],
     }
 
     try:
@@ -149,7 +180,7 @@ def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | Non
                 logger.info("News Agent: %s already checked this cycle (resuming), skipping.", ticker)
                 continue
 
-            filings = _fetch_filings_for_ticker(ticker, config, logger)
+            filings = _fetch_filings_for_ticker(ticker, config, logger, summary)
             for filing in filings:
                 accession = filing.get("accession_number")
                 if accession and accession not in seen["sec_accessions"]:
@@ -160,7 +191,7 @@ def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | Non
             summary["tickers_checked"].append(ticker)
             checkpoint.save_checkpoint(config, AGENT_NAME, {"tickers_checked": sorted(already_checked)})
 
-        events = _fetch_economic_events(fred_series, config, logger)
+        events = _fetch_economic_events(fred_series, config, logger, summary)
         for event in events:
             key = f"{event['series_id']}:{event['observation_date']}"
             if key not in seen["fred_observations"]:
@@ -207,6 +238,11 @@ def format_briefing_text(summary: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"Errors this cycle: {len(summary['errors'])} (see logs)")
 
+    if summary["provider_issues"]:
+        lines.append("")
+        sources = ", ".join(sorted({issue["source"] for issue in summary["provider_issues"]}))
+        lines.append(f"Provider issues this cycle: {len(summary['provider_issues'])} ({sources}) - see logs for detail")
+
     lines.append("")
     lines.append("This agent never places, suggests, or triggers a trade - informational only.")
     return "\n".join(lines)
@@ -217,7 +253,7 @@ def _send_telegram_briefing(config: dict[str, Any], logger: logging.Logger, summ
 
     from .. import telegram_bot
 
-    if not summary["new_filings"] and not summary["new_economic_events"]:
+    if not summary["new_filings"] and not summary["new_economic_events"] and not summary["provider_issues"]:
         logger.info("News Agent: nothing new this cycle, skipping Telegram briefing.")
         return
 

@@ -83,11 +83,12 @@ def test_stale_or_all_missing_observations_does_not_crash_and_reports_unavailabl
     assert result.data is None
 
 
-def test_network_failure_returns_provider_error_not_an_exception(monkeypatch):
-    """This test is about the FINAL provider_error() behavior, not
+def test_network_failure_returns_provider_blocked_not_an_exception(monkeypatch):
+    """This test is about the FINAL provider_blocked() behavior, not
     about retry timing (that's reliability.py's own test suite) - the
     retry decorator is disabled here so a persistently-failing mock
-    doesn't pay Sprint 3's real multi-second backoff on every test run."""
+    doesn't pay Sprint 3's real multi-second backoff on every test run.
+    Sprint 5: a connection-level failure is BLOCKED, not FAIL."""
     from src import reliability
 
     monkeypatch.setattr(reliability, "retrying", lambda *a, **k: (lambda f: f))
@@ -100,7 +101,7 @@ def test_network_failure_returns_provider_error_not_an_exception(monkeypatch):
 
     monkeypatch.setattr(requests, "get", _boom)
     result = mp.fetch_series_latest(mp.SERIES_FED_FUNDS_RATE)
-    assert result.status == base.STATUS_ERROR
+    assert result.status == base.STATUS_BLOCKED
 
 
 def test_a_transient_failure_followed_by_success_recovers_via_retry(monkeypatch):

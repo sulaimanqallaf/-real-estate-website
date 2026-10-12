@@ -191,6 +191,55 @@ def test_run_once_isolates_one_series_crash_from_the_rest(tmp_path, monkeypatch)
     assert summary["new_economic_events"][0]["series_id"] == "CPIAUCSL"
     assert summary["errors"] == []
 
+    # Sprint 5: the isolated failure must still be VISIBLE, not silently
+    # indistinguishable from "FEDFUNDS just had nothing new to report."
+    assert len(summary["provider_issues"]) == 1
+    issue = summary["provider_issues"][0]
+    assert issue["source"] == "fred" and issue["series_id"] == "FEDFUNDS"
+    assert issue["status"] == "exception"
+    assert "FRED is down" in issue["detail"]
+
+
+def test_run_once_records_a_fred_provider_error_status_as_a_visible_issue(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    _patch_sec(monkeypatch)
+    monkeypatch.setattr(macro_provider, "fetch_series_latest", lambda series_id, **k: base.provider_blocked(macro_provider.SOURCE_FRED, "simulated connection refused"))
+
+    summary = na.run_once(config, LOGGER)
+    assert summary["errors"] == []
+    assert len(summary["provider_issues"]) == 1
+    assert summary["provider_issues"][0]["status"] == base.STATUS_BLOCKED
+
+
+def test_run_once_records_a_sec_lookup_failure_as_a_visible_issue(tmp_path, monkeypatch):
+    """A real ticker->CIK lookup failure (not "ticker genuinely not
+    found") must be visible, distinct from the already-covered
+    "unresolvable ticker" case in
+    test_run_once_handles_an_unresolvable_ticker_gracefully."""
+    config = _config(tmp_path)
+    monkeypatch.setattr(sec_provider, "resolve_cik_for_ticker", lambda *a, **k: None)
+    monkeypatch.setattr(sec_provider, "fetch_company_tickers", lambda *a, **k: base.provider_error(sec_provider.SOURCE_COMPANY_TICKERS, "simulated malformed response"))
+    _patch_fred(monkeypatch)
+
+    summary = na.run_once(config, LOGGER)
+    assert summary["errors"] == []
+    assert len(summary["provider_issues"]) == 1
+    issue = summary["provider_issues"][0]
+    assert issue["source"] == "sec_filings"
+    assert issue["status"] == base.STATUS_ERROR
+
+
+def test_run_once_does_not_record_an_issue_for_a_genuinely_unresolvable_ticker(tmp_path, monkeypatch):
+    """The ticker->CIK map itself fetched fine but just doesn't contain
+    this ticker - an honest non-answer, never a recorded issue."""
+    config = _config(tmp_path)
+    monkeypatch.setattr(sec_provider, "resolve_cik_for_ticker", lambda *a, **k: None)
+    monkeypatch.setattr(sec_provider, "fetch_company_tickers", lambda *a, **k: base.ok(sec_provider.SOURCE_COMPANY_TICKERS, {"MSFT": "0000789019"}))
+    _patch_fred(monkeypatch)
+
+    summary = na.run_once(config, LOGGER)
+    assert summary["provider_issues"] == []
+
 
 # --- registry / heartbeat / checkpoint -----------------------------------------------------
 
@@ -258,7 +307,7 @@ def test_format_briefing_text_lists_filings_and_events():
     summary = {
         "new_filings": [{"ticker": "AAPL", "form": "8-K", "filing_date": "2026-01-01", "accession_number": "0001"}],
         "new_economic_events": [{"series_id": "FEDFUNDS", "value": 5.25, "observation_date": "2026-01-01", "available_at": "2026-01-15"}],
-        "errors": [],
+        "errors": [], "provider_issues": [],
     }
     text = na.format_briefing_text(summary)
     assert "AAPL" in text and "8-K" in text
@@ -267,10 +316,20 @@ def test_format_briefing_text_lists_filings_and_events():
 
 
 def test_format_briefing_text_reports_none_honestly():
-    summary = {"new_filings": [], "new_economic_events": [], "errors": []}
+    summary = {"new_filings": [], "new_economic_events": [], "errors": [], "provider_issues": []}
     text = na.format_briefing_text(summary)
     assert "New SEC filings: none" in text
     assert "New economic data: none" in text
+
+
+def test_format_briefing_text_surfaces_provider_issues():
+    summary = {
+        "new_filings": [], "new_economic_events": [], "errors": [],
+        "provider_issues": [{"source": "fred", "series_id": "FEDFUNDS", "status": "blocked", "detail": "connection refused"}],
+    }
+    text = na.format_briefing_text(summary)
+    assert "Provider issues" in text
+    assert "fred" in text
 
 
 # --- main() CLI and Telegram wiring ---------------------------------------------------------
@@ -280,7 +339,7 @@ def test_main_skips_telegram_when_nothing_new(tmp_path, monkeypatch):
     config = _config(tmp_path)
     monkeypatch.setattr("src.utils.load_env", lambda: None)
     monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
-    monkeypatch.setattr(na, "run_once", lambda cfg, logger: {"tickers_checked": [], "new_filings": [], "new_economic_events": [], "errors": []})
+    monkeypatch.setattr(na, "run_once", lambda cfg, logger: {"tickers_checked": [], "new_filings": [], "new_economic_events": [], "errors": [], "provider_issues": []})
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
 
@@ -291,13 +350,38 @@ def test_main_skips_telegram_when_nothing_new(tmp_path, monkeypatch):
     assert na.main() == 0
 
 
+def test_main_sends_a_briefing_when_a_provider_issue_happened_even_with_nothing_new(tmp_path, monkeypatch):
+    """Sprint 5: a real provider failure must surface even when it
+    produced zero new filings/events - previously this agent would
+    stay silent (no new_filings, no new_economic_events) exactly as if
+    everything were healthy."""
+    config = _config(tmp_path)
+    monkeypatch.setattr("src.utils.load_env", lambda: None)
+    monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
+    monkeypatch.setattr(
+        na, "run_once",
+        lambda cfg, logger: {
+            "tickers_checked": ["AAPL"], "new_filings": [], "new_economic_events": [], "errors": [],
+            "provider_issues": [{"source": "sec_filings", "ticker": "AAPL", "status": "blocked", "detail": "connection refused"}],
+        },
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+
+    sent = {}
+    monkeypatch.setattr("src.telegram_bot.send_report", lambda token, chat_id, text, max_chars, logger: sent.setdefault("text", text) or True)
+
+    assert na.main() == 0
+    assert "Provider issues" in sent["text"]
+
+
 def test_main_sends_a_briefing_when_something_new_happened(tmp_path, monkeypatch):
     config = _config(tmp_path)
     monkeypatch.setattr("src.utils.load_env", lambda: None)
     monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
     monkeypatch.setattr(
         na, "run_once",
-        lambda cfg, logger: {"tickers_checked": ["AAPL"], "new_filings": [{"ticker": "AAPL", "form": "8-K", "filing_date": "x", "accession_number": "1"}], "new_economic_events": [], "errors": []},
+        lambda cfg, logger: {"tickers_checked": ["AAPL"], "new_filings": [{"ticker": "AAPL", "form": "8-K", "filing_date": "x", "accession_number": "1"}], "new_economic_events": [], "errors": [], "provider_issues": []},
     )
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")

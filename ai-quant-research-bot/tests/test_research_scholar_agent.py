@@ -155,6 +155,45 @@ def test_run_once_isolates_one_provider_crashing(tmp_path, monkeypatch):
 
     assert summary["papers_seen"] == 1  # arxiv's paper still got through
     assert summary["errors"] == []  # provider-level failures are isolated, not surfaced as a run failure
+    status = registry.read_status(config, rs.AGENT_NAME)
+    assert status["status"] == registry.STATUS_SUCCESS  # isolated failure never flips the overall run to FAILED
+
+    # Sprint 5: the isolated failure must still be VISIBLE, not silently
+    # indistinguishable from a provider that simply found nothing.
+    assert len(summary["provider_issues"]) == 1
+    issue = summary["provider_issues"][0]
+    assert issue["source"] == "openalex"
+    assert issue["status"] == "exception"
+    assert "openalex is down" in issue["detail"]
+
+
+def test_run_once_records_a_provider_error_status_as_a_visible_issue(tmp_path, monkeypatch):
+    """Distinct from an exception (above): a provider that returns a
+    real STATUS_ERROR/STATUS_BLOCKED (never raises) must be equally
+    visible, not silently collapsed to '0 results, all fine'."""
+    config = _config(tmp_path)
+    monkeypatch.setattr(openalex_provider, "fetch_papers", lambda *a, **k: base.provider_error("openalex", "simulated 404"))
+    monkeypatch.setattr(arxiv_provider, "fetch_papers", lambda *a, **k: base.provider_blocked("arxiv", "simulated connection refused"))
+    monkeypatch.setattr(semantic_scholar_provider, "fetch_papers", _fake_fetch([]))
+    _patch_price_history(monkeypatch, config)
+
+    summary = rs.run_once(config, LOGGER)
+
+    assert summary["errors"] == []
+    issues_by_source = {issue["source"]: issue for issue in summary["provider_issues"]}
+    assert issues_by_source["openalex"]["status"] == base.STATUS_ERROR
+    assert issues_by_source["arxiv"]["status"] == base.STATUS_BLOCKED
+
+
+def test_run_once_does_not_record_an_issue_for_a_genuinely_empty_result(tmp_path, monkeypatch):
+    """STATUS_UNAVAILABLE (not configured, or honestly no results) is
+    not a failure - must never be recorded as a provider issue."""
+    config = _config(tmp_path)
+    _patch_all_providers(monkeypatch)  # every provider returns []
+    _patch_price_history(monkeypatch, config)
+
+    summary = rs.run_once(config, LOGGER)
+    assert summary["provider_issues"] == []
 
 
 def test_run_once_respects_the_daily_budget_per_source(tmp_path, monkeypatch):
@@ -240,7 +279,7 @@ def test_main_sends_a_telegram_summary_when_configured(tmp_path, monkeypatch):
     config = _config(tmp_path)
     monkeypatch.setattr("src.utils.load_env", lambda: None)
     monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
-    monkeypatch.setattr(rs, "run_once", lambda cfg, logger: {"queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0, "errors": []})
+    monkeypatch.setattr(rs, "run_once", lambda cfg, logger: {"queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0, "errors": [], "provider_issues": []})
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -257,11 +296,33 @@ def test_main_sends_a_telegram_summary_when_configured(tmp_path, monkeypatch):
     assert "Research Scholar Agent" in sent["text"]
 
 
+def test_telegram_summary_surfaces_provider_issues(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setattr("src.utils.load_env", lambda: None)
+    monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
+    monkeypatch.setattr(
+        rs, "run_once",
+        lambda cfg, logger: {
+            "queries_run": ["q"], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0,
+            "errors": [], "provider_issues": [{"source": "openalex", "query": "q", "status": "blocked", "detail": "connection refused"}],
+        },
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    sent = {}
+    monkeypatch.setattr("src.telegram_bot.send_report", lambda token, chat_id, text, max_chars, logger: sent.setdefault("text", text) or True)
+
+    rs.main()
+    assert "Provider issues" in sent["text"]
+    assert "openalex" in sent["text"]
+
+
 def test_main_skips_telegram_when_not_configured(tmp_path, monkeypatch):
     config = _config(tmp_path)
     monkeypatch.setattr("src.utils.load_env", lambda: None)
     monkeypatch.setattr("src.utils.load_config", lambda path: config | {"logging": {"log_dir": str(tmp_path / "logs")}})
-    monkeypatch.setattr(rs, "run_once", lambda cfg, logger: {"queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0, "errors": []})
+    monkeypatch.setattr(rs, "run_once", lambda cfg, logger: {"queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0, "errors": [], "provider_issues": []})
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 

@@ -65,6 +65,19 @@ def test_format_fleet_report_text_includes_every_agent_name(tmp_path):
     assert "never run" in text
 
 
+def test_format_fleet_report_text_surfaces_provider_issues(tmp_path):
+    config = _config(tmp_path)
+    registry.start_run(config, "research_scholar")
+    registry.finish_run(
+        config, "research_scholar", registry.STATUS_SUCCESS, summary="2 papers seen",
+        extra={"provider_issues": [{"source": "openalex", "status": "blocked", "detail": "connection refused"}]},
+    )
+
+    report = health_report.build_fleet_report(config, LOGGER)
+    text = health_report.format_fleet_report_text(report)
+    assert "Provider issues this run: 1 (openalex)" in text
+
+
 def test_format_fleet_report_text_redacts_an_error_message(tmp_path):
     config = _config(tmp_path)
     registry.start_run(config, "news_agent")

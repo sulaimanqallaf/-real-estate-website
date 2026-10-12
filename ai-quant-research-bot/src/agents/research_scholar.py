@@ -42,6 +42,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ..data_providers import base
+from ..utils import redact_secrets
 from . import budget, checkpoint, heartbeat, registry
 
 AGENT_NAME = "research_scholar"
@@ -60,12 +62,24 @@ def _research_config(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("research", {}).get("scholar", {})
 
 
-def _fetch_one_source(provider_module: Any, source_name: str, query: str, config: dict[str, Any], logger: logging.Logger) -> list[Any]:
+def _fetch_one_source(
+    provider_module: Any, source_name: str, query: str, config: dict[str, Any], logger: logging.Logger, summary: dict[str, Any]
+) -> list[Any]:
     """Isolated so one provider's failure (or an exhausted daily
     budget) never prevents the other two from contributing for this
     query. Returns `[]` (never raises) on any failure - a provider's
     own `fetch_papers` already never raises, but this is the
-    agent-level isolation boundary regardless."""
+    agent-level isolation boundary regardless.
+
+    Sprint 5 ("failed external providers must be visible as failures,
+    not silently appearing healthy"): a REAL failure (an exception, or
+    `STATUS_ERROR`/`STATUS_BLOCKED`) is recorded into
+    `summary["provider_issues"]` - previously this only reached a
+    `logger.warning` line, invisible in the dict `main()` prints, sent
+    to Telegram, or recorded in the registry. `STATUS_UNAVAILABLE`
+    (not configured, or genuinely no results for this query) and a
+    budget exhaustion are NOT issues - both are honest, expected
+    non-answers, not something gone wrong."""
     research_cfg = _research_config(config)
     daily_limit = research_cfg.get("daily_api_limit_per_source", DEFAULT_DAILY_LIMIT_PER_SOURCE)
 
@@ -77,9 +91,16 @@ def _fetch_one_source(provider_module: Any, source_name: str, query: str, config
         result = provider_module.fetch_papers(query, config, logger)
     except Exception as exc:  # noqa: BLE001 - a provider failing must never stop the other two
         logger.warning("Research Scholar: %s fetch for %r raised: %s", source_name, query, exc)
+        summary["provider_issues"].append({"source": source_name, "query": query, "status": "exception", "detail": redact_secrets(str(exc))})
         return []
 
-    return list(result.data) if result.ok else []
+    if result.ok:
+        return list(result.data)
+
+    if result.status in (base.STATUS_ERROR, base.STATUS_BLOCKED):
+        summary["provider_issues"].append({"source": source_name, "query": query, "status": result.status, "detail": redact_secrets(result.error or "")})
+
+    return []
 
 
 def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | None = None) -> dict[str, Any]:
@@ -101,7 +122,8 @@ def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | Non
     min_score: float = research_cfg.get("min_evidence_score_for_hypothesis", DEFAULT_MIN_EVIDENCE_SCORE)
 
     summary = {
-        "queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0, "errors": [],
+        "queries_run": [], "papers_seen": 0, "papers_deduped": 0, "hypotheses_generated": 0, "hypotheses_tested": 0,
+        "errors": [], "provider_issues": [],
     }
 
     try:
@@ -125,7 +147,7 @@ def run_once(config: dict[str, Any], logger: logging.Logger, now: datetime | Non
 
             raw_papers = []
             for provider_module, source_name in providers:
-                raw_papers.extend(_fetch_one_source(provider_module, source_name, query, config, logger))
+                raw_papers.extend(_fetch_one_source(provider_module, source_name, query, config, logger, summary))
 
             summary["papers_seen"] += len(raw_papers)
             deduped = dedupe_papers(raw_papers)
@@ -196,6 +218,9 @@ def _send_telegram_summary(config: dict[str, Any], logger: logging.Logger, summa
     ]
     if summary["errors"]:
         lines.append(f"Errors: {len(summary['errors'])} (see logs)")
+    if summary["provider_issues"]:
+        sources = ", ".join(sorted({issue["source"] for issue in summary["provider_issues"]}))
+        lines.append(f"Provider issues: {len(summary['provider_issues'])} ({sources}) - see logs for detail")
     telegram_bot.send_report(token, chat_id, "\n".join(lines), 3500, logger)
 
 

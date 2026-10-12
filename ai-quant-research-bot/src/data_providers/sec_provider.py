@@ -576,7 +576,10 @@ def fetch_recent_filings(
     try:
         payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
-        return base.provider_error(SOURCE_13F, f"failed to fetch SEC submissions for CIK {cik}: {exc}")
+        detail = f"failed to fetch SEC submissions for CIK {cik}: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_13F, detail)
+        return base.provider_error(SOURCE_13F, detail)
 
     recent = payload.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
@@ -639,7 +642,10 @@ def fetch_company_tickers(
     try:
         payload = _do_fetch().json()
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
-        return base.provider_error(SOURCE_COMPANY_TICKERS, f"failed to fetch SEC company tickers: {exc}")
+        detail = f"failed to fetch SEC company tickers: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_COMPANY_TICKERS, detail)
+        return base.provider_error(SOURCE_COMPANY_TICKERS, detail)
 
     tickers = {
         str(entry["ticker"]).upper(): str(entry["cik_str"]).zfill(10)
@@ -690,6 +696,9 @@ def fetch_filing_document(cik: str, accession_number: str, filename: str, timeou
     try:
         content = _do_fetch().content
     except Exception as exc:  # noqa: BLE001
-        return base.provider_error(SOURCE_13F, f"failed to fetch filing document {filename}: {exc}")
+        detail = f"failed to fetch filing document {filename}: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_13F, detail)
+        return base.provider_error(SOURCE_13F, detail)
 
     return base.ok(SOURCE_13F, content, available_at=base.utcnow(), freshness="live")

@@ -6,12 +6,25 @@ Every provider result carries:
 
 - `source`: which provider/data source produced this (e.g. "sec_13f", "fred",
   "options_flow_mock").
-- `status`: one of `STATUS_OK` / `STATUS_UNAVAILABLE` / `STATUS_ERROR`. Only
-  `STATUS_OK` means `data` is meaningful - `STATUS_UNAVAILABLE` (not
-  configured, or the underlying source genuinely has nothing) and
-  `STATUS_ERROR` (a fetch/parse failure) both mean "don't trust `data`," and
-  are kept distinct so a caller/report can say *why* something is missing
-  instead of flattening every non-answer into the same blank.
+- `status`: one of `STATUS_OK` / `STATUS_UNAVAILABLE` / `STATUS_ERROR` /
+  `STATUS_BLOCKED`. Only `STATUS_OK` means `data` is meaningful -
+  `STATUS_UNAVAILABLE` (not configured, or the underlying source
+  genuinely has nothing), `STATUS_ERROR` (reached the source, but it
+  returned something wrong - a 4xx, a malformed payload), and
+  `STATUS_BLOCKED` (never reached a real answer at all - a connection
+  error, a timeout, or an exhausted-retries 5xx; see
+  `reliability.is_retryable_network_error()`, which every provider's
+  own `except` block now checks before choosing `provider_error()` vs
+  `provider_blocked()`) all mean "don't trust `data`," and are kept
+  distinct so a caller/report can say *why* something is missing
+  instead of flattening every non-answer into the same blank. This
+  distinction exists specifically so a one-click real-world activation
+  check (Sprint 5) can tell "this sandbox/network can't reach the
+  host" (BLOCKED) apart from "reached it, but something is genuinely
+  wrong" (FAIL) - the same BLOCKED-vs-FAIL philosophy
+  `execution/connectivity_preflight.py` already uses for the broker
+  connection (connection-establishment failure -> BLOCKED; a failure
+  after a connection was already established -> FAIL).
 - `data`: the payload, or `None` unless `status == STATUS_OK`.
 - `fetched_at`: when THIS process fetched/computed the result (wall-clock,
   informational).
@@ -41,6 +54,7 @@ from typing import Any, Generic, Protocol, TypeVar
 STATUS_OK = "ok"
 STATUS_UNAVAILABLE = "unavailable"
 STATUS_ERROR = "error"
+STATUS_BLOCKED = "blocked"
 
 T = TypeVar("T")
 
@@ -90,10 +104,24 @@ def unavailable(source: str, error: str | None = None) -> ProviderResult[Any]:
 
 
 def provider_error(source: str, error: str) -> ProviderResult[Any]:
-    """A fetch/parse actually failed (network, malformed response). Distinct
-    from `unavailable` so a caller/report can tell "nothing there" apart from
-    "something broke.\""""
+    """Reached the source, but it returned something wrong - a 4xx, a
+    malformed/unparseable response. Distinct from `unavailable` so a
+    caller/report can tell "nothing there" apart from "something
+    broke," and distinct from `provider_blocked` so a caller can tell
+    "it answered, just badly" apart from "never got an answer at
+    all.\""""
     return ProviderResult(source=source, status=STATUS_ERROR, fetched_at=utcnow(), error=error)
+
+
+def provider_blocked(source: str, error: str) -> ProviderResult[Any]:
+    """Never reached a real answer at all - a connection error, a
+    timeout, or an exhausted-retries 5xx (see
+    `reliability.is_retryable_network_error()`). Sprint 5's one-click
+    real-world activation check uses this to report `BLOCKED` rather
+    than a fabricated `FAIL` when this sandbox's (or a restrictive
+    corporate network's) egress policy is the reason nothing came
+    back, not a genuine problem with the provider's logic."""
+    return ProviderResult(source=source, status=STATUS_BLOCKED, fetched_at=utcnow(), error=error)
 
 
 class DataProvider(Protocol):

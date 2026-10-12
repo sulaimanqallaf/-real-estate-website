@@ -286,10 +286,11 @@ def test_sec_identity_configured_reflects_env(monkeypatch):
     assert sp.sec_identity_configured() is True
 
 
-def test_fetch_recent_filings_network_failure_returns_provider_error(monkeypatch):
+def test_fetch_recent_filings_network_failure_returns_provider_blocked(monkeypatch):
     """Retry disabled here (not what this test is about - see
     reliability.py's own tests) so a persistently-failing mock doesn't
-    pay the real multi-second backoff on every run."""
+    pay the real multi-second backoff on every run. Sprint 5: a
+    connection-level failure is BLOCKED, not FAIL."""
     from src import reliability
 
     monkeypatch.setattr(reliability, "retrying", lambda *a, **k: (lambda f: f))
@@ -299,7 +300,7 @@ def test_fetch_recent_filings_network_failure_returns_provider_error(monkeypatch
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("simulated outage")))
     result = sp.fetch_recent_filings("0001234567")
-    assert result.status == base.STATUS_ERROR
+    assert result.status == base.STATUS_BLOCKED
     assert "simulated outage" in result.error
 
 
@@ -413,7 +414,8 @@ def test_fetch_company_tickers_refetches_once_the_cache_is_stale(tmp_path, monke
     assert result.data == {"MSFT": "0000789019"}
 
 
-def test_fetch_company_tickers_returns_provider_error_on_network_failure(tmp_path, monkeypatch):
+def test_fetch_company_tickers_returns_provider_blocked_on_a_network_failure(tmp_path, monkeypatch):
+    """Sprint 5: a connection-level failure is BLOCKED, not FAIL."""
     monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
     import requests
 
@@ -423,7 +425,7 @@ def test_fetch_company_tickers_returns_provider_error_on_network_failure(tmp_pat
     monkeypatch.setattr(sp.reliability, "retrying", lambda *a, **k: (lambda f: f))
     monkeypatch.setattr(requests, "get", _raise)
     result = sp.fetch_company_tickers(_tickers_config(tmp_path), None)
-    assert result.status == base.STATUS_ERROR
+    assert result.status == base.STATUS_BLOCKED
 
 
 def test_resolve_cik_for_ticker_returns_the_matching_cik(tmp_path, monkeypatch):

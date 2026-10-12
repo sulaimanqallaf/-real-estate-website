@@ -97,7 +97,10 @@ def fetch_papers(
         response = _do_fetch()
         root = ElementTree.fromstring(response.content)
     except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary, same pattern as every other provider in this package
-        return base.provider_error(SOURCE_ARXIV, f"failed to fetch arXiv results for query {query!r}: {exc}")
+        detail = f"failed to fetch arXiv results for query {query!r}: {exc}"
+        if reliability.is_retryable_network_error(exc):
+            return base.provider_blocked(SOURCE_ARXIV, detail)
+        return base.provider_error(SOURCE_ARXIV, detail)
 
     entries = root.findall("atom:entry", _ATOM_NS)
     papers = [p for p in (_parse_entry(e) for e in entries) if p is not None]

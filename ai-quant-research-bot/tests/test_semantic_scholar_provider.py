@@ -105,7 +105,8 @@ def test_fetch_papers_handles_missing_external_ids_and_venue_honestly(monkeypatc
     assert paper.citation_count is None
 
 
-def test_fetch_papers_returns_provider_error_on_network_failure(monkeypatch):
+def test_fetch_papers_returns_provider_blocked_on_a_network_failure(monkeypatch):
+    """Sprint 5: a connection-level failure is BLOCKED, not FAIL."""
     import requests
 
     def _raise(*a, **k):
@@ -113,6 +114,24 @@ def test_fetch_papers_returns_provider_error_on_network_failure(monkeypatch):
 
     _disable_retry_backoff(monkeypatch)
     monkeypatch.setattr(requests, "get", _raise)
+    result = ss.fetch_papers("query", {}, LOGGER)
+    assert result.status == base.STATUS_BLOCKED
+
+
+def test_fetch_papers_returns_provider_error_on_a_non_network_failure(monkeypatch):
+    """A response was reached but couldn't be parsed - a real
+    application-level failure, so FAIL, not BLOCKED."""
+    import requests
+
+    class _BadJsonResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("not valid JSON")
+
+    _disable_retry_backoff(monkeypatch)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _BadJsonResponse())
     result = ss.fetch_papers("query", {}, LOGGER)
     assert result.status == base.STATUS_ERROR
 

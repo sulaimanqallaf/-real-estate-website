@@ -125,6 +125,10 @@ def format_fleet_report_text(report: dict[str, Any]) -> str:
                 lines.append(f"  Summary: {status['summary']}")
             if status.get("error"):
                 lines.append(f"  Error: {redact_secrets(status['error'])}")
+            provider_issues = (status.get("extra") or {}).get("provider_issues") or []
+            if provider_issues:
+                sources = ", ".join(sorted({issue.get("source", "?") for issue in provider_issues}))
+                lines.append(f"  Provider issues this run: {len(provider_issues)} ({sources})")
         if hb["never_started"]:
             lines.append("  Heartbeat: never started")
         elif hb["stale"]:
