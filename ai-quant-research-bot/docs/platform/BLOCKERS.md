@@ -166,3 +166,19 @@ what's assumed here, the affected provider degrades to returning fewer/no
 results (never raises, never fabricates a malformed `Paper`) rather than
 visibly erroring - so the very first real run's output should be read by
 a human, not assumed correct.
+
+## 11. Real-data verification of the News Agent's ticker->CIK resolver (Sprint 4, Task P3)
+**Blocks**: confirming `sec_provider.fetch_company_tickers()`/
+`resolve_cik_for_ticker()` (added this sprint for the News Agent) parses
+SEC's real `company_tickers.json` correctly - `curl` directly against
+`https://www.sec.gov/files/company_tickers.json` returns the same `403
+Forbidden organization policy` block as every other external host (see
+items 8/10 above). This is narrower than items 8/10: the News Agent's
+OTHER two calls (`fetch_recent_filings()`, `macro_provider.
+fetch_series_latest()`) are pre-existing, already-used code from earlier
+sprints, not new unverified contracts - only the ticker->CIK lookup is new.
+**What you'd need to do**: on a machine with real network access, set
+`SEC_IDENTITY` in `.env` (see `.env.example` - required by SEC's own
+fair-access policy for every sec.gov host) and run
+`python -m src.agents.news_agent`; check that real tickers resolve to
+correct, real CIKs.

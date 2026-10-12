@@ -26,6 +26,7 @@ in this codebase - places an order; this only ever reads public filings.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import xml.etree.ElementTree as ET
@@ -38,10 +39,18 @@ from . import base
 
 SOURCE_13F = "sec_13f"
 SOURCE_FORM4 = "sec_form4"
+SOURCE_COMPANY_TICKERS = "sec_company_tickers"
 
 _LOGGER = logging.getLogger(__name__)
 
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+# Free, no key - SEC's own ticker->CIK map, used by the News Agent
+# (Sprint 4, Priority 3) to resolve a watchlist ticker's CIK before
+# fetching its 8-K/10-K filings via fetch_recent_filings() above. Same
+# SEC_IDENTITY gating as every other call to a sec.gov host in this module.
+SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+_COMPANY_TICKERS_CACHE_FILENAME = "sec_company_tickers_cache.json"
+_COMPANY_TICKERS_DEFAULT_MAX_AGE_HOURS = 24
 SEC_ARCHIVES_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/index.json"
 SEC_ARCHIVES_FILE_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{filename}"
 
@@ -586,6 +595,77 @@ def fetch_recent_filings(
         if form in form_types
     ]
     return base.ok(SOURCE_13F, filings, available_at=base.utcnow(), freshness="live")
+
+
+def _company_tickers_cache_path(config: dict[str, Any]) -> Any:
+    from ..utils import resolve_path
+
+    journal_dir = config.get("data", {}).get("journal_dir", "data/journal")
+    return resolve_path(journal_dir) / _COMPANY_TICKERS_CACHE_FILENAME
+
+
+def fetch_company_tickers(
+    config: dict[str, Any], logger: logging.Logger, timeout: int = 15, max_age_hours: float = _COMPANY_TICKERS_DEFAULT_MAX_AGE_HOURS
+) -> base.ProviderResult[dict[str, str]]:
+    """Ticker (uppercase) -> zero-padded CIK string, from SEC's own free
+    `company_tickers.json` - cached locally for `max_age_hours` (default
+    24h) since it's a large, slowly-changing file (~tens of thousands
+    of entries); never re-fetched more than once per day by default.
+    Same `SEC_IDENTITY` gating as every other call to a sec.gov host in
+    this module - never raises, never fabricates a mapping."""
+    cache_path = _company_tickers_cache_path(config)
+    now = base.utcnow()
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(cached["cached_at"])
+            if (now - cached_at).total_seconds() < max_age_hours * 3600:
+                return base.ok(SOURCE_COMPANY_TICKERS, cached["tickers"], available_at=cached_at, freshness="cached")
+        except (OSError, ValueError, KeyError):
+            pass  # fall through to a real fetch - a corrupt cache is never treated as "no data," just refreshed
+
+    headers = _identity_headers()
+    if headers is None:
+        return base.unavailable(SOURCE_COMPANY_TICKERS, "SEC_IDENTITY not configured (see .env.example)")
+
+    import requests
+
+    @reliability.retrying(_LOGGER)
+    def _do_fetch() -> requests.Response:
+        resp = requests.get(SEC_COMPANY_TICKERS_URL, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp
+
+    try:
+        payload = _do_fetch().json()
+    except Exception as exc:  # noqa: BLE001 - network/parse isolation boundary
+        return base.provider_error(SOURCE_COMPANY_TICKERS, f"failed to fetch SEC company tickers: {exc}")
+
+    tickers = {
+        str(entry["ticker"]).upper(): str(entry["cik_str"]).zfill(10)
+        for entry in (payload.values() if isinstance(payload, dict) else payload)
+        if isinstance(entry, dict) and entry.get("ticker") and entry.get("cik_str") is not None
+    }
+    if not tickers:
+        return base.unavailable(SOURCE_COMPANY_TICKERS, "SEC company_tickers.json returned no usable entries")
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({"cached_at": now.isoformat(), "tickers": tickers}), encoding="utf-8")
+    except OSError:
+        pass  # a caching failure must never prevent returning the real data just fetched
+
+    return base.ok(SOURCE_COMPANY_TICKERS, tickers, available_at=now, freshness="live")
+
+
+def resolve_cik_for_ticker(ticker: str, config: dict[str, Any], logger: logging.Logger, timeout: int = 15) -> str | None:
+    """Convenience wrapper over `fetch_company_tickers()` for one
+    ticker. Returns `None` (never a fabricated CIK) when the ticker
+    isn't found or the lookup itself is unavailable/failed."""
+    result = fetch_company_tickers(config, logger, timeout=timeout)
+    if not result.ok:
+        return None
+    return result.data.get(ticker.upper())
 
 
 def fetch_filing_document(cik: str, accession_number: str, filename: str, timeout: int = 10) -> base.ProviderResult[bytes]:

@@ -406,6 +406,15 @@ research:
     min_evidence_score_for_hypothesis: 0.5
     daily_api_limit_per_source: 20   # per (openalex|arxiv|semantic_scholar) - see src/agents/budget.py
 
+  # Sprint 4 "News intelligence" milestone (Priority 3) - the News
+  # Agent (src/agents/news_agent.py). "Financial news" is scoped to
+  # official SEC 8-K material-event filings - see README "News Agent"
+  # for why (no scraping, no new signup-required service, even free).
+  news_agent:
+    watchlist: [AAPL, MSFT, SPY]
+    fred_series: [FEDFUNDS, CPIAUCSL, UNRATE, DGS10]
+    daily_api_limit_per_source: 50   # per (sec_filings|fred) - see src/agents/budget.py
+
 # Point-in-time ML dataset builder output (src/dataset_builder.py) - Parquet
 # files, never used to train a model in this phase. See README "ML dataset
 # design".

@@ -2843,6 +2843,48 @@ of those hosts is blocked from this project's own development sandbox
 this on a machine with real network access to get real evidence of
 whether the parsing logic matches reality.
 
+## News Agent (Sprint 4, Priority 3) - `src/agents/news_agent.py`
+
+```bash
+python -m src.agents.news_agent
+```
+
+An independent agent that reviews three legitimate, free, official
+sources for each watchlist ticker and economic series
+(`config["research"]["news_agent"]`), reports only what's genuinely
+NEW since the last run, and **never places, suggests, or triggers a
+trade** - it has no import of `src.execution` anywhere, and never
+writes to `decision_ledger.py`/`paper_trades.csv`.
+
+1. **SEC filings** - 8-K (material corporate events) and Form 4
+   (insider transactions), via `data_providers.sec_provider.
+   fetch_recent_filings()`, resolved from ticker to CIK using SEC's
+   own free `company_tickers.json` (`resolve_cik_for_ticker()`,
+   locally cached for 24h since it's a large, slowly-changing file).
+2. **Financial news** - scoped HONESTLY to those same SEC 8-K
+   filings. An 8-K is literally how material corporate news gets
+   officially disclosed; this agent does not scrape any site and does
+   not sign up for a news API, even a free-tier one - both were ruled
+   out on purpose (scraping risks the "legitimate sources" this
+   milestone explicitly asked for; a new signup is a new service this
+   sprint was told not to purchase, regardless of price).
+3. **Economic events** - the latest observation for a configured set
+   of FRED series (Fed funds rate, CPI, unemployment, 10Y Treasury) via
+   `data_providers.macro_provider.fetch_series_latest()` - the same
+   free, official source this project has used since an earlier phase.
+
+**Dedup against a persistent "seen" record**
+(`data/journal/agents/news_agent_seen.json` - every SEC accession
+number and FRED `(series, observation_date)` pair ever reported)
+means the daily Telegram briefing only ever covers what's actually
+new, never repeats itself. Each source is isolated and
+budget-gated (`src.agents.budget`, same daily-cap pattern as the
+Research Scholar Agent) so one ticker/series failing, or a source's
+free-tier rate limit being reached, never stops the rest. Progress is
+checkpointed per watchlist ticker for crash recovery. Sends one
+Telegram briefing per cycle, only when something new happened, with
+`heartbeat`/registry status independent of every other agent.
+
 ## Multi-Agent Research Layer (Shadow Mode) - `src/intelligence/`
 
 GitHub Issue #1 includes a comment proposing selective integration of

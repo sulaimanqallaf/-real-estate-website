@@ -3,6 +3,7 @@ parsing/change classification and Form 4 insider transaction classification,
 with a focus on point-in-time correctness (filing date, not report period or
 transaction date, controls `available_at`)."""
 
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -331,3 +332,130 @@ def test_fetch_recent_filings_recovers_after_a_transient_failure(monkeypatch):
     assert result.status == base.STATUS_OK
     assert calls["count"] == 2
     assert result.data[0]["form"] == "13F-HR"
+
+
+# --- fetch_company_tickers / resolve_cik_for_ticker (Sprint 4, News Agent) -----------------
+
+
+def _tickers_config(tmp_path):
+    return {"data": {"journal_dir": str(tmp_path / "journal")}}
+
+
+def test_fetch_company_tickers_unavailable_without_identity(tmp_path, monkeypatch):
+    monkeypatch.delenv("SEC_IDENTITY", raising=False)
+    result = sp.fetch_company_tickers(_tickers_config(tmp_path), None)
+    assert result.status == base.STATUS_UNAVAILABLE
+
+
+def test_fetch_company_tickers_parses_a_realistic_response_and_caches_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"0": {"ticker": "aapl", "cik_str": 320193}, "1": {"ticker": "MSFT", "cik_str": "789019"}}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse())
+
+    config = _tickers_config(tmp_path)
+    result = sp.fetch_company_tickers(config, None)
+
+    assert result.ok
+    assert result.data["AAPL"] == "0000320193"
+    assert result.data["MSFT"] == "0000789019"
+
+    cache_path = Path(config["data"]["journal_dir"]) / "sec_company_tickers_cache.json"
+    assert cache_path.exists()
+
+
+def test_fetch_company_tickers_uses_the_cache_within_max_age(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    config = _tickers_config(tmp_path)
+    cache_path = Path(config["data"]["journal_dir"]) / "sec_company_tickers_cache.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({"cached_at": base.utcnow().isoformat(), "tickers": {"AAPL": "0000320193"}}), encoding="utf-8")
+
+    def _should_not_be_called(*a, **k):
+        raise AssertionError("requests.get must not be called while the cache is fresh")
+
+    monkeypatch.setattr(requests, "get", _should_not_be_called)
+    result = sp.fetch_company_tickers(config, None)
+    assert result.ok
+    assert result.data == {"AAPL": "0000320193"}
+
+
+def test_fetch_company_tickers_refetches_once_the_cache_is_stale(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    config = _tickers_config(tmp_path)
+    cache_path = Path(config["data"]["journal_dir"]) / "sec_company_tickers_cache.json"
+    cache_path.parent.mkdir(parents=True)
+    stale_time = (base.utcnow() - timedelta(hours=48)).isoformat()
+    cache_path.write_text(json.dumps({"cached_at": stale_time, "tickers": {"AAPL": "0000320193"}}), encoding="utf-8")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"0": {"ticker": "MSFT", "cik_str": 789019}}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse())
+    result = sp.fetch_company_tickers(config, None)
+    assert result.data == {"MSFT": "0000789019"}
+
+
+def test_fetch_company_tickers_returns_provider_error_on_network_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    def _raise(*a, **k):
+        raise requests.exceptions.ConnectionError("simulated failure")
+
+    monkeypatch.setattr(sp.reliability, "retrying", lambda *a, **k: (lambda f: f))
+    monkeypatch.setattr(requests, "get", _raise)
+    result = sp.fetch_company_tickers(_tickers_config(tmp_path), None)
+    assert result.status == base.STATUS_ERROR
+
+
+def test_resolve_cik_for_ticker_returns_the_matching_cik(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"0": {"ticker": "AAPL", "cik_str": 320193}}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse())
+    assert sp.resolve_cik_for_ticker("aapl", _tickers_config(tmp_path), None) == "0000320193"
+
+
+def test_resolve_cik_for_ticker_returns_none_when_not_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEC_IDENTITY", "Test Co test@example.com")
+    import requests
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"0": {"ticker": "AAPL", "cik_str": 320193}}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse())
+    assert sp.resolve_cik_for_ticker("ZZZZ", _tickers_config(tmp_path), None) is None
+
+
+def test_resolve_cik_for_ticker_returns_none_when_unavailable(tmp_path, monkeypatch):
+    monkeypatch.delenv("SEC_IDENTITY", raising=False)
+    assert sp.resolve_cik_for_ticker("AAPL", _tickers_config(tmp_path), None) is None
