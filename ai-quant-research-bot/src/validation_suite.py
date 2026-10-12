@@ -202,10 +202,14 @@ def run_validation_suite(config: dict[str, Any], logger: logging.Logger, run_rec
     return report
 
 
-def format_suite_report_text(report: SuiteReport) -> str:
+def format_suite_report_text(report: SuiteReport, title: str = "ONE-CLICK REAL-WORLD VALIDATION SUITE (Sprint 4, Priority 1)") -> str:
+    """`title` is overridable (Sprint 5's `activation_suite.py` reuses
+    this exact formatter wholesale for its own, larger report under a
+    different heading) - the formatting logic itself is generic over
+    any `SuiteReport`, regardless of which checks produced its lines."""
     lines = [
         "=" * 72,
-        "ONE-CLICK REAL-WORLD VALIDATION SUITE (Sprint 4, Priority 1)",
+        title,
         "=" * 72,
     ]
     current_section = None

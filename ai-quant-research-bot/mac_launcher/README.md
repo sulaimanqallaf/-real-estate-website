@@ -1,8 +1,8 @@
 # Dashboard Launcher (no-Terminal-copy-pasting UX)
 
-Five double-clickable scripts, meant to replace ever having to copy a
+Seven double-clickable scripts, meant to replace ever having to copy a
 Terminal command out of a chat again for ordinary day-to-day dashboard
-use:
+and agent-fleet use:
 
 | File | What it does |
 |---|---|
@@ -10,7 +10,9 @@ use:
 | `Stop Dashboard.command` | Stops both, and only both - nothing else on your Mac. |
 | `Dashboard Status.command` | Shows whether the dashboard is running, whether it's actually reachable, (read-only) whether the separate Mac launchd research scheduler is loaded, and - Sprint 3 - a full reliability/freshness summary (position_monitor heartbeat, circuit breaker, cached-data staleness for both the yfinance and Alpaca/IEX caches) via `python -m src.execution.run_health`, so you never have to open Terminal yourself just to check this. |
 | `Run Real Validation.command` | Sprint 4, Priority 1: one guided run of `src.validation_suite` - real-market strategy validation, an Alpaca Basic/IEX data check, and a read-only IBKR Paper connectivity preflight - reported as PASS/FAIL/SKIPPED/BLOCKED with real evidence. Never asks for a credential (those come only from your own `.env`); never places an order; never touches the scheduler. |
-| `Check for Updates.command` | Checks GitHub for new commits on your current branch; only applies them if you explicitly type `y`, after creating a rollback tag. |
+| `Run Full Activation Check.command` | Sprint 5: everything `Run Real Validation.command` does, PLUS a real OpenAlex/arXiv/Semantic Scholar smoke test (recording one real sample paper into permanent research memory if any provider returns one), a real SEC ticker->CIK + FRED check, and one real Telegram test message if already configured - still only real PASS/FAIL/BLOCKED/SKIPPED, never a fabricated success. |
+| `Agent Control Center.command` | Sprint 5: a menu for the autonomous research agent fleet (Research Scholar, News Agent, Strategy Lab, Agent Fleet Health) - show status, run any agent once right now, install/uninstall its launchd schedule (always asks `[y/N]` per job, never automatic), tail a log, or roll back to the last `Check for Updates.command` backup point. |
+| `Check for Updates.command` | Checks GitHub for new commits on your current branch; only applies them if you explicitly type `y`, after creating a rollback tag. Already covers Sprint 5's "safely prepare and update an isolated local copy" ask in full - see "What it never does" below. |
 
 ## Honest limitations - read this before relying on it
 
@@ -70,6 +72,25 @@ script is the natural place to point at the releases API instead.
   you typing `y` first; it always creates a timestamped git tag right
   before pulling, so rollback is always exactly one `git reset --hard
   <that tag>` away (the exact command is printed for you at the time).
+- `Run Full Activation Check.command` has the exact same security
+  posture as `Run Real Validation.command` above, for every credential
+  type it touches (`SEC_IDENTITY`/`FRED_API_KEY`/`TELEGRAM_*` added
+  this sprint, same as `ALPACA_*`/`IBKR_*` already covered) - `.env`
+  only, never typed into this script, every printed/saved line
+  redacted. The one real write anywhere in this script is a single
+  sample-paper row in `data/research/paper_memory.db`; the one real
+  network side effect is a single Telegram test message, sent only if
+  you already have `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` configured.
+- `Agent Control Center.command` can only install/uninstall a launchd
+  job for one of the four NEW agents this project introduced (Research
+  Scholar, News Agent, Strategy Lab, Agent Fleet Health) -
+  `src/agents/launchd_installer.py`'s `RESERVED_EXISTING_LABELS` makes
+  it structurally impossible for this script to install, uninstall, or
+  even query any of the 7 pre-existing `com.aiquantresearchbot.*` jobs,
+  and every install/uninstall still requires its own separate `[y/N]`
+  confirmation per job. Its rollback option refuses outright if your
+  working tree has uncommitted changes, rather than silently
+  discarding them.
 
 ## Verified, not just written
 
@@ -107,6 +128,25 @@ processes, across multiple full cycles:
   kill switch) correctly reported real `PASS`. On your Mac, with real
   network access, the strategy-validation and Alpaca sections should
   turn into real `PASS`/`FAIL` evidence instead of `BLOCKED`/`SKIPPED`.
+- `Run Full Activation Check.command` was likewise run for real
+  (non-interactively) in the sandbox that built it, with a temporary
+  `.venv` symlink pointing at the system interpreter (never committed -
+  `.venv/` is gitignored). Every network-touching check correctly
+  reported `BLOCKED` with a REAL caught exception (a `ProxyError`/
+  `ConnectionError` from this sandbox's own egress policy, not a
+  simulated one) - OpenAlex, arXiv, and Semantic Scholar all three -
+  confirming Sprint 5's new BLOCKED-vs-FAIL classification
+  (`data_providers.base.provider_blocked()`) behaves correctly against
+  a genuine failure, not just a mocked one in a unit test. SEC/FRED/
+  Telegram correctly reported `SKIPPED` (not configured); the kill
+  switch again correctly reported real `PASS`. Summary line that run
+  actually printed: `1 PASS, 0 FAIL, 5 SKIPPED, 7 BLOCKED`.
+- `Agent Control Center.command` was run for real (non-interactively):
+  option 1 printed a genuine fleet report (every agent correctly
+  "never run," budgets at 0/N) via the real `src.agents.health_report`
+  module; option 5 printed the real `launchd_installer.py list`
+  output (`unknown (not macOS...)` for every job - correct off a Linux
+  sandbox) and correctly took no action on a declined `[y/N]` prompt.
 
 ## Uninstalling
 

@@ -2185,6 +2185,86 @@ deliberate: Part J's reconciliation needs to be able to detect an
 higher-risk step, wired only after every read path has been verified
 against a real account.
 
+### Real-world activation suite (Sprint 5)
+
+```bash
+python -m src.activation_suite
+# or, from the Mac launcher, no Terminal needed:
+#   mac_launcher/Run Full Activation Check.command
+```
+
+Everything the Sprint 4 validation suite above already does, reused
+unmodified (not re-implemented), PLUS three checks that only exist
+this sprint - still the same honest `PASS`/`FAIL`/`SKIPPED`/`BLOCKED`
+vocabulary, still never a fabricated success:
+
+- **Academic providers** - a real OpenAlex/arXiv/Semantic Scholar
+  smoke-test query, classified by what each provider's real
+  `ProviderResult` actually says (`BLOCKED` for a connection/timeout
+  failure, `FAIL` for a reached-but-wrong response, `SKIPPED` for no
+  results). If at least one provider returns a real paper, this check
+  ALSO records one deduplicated sample into
+  `research.paper_memory`'s permanent SQLite store and reads it back -
+  the concrete proof that a real paper enters permanent research
+  memory, not just a provider-reachability ping. This is the one
+  check in the whole suite with a real (tiny, intentional) side
+  effect; every other check is read-only.
+- **SEC ticker->CIK + FRED** - a real `fetch_company_tickers()` call
+  (with a sanity check that AAPL's real CIK actually resolves out of
+  the fetched map - a fetch that succeeds but can't find AAPL is
+  itself a `FAIL`, not a quiet pass) and a real FRED Fed-funds-rate
+  fetch. Both `SKIPPED` outright when `SEC_IDENTITY`/`FRED_API_KEY`
+  aren't set.
+- **Telegram delivery** - sends ONE real, clearly-labeled test message
+  when `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are already configured;
+  `PASS`/`FAIL` on whether it actually sent, `SKIPPED` otherwise.
+
+Saves the full report to `data/reports/activation_suite_<timestamp>.txt`.
+Same security posture as the Sprint 4 suite: never prompts for,
+prints, or logs a credential; every line is redacted before being
+printed or saved; never places an order; never touches
+`autonomous_paper.*`/`execution.mode`/the Mac launchd scheduler.
+
+**Verified against this sandbox's own real network block, not a
+mock**: running this command here has every network-touching check
+correctly report `BLOCKED` with a genuine caught `ProxyError`/
+`ConnectionError` (this sandbox's own egress policy refusing OpenAlex/
+arXiv/Semantic Scholar), confirming the BLOCKED-vs-FAIL classification
+(`data_providers.base.provider_blocked()`) behaves correctly against
+a real failure - see `mac_launcher/README.md`'s "Verified, not just
+written" section for the exact output.
+
+### Agent Control Center (Sprint 5) - `mac_launcher/Agent Control Center.command`
+
+A menu-driven, no-Terminal-typing interface for the autonomous agent
+fleet (Research Scholar, News Agent, Strategy Lab, Agent Fleet
+Health):
+
+1. Show fleet status (`python -m src.agents.health_report`).
+2. Run any one agent right now, in the foreground, for a single cycle.
+3. Install or uninstall that agent's launchd schedule - **always
+   opt-in**: a separate `[y/N]` confirmation per job, never a blanket
+   "schedule everything," and never automatic (see `src/agents/
+   launchd_installer.py` below).
+4. Tail any agent's log file.
+5. Roll back to the git tag `mac_launcher/Check for Updates.command`
+   already creates before every update it applies - refuses outright
+   if your working tree has uncommitted changes, rather than silently
+   discarding them.
+
+`src/agents/launchd_installer.py` is the first code in this project
+that actually writes a `.plist` and calls `launchctl load`/`unload` -
+every prior sprint's launchd setup was README-documented copy-paste
+prose only. It is **structurally** incapable of touching any of the 7
+pre-existing `com.aiquantresearchbot.*` jobs: `RESERVED_EXISTING_LABELS`
+is checked by every function that takes a label, and the four NEW
+labels it can manage (`...researchscholar`/`...newsagent`/
+`...strategylab`/`...agentfleethealth`) are asserted disjoint from that
+set at import time. Every generated `.plist`'s `ProgramArguments` is
+just `[python, -m, <module>]` - the agent itself reads `.env` via the
+same `load_env()` every other command uses; no credential is ever
+written into a `.plist` file.
+
 ### DRY_RUN order review - the next step before any real order is ever placed
 
 With `execution.mode: DRY_RUN` (the default), every daily `python -m

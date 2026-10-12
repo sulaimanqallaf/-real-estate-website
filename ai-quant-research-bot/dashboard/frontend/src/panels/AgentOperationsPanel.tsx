@@ -29,6 +29,7 @@ function AgentRow({ agent }: { agent: AgentOperationEntry }) {
   const status = agent.status;
   const statusLabel = status ? status.status : "UNKNOWN";
   const heartbeatLabel = heartbeatText(agent);
+  const providerIssues = providerIssuesText(status?.extra);
 
   return (
     <>
@@ -55,12 +56,33 @@ function AgentRow({ agent }: { agent: AgentOperationEntry }) {
           <span className="panel-row-value status-unconfigured">{status.error}</span>
         </div>
       )}
+      {providerIssues && (
+        <div className="panel-row">
+          <span className="panel-row-label">Provider issues (last run)</span>
+          <span className="panel-row-value status-unconfigured">{providerIssues}</span>
+        </div>
+      )}
       <div className="panel-row">
         <span className="panel-row-label">Heartbeat</span>
         <span className="panel-row-value">{heartbeatLabel}</span>
       </div>
     </>
   );
+}
+
+// Sprint 5: a real provider failure (exception/STATUS_ERROR/STATUS_BLOCKED)
+// recorded by research_scholar.py/news_agent.py into their own run's
+// `extra.provider_issues` (see src/agents/health_report.py's identical
+// surfacing in its text report) - an honest non-answer (STATUS_UNAVAILABLE,
+// or a budget cap) is never recorded there, so any non-empty list here is a
+// real issue worth a human's attention, not noise.
+function providerIssuesText(extra: Record<string, unknown> | undefined): string | null {
+  const issues = extra?.provider_issues;
+  if (!Array.isArray(issues) || issues.length === 0) return null;
+  const sources = Array.from(
+    new Set(issues.map((issue) => (typeof issue === "object" && issue !== null ? String((issue as Record<string, unknown>).source ?? "?") : "?"))),
+  ).sort();
+  return `${issues.length} (${sources.join(", ")})`;
 }
 
 function heartbeatText(agent: AgentOperationEntry): string {
