@@ -2146,6 +2146,34 @@ Never places, cancels, or modifies an order. Run it after any change
 to the connection/reconciliation/circuit-breaker code, and again
 before ever considering flipping `autonomous_paper.enabled`.
 
+### One-click real-world validation suite (Sprint 4, Priority 1)
+
+```bash
+python -m src.validation_suite
+# or, from the Mac launcher, no Terminal needed:
+#   mac_launcher/Run Real Validation.command
+```
+
+Runs the strategy validation report (real yfinance history), the
+Alpaca/IEX data check, and the IBKR Paper connectivity preflight above
+in one command, reporting every individual line (per strategy, per
+symbol, per preflight step) in the same four-word vocabulary:
+`PASS`/`FAIL`/`SKIPPED`/`BLOCKED`. `SKIPPED` means a check wasn't
+exercised by design (e.g. no Alpaca credentials set); `BLOCKED` means
+it couldn't get real data/a real connection to check against at all
+(e.g. no network, or no TWS/Gateway running) - neither is fabricated
+into a fake pass. Saves the full report to
+`data/reports/validation_suite_<timestamp>.txt`.
+
+**Security**: never prompts for, prints, or logs a credential -
+credentials come only from your own `.env`; every line of output is
+passed through `utils.redact_secrets()` before being printed or
+saved. Never places an order, never touches
+`autonomous_paper.*`/`execution.mode`, never touches the Mac launchd
+research scheduler. The interactive reconnect-handling step is off by
+default here - pass `--full-reconnect-check` (or answer "y" in the
+Mac launcher prompt) to also exercise it.
+
 `positions()` uses `reqPositions()`; `open_orders()`/`get_order()` use
 `reqAllOpenOrders()` - scoped to everything TWS reports for your login,
 not only orders placed through this API session, so a human-placed TWS

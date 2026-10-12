@@ -1,6 +1,6 @@
 # Dashboard Launcher (no-Terminal-copy-pasting UX)
 
-Four double-clickable scripts, meant to replace ever having to copy a
+Five double-clickable scripts, meant to replace ever having to copy a
 Terminal command out of a chat again for ordinary day-to-day dashboard
 use:
 
@@ -9,6 +9,7 @@ use:
 | `Start Dashboard.command` | Checks dependencies, installs/updates what's needed, starts the dashboard backend + frontend, opens your browser to it. |
 | `Stop Dashboard.command` | Stops both, and only both - nothing else on your Mac. |
 | `Dashboard Status.command` | Shows whether the dashboard is running, whether it's actually reachable, (read-only) whether the separate Mac launchd research scheduler is loaded, and - Sprint 3 - a full reliability/freshness summary (position_monitor heartbeat, circuit breaker, cached-data staleness for both the yfinance and Alpaca/IEX caches) via `python -m src.execution.run_health`, so you never have to open Terminal yourself just to check this. |
+| `Run Real Validation.command` | Sprint 4, Priority 1: one guided run of `src.validation_suite` - real-market strategy validation, an Alpaca Basic/IEX data check, and a read-only IBKR Paper connectivity preflight - reported as PASS/FAIL/SKIPPED/BLOCKED with real evidence. Never asks for a credential (those come only from your own `.env`); never places an order; never touches the scheduler. |
 | `Check for Updates.command` | Checks GitHub for new commits on your current branch; only applies them if you explicitly type `y`, after creating a rollback tag. |
 
 ## Honest limitations - read this before relying on it
@@ -53,8 +54,17 @@ script is the natural place to point at the releases API instead.
 - Never runs `src.main`, never calls an LLM provider, never places an
   order - it only ever starts the read-only dashboard backend/frontend.
 - Never touches `.env`, `config/settings.yaml`, or anything under
-  `data/` - dependency installs go into `dashboard/backend/.venv/` and
-  `dashboard/frontend/node_modules/` only, both already gitignored.
+  `data/` (except `Run Real Validation.command`, which writes ONLY a
+  dated report file under `data/reports/` - never `.env` or
+  `config/settings.yaml`) - dependency installs go into
+  `dashboard/backend/.venv/` and `dashboard/frontend/node_modules/`
+  only, both already gitignored.
+- `Run Real Validation.command` never prompts for, displays, or logs a
+  credential - `ALPACA_API_KEY_ID`/`ALPACA_API_SECRET_KEY`/`IBKR_*`
+  values are read only from your own `.env`, never typed into this
+  script's prompt, and every line it prints or saves is passed through
+  `utils.redact_secrets()` first. It never places, cancels, or modifies
+  an order, and never changes `autonomous_paper.*`/`execution.mode`.
 - `Check for Updates.command` never discards uncommitted work (stashes
   it first, recoverable with `git stash pop`) and never pulls without
   you typing `y` first; it always creates a timestamped git tag right
@@ -88,6 +98,15 @@ processes, across multiple full cycles:
   this sprint's new `requirements.txt` entries into it) and correctly
   printed the full `run_health` report, including the new Alpaca/IEX
   cache-freshness line, with no errors.
+- `Run Real Validation.command` was run for real (non-interactively,
+  answering "no" to the reconnect-check prompt) in the environment that
+  built this - no real market/broker network access there, so every
+  check correctly reported `BLOCKED` (yfinance/IBKR unreachable) or
+  `SKIPPED` (no Alpaca credentials set) rather than crashing or
+  fabricating a `PASS`; the one check needing no network at all (the
+  kill switch) correctly reported real `PASS`. On your Mac, with real
+  network access, the strategy-validation and Alpaca sections should
+  turn into real `PASS`/`FAIL` evidence instead of `BLOCKED`/`SKIPPED`.
 
 ## Uninstalling
 
